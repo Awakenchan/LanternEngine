@@ -45,6 +45,10 @@ when it works on one PC.
 
 ## Tests and checks
 
+Brazilian Portuguese can be selected as the game's language without a region-unlock
+patch. It uses the Brazilian text and voice files from the player's own dump; see
+[Brazilian Portuguese game language](docs/BRAZILIAN_PORTUGUESE.md) for behavior and checks.
+
 - `build.sh --test`, and the GPU library's tests (`ninja -C out/gpu pc-input-test ...`).
 - `tools/validate_pipelines.sh`: the engine on Mesa's software Vulkan driver with the validation
   layer, as each GPU family (`BB_VK_HIDE`).

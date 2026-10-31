@@ -15,13 +15,32 @@ static void Require(bool condition, string message)
 Require(Localization.Language == "en" && Localization.T("Settings") == "Settings", "English must be the default");
 Localization.Initialize("unknown");
 Require(Localization.Language == "en" && Localization.T("Settings") == "Settings", "Unknown languages must fall back to English");
-var language = args.FirstOrDefault() ?? "en";
+var language = args.FirstOrDefault(a => !a.StartsWith("--")) ?? "en";
 Require(Localization.Languages.Any(l => l.Code == language), "Not a launcher language: " + language);
 Localization.Initialize(language);
 var selected = Localization.Catalog(language);
 Require(Localization.Language == language, "Language selection failed");
 Require(Localization.T("Settings") == (selected?.GetValueOrDefault("Settings") ?? "Settings"), "Language selection failed");
 Require(Localization.T("untranslated fallback") == "untranslated fallback", "Missing-key fallback failed");
+
+static void CheckGameLanguages()
+{
+    Require(Choices.GameLanguages.Select(c => c.Value).SequenceEqual(new[] { "1", "8", "0", "2", "3", "4", "5", "17" }), "Game language values changed");
+    var brazilian = Choices.GameLanguages.Single(c => c.Value == "17");
+    Require(brazilian.Label == "Português (Brasil)", "Brazilian Portuguese must retain its native name");
+    var settings = new LauncherSettings();
+    settings.Set("language", "1");
+    Require(settings.Str("language") == "1", "English game language settings changed");
+    settings.Set("language", brazilian.Value);
+    Require(settings.Str("language") == "17", "Game language settings lost the PS4 language code");
+}
+
+if (args.Contains("--game-languages-only"))
+{
+    CheckGameLanguages();
+    Console.WriteLine($"PASS {language}: game language choices, Brazilian Portuguese label and settings value; no game started.");
+    return;
+}
 
 // Every language file, whichever language this run selected: the list and the embedded files agree,
 // each parses, holds only strings zh-CN (the reference for the code's strings) has, and keeps their
@@ -66,7 +85,7 @@ Require(Localization.F($"Unknown format {value:0.0}") == "Unknown format 12,5", 
 Require(Localization.F($"There is already a profile called {"测试玩家"}.").Contains("测试玩家"), "Dynamic Unicode text was lost");
 
 Require(Choices.MenuLanguages.Count(c => c.Value == "zh_CN") == 1, "Chinese menu code missing or duplicated");
-Require(Choices.GameLanguages.Select(c => c.Value).SequenceEqual(new[] { "1", "8", "0", "2", "3", "4", "5" }), "Game language values changed");
+CheckGameLanguages();
 Require(InputMap.SdlKeyName(Key.Left) == "Left" && InputMap.SdlKeyName(Key.Return) == "Return", "Keyboard protocol names were translated");
 Require(InputMap.Controls.Single(c => c.Name == "switch_right").Default == "Right", "Default keyboard binding was translated");
 Require(PadMap.InputFor(InputMap.Controls.Single(c => c.Name == "switch_item")) == "down", "Controller lookup labels changed");

@@ -195,6 +195,8 @@ if [[ ${1:-} == --test ]]; then
     out/sys-clock-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_file.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-file-test
     out/sys-file-test
+    "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_game_language.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/game-language-test
+    out/game-language-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_memory.c src/host.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-memory-test
     out/sys-memory-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_video_out.c src/host.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-video-out-test

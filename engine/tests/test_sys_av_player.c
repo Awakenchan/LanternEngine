@@ -159,6 +159,8 @@ typedef struct {
 static struct {
     int streams_found;
     bool has_audio;
+    int audio_tracks, tagged_audio, enabled_audio;
+    bool untagged_audio;
     int video_frames, audio_frames;
     int fail_read_at, fail_send_at, fail_receive_at, fail_begin;
     int media_open, packets_live, decoders_begun;
@@ -199,14 +201,14 @@ static int fake_find(SysAvMedia *media) {
 static int fake_count(SysAvMedia *media) {
     (void)media;
     if (fake.count_error) return -1;
-    return fake.has_audio ? 2 : 1;
+    return fake.has_audio ? 1 + fake.audio_tracks : 1;
 }
 
 static int fake_info(SysAvMedia *media, uint32_t index, SysAvStreamInfo *info) {
     (void)media;
-    if (index >= (fake.has_audio ? 2u : 1u)) return 0;
+    if (index >= (uint32_t)(fake.has_audio ? 1 + fake.audio_tracks : 1)) return 0;
     memset(info, 0, sizeof(*info));
-    info->type = index;
+    info->type = index == 0 ? SYS_AV_VIDEO : SYS_AV_AUDIO;
     info->duration = (uint64_t)fake.video_frames * fake.frame_ms;
     if (index == SYS_AV_VIDEO) {
         info->details.video.width = 640;
@@ -215,14 +217,16 @@ static int fake_info(SysAvMedia *media, uint32_t index, SysAvStreamInfo *info) {
     } else {
         info->details.audio.channel_count = 2;
         info->details.audio.sample_rate = 48000;
-        memcpy(info->details.audio.language, "eng", 3);
+        memcpy(info->details.audio.language, (int)index == fake.tagged_audio ? "por" : fake.untagged_audio ? "und" : "eng", 3);
     }
     return 1;
 }
 
 static int fake_enable(SysAvMedia *media, uint32_t index) {
     (void)media;
-    return index >= (fake.has_audio ? 2u : 1u) ? -1 : (int)index;
+    if (index >= (uint32_t)(fake.has_audio ? 1 + fake.audio_tracks : 1)) return -1;
+    if (index) fake.enabled_audio = (int)index;
+    return index ? SYS_AV_AUDIO : SYS_AV_VIDEO;
 }
 
 static int fake_begin(SysAvMedia *media, uint32_t *video_bytes) {
@@ -316,6 +320,8 @@ static void reset_fake(void) {
     memset(&fake, 0, sizeof(fake));
     fake.streams_found = 1;
     fake.has_audio = true;
+    fake.audio_tracks = 1;
+    fake.enabled_audio = -1;
     fake.video_frames = 30;
     fake.audio_frames = 40;
     fake.frame_ms = 1;
@@ -600,6 +606,50 @@ static void *open_ready(InitData *init) {
     return player;
 }
 
+static void test_brazilian_opening(void) {
+#ifdef _WIN32
+#define LANGUAGE(value) _putenv_s("BB_LANGUAGE", value)
+#else
+#define LANGUAGE(value) setenv("BB_LANGUAGE", value, 1)
+#endif
+    const char *previous = getenv("BB_LANGUAGE");
+    char *saved = previous ? strdup(previous) : NULL;
+    for (int mode = 0; mode < 7; ++mode) {
+        reset_fake();
+        LANGUAGE(mode == 0 ? "1" : "17");
+        fake.audio_tracks = mode == 4 || mode == 6 ? 2 : 8;
+        fake.untagged_audio = true;
+        if (mode == 3) fake.tagged_audio = 3;
+        if (mode == 6) fake.tagged_audio = 2;
+        InitData init = make_init();
+        init.auto_start = mode == 5;
+        void *player = av_init(&init);
+        EXPECT(av_add(player, mode == 2 ? "/app0/dvdroot_ps4/movie/other.mp4" :
+                                        "/app0/dvdroot_ps4/movie/sprj_opening.mp4") == 0);
+        EXPECT(wait_until_event(mode == 5 ? 3 : 2, 1));
+        if (mode != 5) {
+            EXPECT(av_enable(player, 0) == 0);
+            EXPECT(av_enable(player, 1) == 0);
+        }
+        int wanted = mode == 0 || mode == 2 || mode == 4 ? 1 : mode == 3 ? 3 : mode == 6 ? 2 : 8;
+        EXPECT(fake.enabled_audio == wanted);
+        if (mode == 1) {
+            /* A saved in-game Spanish voice choice must not select Spanish again. */
+            EXPECT(av_enable(player, 6) == 0 && fake.enabled_audio == 8);
+            EXPECT(av_enable(player, 8) == 0 && fake.enabled_audio == 8);
+        }
+        SysAvStreamInfo info;
+        EXPECT(av_info(player, 1, &info) == 0 && info.type == SYS_AV_AUDIO);
+        if (mode == 3 || mode == 6) EXPECT(!memcmp(info.details.audio.language, "por", 3));
+        EXPECT(av_info(player, 0, &info) == 0 && info.type == SYS_AV_VIDEO);
+        EXPECT(CODE(av_enable(player, 99)) == E_FAILED);
+        EXPECT(av_close(player) == 0);
+    }
+    LANGUAGE(saved ? saved : "");
+    free(saved);
+#undef LANGUAGE
+}
+
 static void test_edges(void) {
     VideoInfo video;
 
@@ -768,6 +818,7 @@ int main(int argc, char **argv) {
     test_auto_start();
     test_failures();
     test_edges();
+    test_brazilian_opening();
     stress_rounds(40, 0);
     if (failures) return 1;
     puts("sys AvPlayer: PASS");

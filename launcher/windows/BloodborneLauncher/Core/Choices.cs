@@ -242,6 +242,7 @@
             new(L.T("Spanish"), "3"),
             new(L.T("German"), "4"),
             new(L.T("Italian"), "5"),
+            new("Português (Brasil)", "17"),
         };
 
         public static readonly Choice[] HdrPaperWhite =

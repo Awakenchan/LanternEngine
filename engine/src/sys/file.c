@@ -213,6 +213,9 @@ void sys_file_configure(const char *app0, const char *user) {
     sys_file_mount("/app0", app0);
     sys_file_mount("/hostapp", app0);
     load_file_fixes();
+    const char *language = getenv("BB_LANGUAGE");
+    if (language && !strcmp(language, "17"))
+        puts("Runtime: Brazilian Portuguese requested (native assets; game region unchanged)");
     mkdir(user, 0755);
     char path[600];
     snprintf(path, sizeof(path), "%s/.write-test", user);
@@ -250,11 +253,7 @@ static int climbs_up(const char *path) {
     return 0;
 }
 
-int sys_file_translate(const char *guest, char *out, size_t size) {
-    if (!guest || !*guest) return ENOENT;
-    char full[PATH_SIZE];
-    snprintf(full, sizeof(full), "%s%s", guest[0] == '/' ? "" : "/app0/", guest);
-    if (climbs_up(full)) return EACCES;
+static int translate_mounted(const char *full, char *out, size_t size) {
     const char *mod = find_mod_file(full);
     if (mod) return (size_t)snprintf(out, size, "%s", mod) >= size ? ENAMETOOLONG : 0;
     const Mount *best = NULL;
@@ -268,6 +267,56 @@ int sys_file_translate(const char *guest, char *out, size_t size) {
     }
     if (best) result = (size_t)snprintf(out, size, "%s%s", best->host, full + best->length) >= size ? ENAMETOOLONG : 0;
     host_read_unlock(&mounts_lock);
+    return result;
+}
+
+/* CUSA03173 can fall back to another language despite system language 17. Select the
+ * existing Brazilian assets without changing the game's region (used by online play).
+ * Rewrite guest paths, not host paths, so mods and per-file mounts still apply. */
+static int brazilian_path(const char *full, char localized[PATH_SIZE]) {
+    const char *relative = !strncmp(full, "/app0/", 6) ? full + 6 :
+                           !strncmp(full, "/hostapp/", 9) ? full + 9 : NULL;
+    if (!relative || strncmp(relative, "dvdroot_ps4/", 12)) return 0;
+    const char *part = relative + 12;
+    const char *folder = !strncmp(part, "msg/", 4) ? part + 4 :
+                         !strncmp(part, "menu/", 5) ? part + 5 : NULL;
+    if (folder) {
+        static const char *const languages[] = {
+            "engus", "enggb", "rusru", "jpnjp", "frafr", "spaes", "spaar", "deude", "itait", "porpt",
+        };
+        for (size_t i = 0; i < sizeof(languages) / sizeof(*languages); ++i) {
+            if (strncmp(folder, languages[i], 5) || folder[5] != '/') continue;
+            strcpy(localized, full);
+            memcpy(localized + (folder - full), "porbr", 5);
+            return 1;
+        }
+    } else if (!strncmp(part, "sound/", 6)) {
+        const char *suffix = strrchr(part + 6, '_');
+        static const char *const voices[] = {"eng", "ded", "esa", "ese", "frf", "iti", "jaj"};
+        if (!suffix || strlen(suffix) != 8 || strcmp(suffix + 4, ".fsb")) return 0;
+        for (size_t i = 0; i < sizeof(voices) / sizeof(*voices); ++i) {
+            if (strncmp(suffix + 1, voices[i], 3)) continue;
+            strcpy(localized, full);
+            memcpy(localized + (suffix + 1 - full), "ptb", 3);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int sys_file_translate(const char *guest, char *out, size_t size) {
+    if (!guest || !*guest) return ENOENT;
+    char full[PATH_SIZE];
+    if ((size_t)snprintf(full, sizeof(full), "%s%s", guest[0] == '/' ? "" : "/app0/", guest) >= sizeof(full))
+        return ENAMETOOLONG;
+    if (climbs_up(full)) return EACCES;
+    const char *language = getenv("BB_LANGUAGE");
+    char localized[PATH_SIZE], host[PATH_SIZE];
+    HostStat st;
+    if (language && !strcmp(language, "17") && brazilian_path(full, localized) &&
+        !translate_mounted(localized, host, sizeof(host)) && !host_stat(host, &st) && S_ISREG(st.st_mode))
+        return (size_t)snprintf(out, size, "%s", host) >= size ? ENAMETOOLONG : 0;
+    int result = translate_mounted(full, out, size);
     if (result == ENOENT) fprintf(stderr, "Runtime: no mount for guest path %s\n", guest);
     return result;
 }

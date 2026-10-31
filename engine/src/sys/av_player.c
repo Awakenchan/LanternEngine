@@ -125,6 +125,8 @@ typedef struct Player {
     State state, previous;
     bool add_pending, looping, stopping, closing, ended_input, paused, stop_sent, playing, threads_exist;
     bool sync_to_clock;
+    bool brazilian_opening;
+    int preferred_audio;
     int32_t warnings[MAX_WARNINGS];
     unsigned warning_count;
     Track tracks[2];
@@ -498,6 +500,37 @@ static bool player_start_held(Player *player) {
     return true;
 }
 
+static int brazilian_opening_audio(Player *player) {
+    if (!player->brazilian_opening) return -1;
+    int count = decoder->stream_count(player->media);
+    int original_layout = count == 9;
+    for (int i = 0; i < count; ++i) {
+        SysAvStreamInfo info = {0};
+        if (!decoder->stream_info(player->media, (uint32_t)i, &info)) return -1;
+        if (info.type == SYS_AV_AUDIO && (!memcmp(info.details.audio.language, "por", 3) ||
+                                          !memcmp(info.details.audio.language, "ptb", 3))) return i;
+        if (i == 0 ? info.type != SYS_AV_VIDEO : info.type != SYS_AV_AUDIO) original_layout = 0;
+        if (i && info.details.audio.language[0] && memcmp(info.details.audio.language, "und", 3)) original_layout = 0;
+    }
+    /* The original CUSA03173 opening has one video followed by eight untagged audio
+     * tracks. Brazilian Portuguese is the eighth audio track. No movie is repacked. */
+    return original_layout ? 8 : -1;
+}
+
+static int stream_info(Player *player, uint32_t index, SysAvStreamInfo *info) {
+    if (!decoder->stream_info(player->media, index, info)) return 0;
+    if (info->type == SYS_AV_AUDIO && player->preferred_audio >= 0)
+        return decoder->stream_info(player->media, (uint32_t)player->preferred_audio, info);
+    return 1;
+}
+
+static int enable_stream(Player *player, uint32_t index) {
+    SysAvStreamInfo info = {0};
+    if (player->preferred_audio >= 0 && decoder->stream_info(player->media, index, &info) && info.type == SYS_AV_AUDIO)
+        index = (uint32_t)player->preferred_audio;
+    return decoder->enable_stream(player->media, index);
+}
+
 static void pick_streams_and_start(Player *player) {
     host_lock(&player->lock);
     int chosen[3] = {-1, -1, -1};
@@ -506,7 +539,7 @@ static void pick_streams_and_start(Player *player) {
     for (int i = 0; i < count; ++i) {
         SysAvStreamInfo info;
         memset(&info, 0, sizeof(info));
-        if (!decoder->stream_info(player->media, (uint32_t)i, &info)) {
+        if (!stream_info(player, (uint32_t)i, &info)) {
             stop = true;
             break;
         }
@@ -521,7 +554,7 @@ static void pick_streams_and_start(Player *player) {
     if (!stop) {
         for (int type = 0; type < 3; ++type) {
             if (chosen[type] < 0) continue;
-            int kind = decoder->enable_stream(player->media, (uint32_t)chosen[type]);
+            int kind = enable_stream(player, (uint32_t)chosen[type]);
             if (kind == SYS_AV_VIDEO || kind == SYS_AV_AUDIO) player->tracks[kind].enabled = true;
         }
         started = player_start_held(player);
@@ -546,6 +579,7 @@ static void *controller_thread(void *argument) {
             bool found = media && decoder->find_streams(media);
             host_lock(&player->lock);
             if (found) {
+                player->preferred_audio = brazilian_opening_audio(player);
                 player->duration = decoder->duration(player->media);
                 set_state(player, STATE_READY);
                 host_unlock(&player->lock);
@@ -602,6 +636,7 @@ static SYS_ABI void *av_init(InitData *data) {
     Player *player = calloc(1, sizeof(*player));
     if (!player) return NULL;
     player->init = *data;
+    player->preferred_audio = -1;
     if (data->default_language) memcpy(player->language, data->default_language, sizeof(player->language));
     host_mutex_init(&player->lock);
     host_mutex_init(&player->file_lock);
@@ -656,6 +691,10 @@ static SYS_ABI int32_t av_add_source(Player *player, const char *path) {
         return E_FAILED;
     }
     player->media = media;
+    const char *language = getenv("BB_LANGUAGE");
+    const char *name = strrchr(path, '/');
+    player->brazilian_opening = language && !strcmp(language, "17") &&
+                               !strcmp(name ? name + 1 : path, "sprj_opening.mp4");
     set_state(player, STATE_ADDING);
     player->add_pending = true;
     wake_all(player);
@@ -688,7 +727,7 @@ static SYS_ABI int32_t av_stream_count(Player *player) {
 static SYS_ABI int32_t av_stream_info(Player *player, uint32_t index, SysAvStreamInfo *info) {
     if (!player || !info) return E_PARAMS;
     host_lock(&player->lock);
-    int ok = player->media && decoder->stream_info(player->media, index, info);
+    int ok = player->media && stream_info(player, index, info);
     host_unlock(&player->lock);
     return ok ? 0 : E_FAILED;
 }
@@ -696,7 +735,7 @@ static SYS_ABI int32_t av_stream_info(Player *player, uint32_t index, SysAvStrea
 static SYS_ABI int32_t av_enable_stream(Player *player, uint32_t index) {
     if (!player) return E_PARAMS;
     host_lock(&player->lock);
-    int kind = player->media ? decoder->enable_stream(player->media, index) : -1;
+    int kind = player->media ? enable_stream(player, index) : -1;
     if (kind == SYS_AV_VIDEO || kind == SYS_AV_AUDIO) player->tracks[kind].enabled = true;
     host_unlock(&player->lock);
     return kind < 0 ? E_FAILED : 0;

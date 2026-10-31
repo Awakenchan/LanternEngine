@@ -20,6 +20,14 @@ cover English defaults and fallback, unknown codes, menu codes,
 keyboard/controller identifiers, and control-profile round trips. They do not
 load or save user settings, launch the game, or contact update servers.
 
+To check only game-language choices (including PS4 language 17, Brazilian Portuguese),
+the native display name and the in-memory settings value, independently of catalog coverage:
+
+```powershell
+dotnet run --project launcher/windows/tests/LocalizationChecks -- en --game-languages-only
+dotnet run --project launcher/windows/tests/LocalizationChecks -- pt-BR --game-languages-only
+```
+
 ## Adding a language
 
 Add `launcher/BloodborneLauncher/Localization/<code>.json` (English text to
