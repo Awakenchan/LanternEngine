@@ -5,11 +5,14 @@
 #include "thd_internal.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -131,6 +134,45 @@ void RetryResolve(unsigned conn, const std::string& peer, bool force, bool first
     announce_locked(conn, it->second);
 }
 
+// One long-lived thread runs the resolves in turn. NpPost keeps its HTTPS connection per thread,
+// so this one stays open between peers: a thread per resolve paid a new TCP and TLS handshake
+// each time (~500 ms instead of ~270). The thread starts with the first resolve (online play).
+struct ResolveJob {
+    unsigned conn;
+    std::string peer;
+    bool first;
+};
+std::mutex g_rq_mu;
+std::condition_variable g_rq_cv;
+std::deque<ResolveJob> g_rq;
+bool g_rq_running = false;
+
+void ResolveWorker() {
+    for (;;) {
+        ResolveJob job;
+        {
+            std::unique_lock lk(g_rq_mu);
+            g_rq_cv.wait(lk, [] { return !g_rq.empty(); });
+            job = std::move(g_rq.front());
+            g_rq.pop_front();
+        }
+        RetryResolve(job.conn, job.peer, true, job.first);
+    }
+}
+
+void QueueResolve(unsigned conn, const std::string& peer, bool first = false) {
+    std::lock_guard lk(g_rq_mu);
+    for (const ResolveJob& j : g_rq) {
+        if (j.conn == conn) return; // already waiting its turn
+    }
+    g_rq.push_back({conn, peer, first});
+    if (!g_rq_running) {
+        g_rq_running = true;
+        std::thread(ResolveWorker).detach();
+    }
+    g_rq_cv.notify_one();
+}
+
 // Idempotent per peer: the game re-activates.
 s32 PS4_SYSV_ABI sig_activate(unsigned ctx, const void* npid, unsigned* conn_out) {
     if (!conn_out) return kSigErrInvalidArg;
@@ -170,7 +212,7 @@ s32 PS4_SYSV_ABI sig_activate(unsigned ctx, const void* npid, unsigned* conn_out
         }
     }
     if (retry) {
-        std::thread([retry, peer] { RetryResolve(retry, peer, true); }).detach();
+        QueueResolve(retry, peer);
         return 0;
     }
     std::lock_guard lk(g_sig_mu);
@@ -190,7 +232,7 @@ s32 PS4_SYSV_ABI sig_activate(unsigned ctx, const void* npid, unsigned* conn_out
         // is announced when the address arrives, as for a peer resolved on a later try.
         Log("sceNpSignalingActivateConnection %s -> conn %u (resolving)", peer.c_str(), id);
         g_resolve_at = NowMs(); // the game's status reads right after do not start a second one
-        std::thread([id, peer] { RetryResolve(id, peer, true, true); }).detach();
+        QueueResolve(id, peer, true);
         return 0;
     }
     Log("sceNpSignalingActivateConnection %s -> conn %u", peer.c_str(), id);
@@ -229,7 +271,7 @@ s32 PS4_SYSV_ABI sig_status(unsigned ctx, unsigned conn, int* st, std::uint32_t*
     }
     if (!unresolved.empty() && NowMs() - g_resolve_at.load() >= 2000) {
         g_resolve_at = NowMs();
-        std::thread([conn, unresolved] { RetryResolve(conn, unresolved, true); }).detach();
+        QueueResolve(conn, unresolved);
     }
     if (st) *st = status;
     if (addr) *addr = a;
