@@ -180,6 +180,7 @@ layout(push_constant) uniform TintParams {
     uint offset_bytes;
     uint record_count;
     float blend;
+    uint skip_fallback;
 };
 
 vec3 record_vec3(uint id, uint field) {
@@ -215,7 +216,7 @@ void main() {
     vec4 best = vec4(0.0);
     bool has_fallback = false;
     for (uint id = 0u; id < record_count; ++id) {
-        if (is_fallback(id)) {
+        if (skip_fallback != 0u && is_fallback(id)) {
             has_fallback = true;
             continue;
         }

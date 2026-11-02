@@ -19,8 +19,9 @@ struct Push {
     unsigned offset_bytes = TableStart;
     unsigned record_count = Records;
     float blend = 1.0f;
+    unsigned skip_fallback = 1;
 };
-static_assert(sizeof(Push) == 12);
+static_assert(sizeof(Push) == 16);
 struct Buffer { VkBuffer buffer{}; VkDeviceMemory memory{}; void* data{}; unsigned size{}; };
 struct Rgb { float r, g, b; };
 
@@ -166,9 +167,10 @@ int main() {
     };
     const Rgb moon{0.556f, 0.730f, 0.965f}, moon_second{0.019f, 0.030f, 0.100f},
         moon_direction{0.672f, 0.707f, 0.219f}, dim{0.393f, 0.603f, 0.923f};
-    const auto run = [&](float blend = 1.0f) {
+    const auto run = [&](float blend = 1.0f, unsigned skip_fallback = 1) {
         Push push;
         push.blend = blend;
+        push.skip_fallback = skip_fallback;
         CHECK(vkResetCommandBuffer(t.cmd, 0));
         VkCommandBufferBeginInfo begin{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         CHECK(vkBeginCommandBuffer(t.cmd, &begin));
@@ -269,6 +271,45 @@ int main() {
     run();
     expect(Target(moon));
 
+    // Steady sunlight color off (skip 0, blend 1): the original behaviour. The fallback record is
+    // like any other, so it wins as the brightest wherever it sits, and the color changes at once.
+    for (const unsigned slot : {0u, 2u, 5u, Records - 1}) {
+        clear();
+        set_record(1, moon, moon_second, moon_direction);
+        set_record(3, dim, moon_second, moon_direction);
+        set_fallback(slot);
+        run(1.0f, 0);
+        expect({1, 1, 1});
+    }
+    // Without it the area's lights decide, as before the record was in the table.
+    clear();
+    set_record(1, moon, moon_second, moon_direction);
+    set_record(5, dim, moon_second, moon_direction);
+    run(1.0f, 0);
+    expect(Target(moon));
+    // The record joining the table flips the color at once: the flicker this switch brings back.
+    set_fallback(5);
+    run(1.0f, 0);
+    expect({1, 1, 1});
+    clear();
+    set_record(1, moon, moon_second, moon_direction);
+    run(1.0f, 0);
+    expect(Target(moon));
+    // Nothing lit at all.
+    clear();
+    run(1.0f, 0);
+    expect({0, 0, 0});
+    // Blend 1 sets the color whatever the buffer holds, undefined included.
+    clear();
+    set_record(1, moon, moon_second, moon_direction);
+    color[0] = color[1] = color[2] = 1.0f;
+    run(1.0f, 0);
+    expect(Target(moon));
+    color[0] = color[1] = color[2] = std::numeric_limits<float>::quiet_NaN();
+    run(1.0f, 0);
+    expect(Target(moon));
+
     std::puts("Volumetric tint: PASS (fallback record skipped in any slot, used alone, other white "
-              "lights kept, brightest wins, fade, first frame)");
+              "lights kept, brightest wins, fade, first frame; steady color off: fallback wins, "
+              "changes at once)");
 }

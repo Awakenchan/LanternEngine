@@ -147,7 +147,7 @@ int main() {
         {"volumetric tint",
          VOLUMETRIC_LIGHT_TINT_COMP,
          {eStorageBuffer, eStorageBuffer},
-         12},
+         16},
         {"volumetric filter",
          VOLUMETRIC_LIGHT_FILTER_COMP,
          {eCombinedImageSampler, eStorageImage},

@@ -39,8 +39,9 @@ static_assert(sizeof(Params) == 32);
 struct TintParams {
     u32 offset_bytes, record_count;
     float blend;
+    u32 skip_fallback;
 };
-static_assert(sizeof(TintParams) == 12);
+static_assert(sizeof(TintParams) == 16);
 // The fog's color moves 95% of the way to a new value in about 1.5 s (three time constants). After
 // a longer gap than this (the first frame, a load) there is no earlier color worth fading from.
 constexpr float TintFadeConstant = 0.5f, TintSnapAfter = 1.0f;
@@ -355,12 +356,19 @@ void VolumetricLight::Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_
         std::printf("Volumetric lighting: unexpected directional lighting table; off\n");
         return;
     }
+    // BB_VOLUMETRIC_STEADY=0 (More > Engine > Steady sunlight color): the color as it was before the
+    // fallback record was skipped and the fade added.
+    static const bool steady = [] {
+        const char* env = std::getenv("BB_VOLUMETRIC_STEADY");
+        return !(env && env[0] == '0');
+    }();
     const auto now = std::chrono::steady_clock::now();
     const float seconds = std::chrono::duration<float>(now - tint_time).count();
     tint_time = now;
     const TintParams params{
         offset_bytes, u32(std::min<vk::DeviceSize>((lighting.range - offset_bytes) / RecordBytes, 256)),
-        seconds > TintSnapAfter ? 1.0f : 1.0f - std::exp(-seconds / TintFadeConstant)};
+        steady && seconds <= TintSnapAfter ? 1.0f - std::exp(-seconds / TintFadeConstant) : 1.0f,
+        steady ? 1u : 0u};
     scheduler.EndRendering();
     const vk::DescriptorBufferInfo state{tint_state->Handle(), 0, 16};
     EffectPass::Mark(8, "volumetric tint");
@@ -386,6 +394,7 @@ void VolumetricLight::Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_
         tint_reported = true;
         std::printf("Volumetric lighting: resolved primary diffuse RGB, %u region records\n",
                     params.record_count);
+        std::printf("Volumetric lighting: steady sunlight color %s\n", steady ? "on" : "off");
     }
 }
 
