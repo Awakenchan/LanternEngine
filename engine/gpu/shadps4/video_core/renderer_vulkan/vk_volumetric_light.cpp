@@ -36,6 +36,14 @@ struct Params {
     float reach, density, strength, anisotropy, bias, tilt;
 };
 static_assert(sizeof(Params) == 32);
+struct TintParams {
+    u32 offset_bytes, record_count;
+    float blend;
+};
+static_assert(sizeof(TintParams) == 12);
+// The fog's color moves 95% of the way to a new value in about 1.5 s (three time constants). After
+// a longer gap than this (the first frame, a load) there is no earlier color worth fading from.
+constexpr float TintFadeConstant = 0.5f, TintSnapAfter = 1.0f;
 
 void Before(vk::CommandBuffer cmd) {
     const vk::MemoryBarrier2 b{
@@ -82,7 +90,7 @@ bool VolumetricLight::Ready() {
                        eStorageImage, eStorageImage, eStorageImage},
                       VOLUMETRIC_LIGHT_REPAIR_COMP, sizeof(Params), "Volumetric repair") &&
            CreatePass(tint, {eStorageBuffer, eStorageBuffer},
-                      VOLUMETRIC_LIGHT_TINT_COMP, 2 * sizeof(u32), "Volumetric tint") &&
+                      VOLUMETRIC_LIGHT_TINT_COMP, sizeof(TintParams), "Volumetric tint") &&
            CreatePass(filter, {eCombinedImageSampler, eStorageImage},
                       VOLUMETRIC_LIGHT_FILTER_COMP, sizeof(u32), "Volumetric filter") &&
            CreatePass(composite,
@@ -347,8 +355,12 @@ void VolumetricLight::Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_
         std::printf("Volumetric lighting: unexpected directional lighting table; off\n");
         return;
     }
-    const std::array<u32, 2> params{
-        offset_bytes, u32(std::min<vk::DeviceSize>((lighting.range - offset_bytes) / RecordBytes, 256))};
+    const auto now = std::chrono::steady_clock::now();
+    const float seconds = std::chrono::duration<float>(now - tint_time).count();
+    tint_time = now;
+    const TintParams params{
+        offset_bytes, u32(std::min<vk::DeviceSize>((lighting.range - offset_bytes) / RecordBytes, 256)),
+        seconds > TintSnapAfter ? 1.0f : 1.0f - std::exp(-seconds / TintFadeConstant)};
     scheduler.EndRendering();
     const vk::DescriptorBufferInfo state{tint_state->Handle(), 0, 16};
     EffectPass::Mark(8, "volumetric tint");
@@ -365,8 +377,7 @@ void VolumetricLight::Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_
             }};
             cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
             cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
-            cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params),
-                              params.data());
+            cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), &params);
             cmd.dispatch(1, 1, 1);
             After(cmd);
         });
@@ -374,7 +385,7 @@ void VolumetricLight::Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_
     if (!tint_reported) {
         tint_reported = true;
         std::printf("Volumetric lighting: resolved primary diffuse RGB, %u region records\n",
-                    params[1]);
+                    params.record_count);
     }
 }
 

@@ -175,16 +175,29 @@ void main() {
 }
 #elif defined(TINT)
 layout(scalar, binding = 0) readonly buffer Lighting { uint d[]; } lighting;
-layout(scalar, binding = 1) writeonly buffer TintState { vec4 atmosphere; } state;
+layout(scalar, binding = 1) buffer TintState { vec4 atmosphere; } state;
 layout(push_constant) uniform TintParams {
     uint offset_bytes;
     uint record_count;
+    float blend;
 };
 
+vec3 record_vec3(uint id, uint field) {
+    uint at = (offset_bytes >> 2) + id * 72u + field;
+    return vec3(uintBitsToFloat(lighting.d[at]), uintBitsToFloat(lighting.d[at + 1u]),
+                uintBitsToFloat(lighting.d[at + 2u]));
+}
+
+// A record that looks like a built-in default: pure white, no second light, a fixed direction, and
+// the only lit record before an area's lights arrive. Table slots switch to it from frame to frame
+// as the camera moves, and it would win over the area's lights.
+bool is_fallback(uint id) {
+    return record_vec3(id, 16u) == vec3(1.0) && record_vec3(id, 20u) == vec3(0.0) &&
+           all(lessThan(abs(record_vec3(id, 0u) - vec3(0.70710678, 0.70710678, 0.0)), vec3(1e-3)));
+}
+
 vec3 primary(uint id) {
-    uint at = (offset_bytes >> 2) + id * 72u + 16u;
-    vec3 rgb = vec3(uintBitsToFloat(lighting.d[at]), uintBitsToFloat(lighting.d[at + 1u]),
-                    uintBitsToFloat(lighting.d[at + 2u]));
+    vec3 rgb = record_vec3(id, 16u);
     if (any(isnan(rgb)) || any(isinf(rgb))) return vec3(0.0);
     rgb = max(rgb, vec3(0.0));
 
@@ -200,12 +213,21 @@ bool brighter(vec4 a, vec4 b) {
 
 void main() {
     vec4 best = vec4(0.0);
+    bool has_fallback = false;
     for (uint id = 0u; id < record_count; ++id) {
+        if (is_fallback(id)) {
+            has_fallback = true;
+            continue;
+        }
         vec3 rgb = primary(id);
         vec4 candidate = vec4(rgb, dot(rgb, vec3(0.2126, 0.7152, 0.0722)));
         if (brighter(candidate, best)) best = candidate;
     }
-    state.atmosphere = vec4(mix(vec3(best.w), best.rgb, 0.75), 1.0);
+    if (best.w == 0.0 && has_fallback) best = vec4(1.0);
+    vec3 target = mix(vec3(best.w), best.rgb, 0.75);
+    // The area's lights also come and go with the camera, so the color fades to its new value. At
+    // blend 1 the buffer may hold nothing valid yet.
+    state.atmosphere = vec4(blend >= 1.0 ? target : mix(state.atmosphere.rgb, target, blend), 1.0);
 }
 #elif defined(FILTER)
 layout(binding = 0) uniform sampler2D fog_src;
