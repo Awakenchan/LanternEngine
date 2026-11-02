@@ -96,7 +96,9 @@ bool RoomBackend() {
     return room;
 }
 
-void RetryResolve(unsigned conn, const std::string& peer, bool force) {
+// Asks the server for the peer's address: an HTTPS round trip, so never on the game's thread.
+// `first` is the try sig_activate starts; later ones come from status reads.
+void RetryResolve(unsigned conn, const std::string& peer, bool force, bool first = false) {
     const std::int64_t now = NowMs();
     if (!force && now - g_resolve_at.load() < 2000) return;
     g_resolve_at = now;
@@ -104,19 +106,26 @@ void RetryResolve(unsigned conn, const std::string& peer, bool force) {
     if (PeersFindOnline(peer, &known)) {
         std::lock_guard lk(g_sig_mu);
         const auto it = g_conn.find(conn);
-        if (it != g_conn.end() && !it->second.member_id) it->second.member_id = known.member_id;
+        if (it != g_conn.end() && !it->second.member_id) {
+            it->second.member_id = known.member_id;
+            announce_locked(conn, it->second);
+        }
         return;
     }
     std::uint32_t addr = 0;
     std::uint16_t port = 0;
     std::string error;
-    if (!ServerSignalingResolve(peer, &addr, &port, error)) return;
+    if (!ServerSignalingResolve(peer, &addr, &port, error)) {
+        if (first) Log("signaling: %s not known and not resolved: %s", peer.c_str(), error.c_str());
+        return;
+    }
     const std::uint16_t member = PeersProvisional(peer, addr, port).member_id;
     std::lock_guard lk(g_sig_mu);
     const auto it = g_conn.find(conn);
     if (it == g_conn.end() || it->second.member_id) return;
     it->second.member_id = member;
-    Log("signaling: %s found on a later try (%s:%u)", peer.c_str(), BbNet::MaskIpv4(addr).c_str(), port);
+    Log("signaling: %s %s (%s:%u) in %lld ms", peer.c_str(), first ? "resolved" : "found on a later try",
+        BbNet::MaskIpv4(addr).c_str(), port, static_cast<long long>(NowMs() - now));
     announce_locked(conn, it->second);
 }
 
@@ -169,25 +178,19 @@ s32 PS4_SYSV_ABI sig_activate(unsigned ctx, const void* npid, unsigned* conn_out
     c.online_id = peer;
     Peer p;
     if (PeersFindOnline(peer, &p)) c.member_id = p.member_id;
-    std::string how;
-    if (!c.member_id) {
-        // The host activates its connection to the guest it summons before the guest is a room
-        // member: the server resolves the address from the guest's context_start.
-        std::uint32_t addr = 0;
-        std::uint16_t port = 0;
-        std::string error;
-        if (ServerSignalingResolve(peer, &addr, &port, error)) {
-            c.member_id = PeersProvisional(peer, addr, port).member_id;
-            char text[64];
-            std::snprintf(text, sizeof(text), " (resolved %s:%u)", BbNet::MaskIpv4(addr).c_str(), port);
-            how = text;
-        } else {
-            how = " (not known and not resolved: " + error + ")";
-        }
-    }
     g_conn[id] = c;
     *conn_out = id;
-    Log("sceNpSignalingActivateConnection %s -> conn %u%s", peer.c_str(), id, how.c_str());
+    if (!c.member_id) {
+        // The host activates its connection to the guest it summons before the guest is a room
+        // member: the server resolves the address from the guest's context_start. That request
+        // blocked the game's frame for a server round trip (~270 ms) with every new peer; it now
+        // runs beside the game, the status read answers "pending" meanwhile, and the connection
+        // is announced when the address arrives, as for a peer resolved on a later try.
+        Log("sceNpSignalingActivateConnection %s -> conn %u (resolving)", peer.c_str(), id);
+        std::thread([id, peer] { RetryResolve(id, peer, true, true); }).detach();
+        return 0;
+    }
+    Log("sceNpSignalingActivateConnection %s -> conn %u", peer.c_str(), id);
     announce_locked(id, g_conn[id]);
     return 0;
 }
