@@ -55,7 +55,7 @@ class LogPrivacyTests(unittest.TestCase):
     def test_thd_log_lines_use_the_mask(self):
         thd = {p.name: p.read_text(encoding='utf-8') for p in (BBNET / 'thd').glob('*.cpp')}
         for needle in ('net: recv', 'net: send', 'net: punch', 'sees our P2P port', 'our address is now',
-                       'found on a later try', 'resolved %s:%u', 'np: guest_invite'):
+                       'found on a later try', 'resolved (%s:%u)', 'np: guest_invite'):
             owner = next(t for t in thd.values() if needle in t)
             at = owner.index(needle)
             self.assertIn('BbNet::Mask', owner[at:at + 300], needle)

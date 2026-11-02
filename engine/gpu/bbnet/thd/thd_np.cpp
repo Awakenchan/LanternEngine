@@ -129,8 +129,9 @@ void RetryResolve(unsigned conn, const std::string& peer, bool force, bool first
     const auto it = g_conn.find(conn);
     if (it == g_conn.end() || it->second.dead || it->second.member_id) return;
     it->second.member_id = PeersProvisional(peer, addr, port).member_id;
-    Log("signaling: %s %s (%s:%u) in %lld ms", peer.c_str(), first ? "resolved" : "found on a later try",
-        BbNet::MaskIpv4(addr).c_str(), port, static_cast<long long>(NowMs() - now));
+    const auto ms = static_cast<long long>(NowMs() - now);
+    if (first) Log("signaling: %s resolved (%s:%u) in %lld ms", peer.c_str(), BbNet::MaskIpv4(addr).c_str(), port, ms);
+    else Log("signaling: %s found on a later try (%s:%u) in %lld ms", peer.c_str(), BbNet::MaskIpv4(addr).c_str(), port, ms);
     announce_locked(conn, it->second);
 }
 
