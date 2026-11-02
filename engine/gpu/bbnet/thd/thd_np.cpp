@@ -106,7 +106,7 @@ void RetryResolve(unsigned conn, const std::string& peer, bool force, bool first
     if (PeersFindOnline(peer, &known)) {
         std::lock_guard lk(g_sig_mu);
         const auto it = g_conn.find(conn);
-        if (it != g_conn.end() && !it->second.member_id) {
+        if (it != g_conn.end() && !it->second.dead && !it->second.member_id) {
             it->second.member_id = known.member_id;
             announce_locked(conn, it->second);
         }
@@ -119,11 +119,13 @@ void RetryResolve(unsigned conn, const std::string& peer, bool force, bool first
         if (first) Log("signaling: %s not known and not resolved: %s", peer.c_str(), error.c_str());
         return;
     }
-    const std::uint16_t member = PeersProvisional(peer, addr, port).member_id;
+    // The connection may have gone while the request ran (deactivated, or the room left and
+    // SignalingReset): then the peer stays out of the peer table and nothing is announced.
+    // g_sig_mu before the peer table's lock, as sig_activate has always taken them.
     std::lock_guard lk(g_sig_mu);
     const auto it = g_conn.find(conn);
-    if (it == g_conn.end() || it->second.member_id) return;
-    it->second.member_id = member;
+    if (it == g_conn.end() || it->second.dead || it->second.member_id) return;
+    it->second.member_id = PeersProvisional(peer, addr, port).member_id;
     Log("signaling: %s %s (%s:%u) in %lld ms", peer.c_str(), first ? "resolved" : "found on a later try",
         BbNet::MaskIpv4(addr).c_str(), port, static_cast<long long>(NowMs() - now));
     announce_locked(conn, it->second);
@@ -187,6 +189,7 @@ s32 PS4_SYSV_ABI sig_activate(unsigned ctx, const void* npid, unsigned* conn_out
         // runs beside the game, the status read answers "pending" meanwhile, and the connection
         // is announced when the address arrives, as for a peer resolved on a later try.
         Log("sceNpSignalingActivateConnection %s -> conn %u (resolving)", peer.c_str(), id);
+        g_resolve_at = NowMs(); // the game's status reads right after do not start a second one
         std::thread([id, peer] { RetryResolve(id, peer, true, true); }).detach();
         return 0;
     }
