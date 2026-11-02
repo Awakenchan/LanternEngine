@@ -324,9 +324,14 @@ void end_session_locked(const char* why) {
     if (!g.in_room && !g.leave_pending) return;
     Log("np: session over (%s): room %llu", why, static_cast<unsigned long long>(g.room_id));
     if (!g.session_id.empty()) {
-        Json reply;
-        std::string err;
-        ServerLeaveRoom(g.session_id, g.member_id, reply, err);
+        // On the dispatcher, not in the game's call: the request froze a frame for a server round
+        // trip (~270 ms). The dispatcher runs in order, so a room the game creates or joins next
+        // reaches the server after this leave, and the 0x103 below still comes after it.
+        DispatchAfter(0, Prio::Request, [sid = g.session_id, mid = g.member_id] {
+            Json reply;
+            std::string err;
+            if (!ServerLeaveRoom(sid, mid, reply, err)) Log("np: leave_room failed: %s", err.c_str());
+        });
     }
     std::vector<std::uint16_t> ids;
     for (const Peer& p : room_peers()) ids.push_back(p.member_id);
