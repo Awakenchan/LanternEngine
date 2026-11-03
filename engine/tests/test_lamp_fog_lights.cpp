@@ -56,6 +56,30 @@ constexpr int FadedIn = int(Memory::FadeIn / Frame) + 2;
 }
 
 int main() {
+    // Steady fog off: the first lights to arrive, in that order, whatever they are worth. What the
+    // pass drew before it remembered or ranked anything, down to the lights Select would drop.
+    {
+        std::vector<Light> arrived;
+        arrived.push_back(Make(0, 0, -100, 1)); // behind the camera
+        arrived.push_back(Make(0, 0, 10, 5));
+        arrived.push_back(Make(0, 0, 10, 5)); // the same light in another tile
+        for (int i = 0; i < 100; ++i) {
+            arrived.push_back(Make(float(i), 0, 200.0f - float(i), 1));
+        }
+        const auto words = Records(arrived);
+        FrameLights frame;
+        frame.Add(words.data(), uint32_t(arrived.size()));
+        const auto listed = AsListed(frame.Lights());
+        assert(listed.size() == AsListedLimit);
+        assert(listed[0] == arrived[0] && listed[1] == arrived[1]);
+        for (size_t i = 2; i < listed.size(); ++i) {
+            assert(listed[i] == arrived[i + 1]);
+        }
+        const std::vector<Light> few{arrived[0], arrived[1]};
+        assert(AsListed(few).size() == few.size());
+        assert(AsListed({}).empty());
+    }
+
     // Repeated in many tiles: one light, however the colour words differ.
     {
         FrameLights frame;

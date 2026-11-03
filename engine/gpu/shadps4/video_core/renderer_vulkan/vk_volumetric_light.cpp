@@ -2,6 +2,7 @@
 #include "video_core/renderer_vulkan/vk_volumetric_light.h"
 
 #include <algorithm>
+#include <utility>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -510,8 +511,21 @@ void VolumetricLight::Composite(VideoCore::ImageId fallback, const char* where) 
         std::printf("Volumetric lighting: scene and shadow viewport sizes differ; off\n");
         return;
     }
+    // bbport: BB_POINT_FOG_STEADY=0 draws the original fog (the first lights the game lists); on
+    // unless 0. Read once: the launcher passes it at game start, like the engine's other switches.
+    static const bool steady_fog = [] {
+        const char* env = std::getenv("BB_POINT_FOG_STEADY");
+        return !(env && env[0] == '0');
+    }();
     if (!BbSettings::Get().effects[BbSettings::EffectPointFog].load(std::memory_order_relaxed)) {
         fog_memory.Clear();
+    } else if (!steady_fog) {
+        fog_memory.Clear();
+        if (!std::exchange(fog_mode_logged, true)) {
+            std::printf("Lamp fog: steady fog off (draws the first %u lights the game lists)\n",
+                        u32(LampFog::AsListedLimit));
+        }
+        RecordLampFog(LampFog::AsListed(seen_lights), w, h);
     } else {
         const auto now = std::chrono::steady_clock::now();
         // Bounded: a hitch or a menu without the scene should not count as the lights being gone.
@@ -522,6 +536,9 @@ void VolumetricLight::Composite(VideoCore::ImageId fallback, const char* where) 
         // which the memory passes through without a camera.
         const auto drawn_lights = fog_memory.Update(seen_lights, fog_camera, seconds, FogMaxLights);
         const auto lamp_lights = LampFog::Select(drawn_lights, FogMaxLights);
+        if (!std::exchange(fog_mode_logged, true)) {
+            std::printf("Lamp fog: steady fog on (draws up to %u lights)\n", FogMaxLights);
+        }
         RecordLampFog(lamp_lights.lights, w, h);
     }
     const vk::DescriptorImageInfo raw{*sampler, *fog_view, vk::ImageLayout::eGeneral};

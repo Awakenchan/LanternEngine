@@ -56,6 +56,7 @@ private:
     std::unique_ptr<VideoCore::Buffer> fog_data;
     std::array<u32, 16> fog_matrix{};
     LampFog::FrameLights fog_lights;
+    bool fog_mode_logged = false;
     LampFog::Memory fog_memory;
     LampFog::Camera fog_camera;
     std::chrono::steady_clock::time_point fog_memory_time{};

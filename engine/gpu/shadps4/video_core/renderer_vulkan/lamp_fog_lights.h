@@ -134,6 +134,13 @@ private:
     std::unordered_set<Key, KeyHash> seen;
 };
 
+// The fog with steady fog off: no Memory, no Select, only the first lights to arrive, in the order
+// the tiles brought them.
+inline constexpr size_t AsListedLimit = 64;
+
+inline std::span<const Light> AsListed(std::span<const Light> seen) {
+    return seen.first(std::min(seen.size(), AsListedLimit));
+}
 
 // 3x4 rows, as the game's scene constants hold them.
 struct Camera {

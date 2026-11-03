@@ -106,6 +106,9 @@ namespace BloodborneLauncher.Core
             Flag("BB_UPSCALER_NO_BLUR", Graphics, L.T("No motion blur smear with upscalers"),
                 L.T("With an upscaler at an output other than 1920x1080 the game's motion blur is left out: the upscaler would ") +
                 L.T("smear it over the whole picture. Off (default): the blur stays. The Motion blur setting is not changed")),
+            OnUnless0("BB_POINT_FOG_STEADY", Graphics, L.T("Steady lamp fog"),
+                L.T("Keeps each lamp's fog on after the game stops listing the lamp, with slow fades, so it does not flicker as the camera moves. ") +
+                L.T("Can leave fog showing through a wall. Off: the original fog, from the first 64 lights the game lists. Needs Fog around lamps on")),
 
             Pick("BB_PIPELINE_THREADS", Performance, L.T("Shader compile threads"),
                 L.T("How many threads compile new shaders in the background. More finish a new area's shaders sooner but take CPU ") +
