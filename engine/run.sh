@@ -153,9 +153,13 @@ fi
 # Widescreen: the UI viewport patches.py chose (BB_UI_SIZE) and, on a screen of another shape than
 # 16:9, the menu movies widened for it, as bb-start.exe does (start/main.cpp).
 unset BB_UI_SIZE BB_WIDE_UI_MOVIES BB_WIDE_OPTION_MOVIE
+if [[ -n ${BB_PROBE:-} ]]; then wide_tool=$(dirname -- "$BB_PROBE")/bb-engine-assets
+elif [[ -n ${BB_PREBUILT:-} ]]; then wide_tool=bin/bb-engine-assets
+else wide_tool=out/bb-engine-assets
+fi
 while IFS= read -r line; do
     if [[ $line == env:* ]]; then export "${line#env:}"; else printf '%s\n' "$line"; fi
-done < <("$PYTHON" scripts/wide_ui.py "$game" --out "$out" --data "$data")
+done < <("$PYTHON" scripts/wide_ui.py "$game" --out "$out" --data "$data" --tool "$wide_tool")
 # The GPU cache as bb-start.exe keeps it on Windows: recompiled by bb-shader-lab when the shader
 # compiler changed, then the shipped shader catalog seeded, so pipelines are built at the start
 # instead of in play. Packages only (packaging/linux/bb-start sets BB_GPU_USER_DIR).
