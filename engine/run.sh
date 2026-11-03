@@ -150,6 +150,12 @@ elif [[ -n ${scaled_output:-} ]]; then
 fi
 "$PYTHON" scripts/patches.py --out "$out" --fps "$fps" --extra "${BB_PATCHES:-}" --settings "$BB_CONFIG" --game-dir "$game" --render-res "${BB_RENDER_RES:-}" --output-res "${BB_OUTPUT_RES:-}" \
     --patches-dir "${BB_PATCHES_DIR:-$data/patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}"
+# Widescreen: the UI viewport patches.py chose (BB_UI_SIZE) and, on a screen of another shape than
+# 16:9, the menu movies widened for it, as bb-start.exe does (start/main.cpp).
+unset BB_UI_SIZE BB_WIDE_UI_MOVIES BB_WIDE_OPTION_MOVIE
+while IFS= read -r line; do
+    if [[ $line == env:* ]]; then export "${line#env:}"; else printf '%s\n' "$line"; fi
+done < <("$PYTHON" scripts/wide_ui.py "$game" --out "$out" --data "$data")
 # The GPU cache as bb-start.exe keeps it on Windows: recompiled by bb-shader-lab when the shader
 # compiler changed, then the shipped shader catalog seeded, so pipelines are built at the start
 # instead of in play. Packages only (packaging/linux/bb-start sets BB_GPU_USER_DIR).
