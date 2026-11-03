@@ -3,6 +3,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include "engine/hud_clean.h"
 #include "hud_gauge.h"
 #include <xxhash.h>
 #include <zlib.h>
@@ -291,6 +292,49 @@ int Export(const fs::path& menu, const fs::path& out) {
     return total > 0 ? 0 : 1;
 }
 
+bool WriteBbui(const fs::path& target, const Bytes& pixels, std::uint32_t w, std::uint32_t h) {
+    uLongf size = compressBound(uLong(pixels.size()));
+    Bytes body(12 + size);
+    std::memcpy(body.data(), "BBUI", 4);
+    std::memcpy(body.data() + 4, &w, 4);
+    std::memcpy(body.data() + 8, &h, 4);
+    if (compress2(body.data() + 12, &size, pixels.data(), uLong(pixels.size()), 6) != Z_OK) return false;
+    body.resize(12 + size);
+    return WriteFile(target, body);
+}
+
+bool ReadBbui(const fs::path& path, Bytes& pixels, std::uint32_t& w, std::uint32_t& h) {
+    std::ifstream in(path, std::ios::binary);
+    const Bytes file{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    if (file.size() < 12 || std::memcmp(file.data(), "BBUI", 4) != 0) return false;
+    std::memcpy(&w, file.data() + 4, 4);
+    std::memcpy(&h, file.data() + 8, 4);
+    if (!w || !h || w > 16384 || h > 16384) return false;
+    pixels.resize(std::size_t(w) * h * 4);
+    uLongf size = uLongf(pixels.size());
+    return uncompress(pixels.data(), &size, file.data() + 12, uLong(file.size() - 12)) == Z_OK && size == pixels.size();
+}
+
+// The HUD's sheet is drawn from a cleaned copy of its art (HudClean): made here, once, so the game
+// only adds the key prompts to it. Without the art, no copy (an earlier build's goes).
+bool PackHud(const fs::path& out) {
+    Bytes pixels;
+    std::uint32_t w = 0, h = 0;
+    const std::uint32_t sw = KeyPrompts::kHudWidth, sh = KeyPrompts::kHudHeight;
+    if (!ReadBbui(out / HudClean::ArtName(), pixels, w, h) || w % sw != 0 || h != sh * (w / sw)) {
+        std::error_code error;
+        fs::remove(out / HudClean::kArtFile, error);
+        return true;
+    }
+    HudClean::Clean(pixels, int(w), int(h), int(w / sw), true);
+    if (!WriteBbui(out / HudClean::kArtFile, pixels, w, h)) {
+        std::fprintf(stderr, "could not write %s\n", (out / HudClean::kArtFile).string().c_str());
+        return false;
+    }
+    std::printf("cleaned the HUD's art\n");
+    return true;
+}
+
 int Pack(const fs::path& in, const fs::path& out) {
     std::error_code error;
     fs::create_directories(out, error);
@@ -314,17 +358,7 @@ int Pack(const fs::path& in, const fs::path& out) {
                 return;
             }
             while (w > kLargestSide || h > kLargestSide) Halve(pixels, w, h);
-            uLongf size = compressBound(uLong(pixels.size()));
-            Bytes body(12 + size);
-            std::memcpy(body.data(), "BBUI", 4);
-            std::memcpy(body.data() + 4, &w, 4);
-            std::memcpy(body.data() + 8, &h, 4);
-            if (compress2(body.data() + 12, &size, pixels.data(), uLong(pixels.size()), 6) != Z_OK) {
-                ++failed;
-                return;
-            }
-            body.resize(12 + size);
-            if (!WriteFile(target, body)) {
+            if (!WriteBbui(target, pixels, w, h)) {
                 std::fprintf(stderr, "could not write %s\n", target.string().c_str());
                 stopped = true;
                 return;
@@ -334,7 +368,7 @@ int Pack(const fs::path& in, const fs::path& out) {
         std::printf("packed %d of %zu\n", ++done, pngs.size());
         std::fflush(stdout);
     });
-    if (stopped) return 1;
+    if (stopped || !PackHud(out)) return 1;
     std::printf("packed %d textures, %d failed\n", done.load(), failed.load());
     return failed == 0 && done > 0 ? 0 : 1;
 }

@@ -471,8 +471,9 @@ private:
                                std::span<const u64> pass2);
     bool BindResources(const Pipeline* pipeline);
     void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth) const;
+    float SmoothUiSampler(AmdGpu::Sampler& sharp, bool is_depth, bool ui_replaced) const;
     void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
-                      Shader::Backend::Bindings& binding, u32& write_index);
+                      Shader::Backend::Bindings& binding, u32& write_index, bool ui_replaced);
     /// bbport: whether stage reads reduced scene proxies through their native images instead:
     /// it has a point-filtered sampler and its pass is at the native size (BindTextures).
     bool PointReadsNative(const Shader::Info& stage, const PreparedStage* prepared) const;
@@ -860,6 +861,8 @@ private:
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool pipeline_is_compute = false; ///< bbport: the bound pipeline of BindResources
+    bool ui_movie_draw = false; ///< a Scaleform draw, or one of the UI pass (SmoothUiSampler)
+    bool ui_additive = false;   ///< ui_movie_draw blends additively (SmoothUiSampler)
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
     u32 preupload_frame = ~0u; ///< bbport: frame of the last background pre-upload
     bool PendingWriteOverlaps(VAddr address, u64 size);

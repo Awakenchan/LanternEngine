@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <xxhash.h>
+#include <tuple>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <optional>
 
 #include "bbport_copy.h"
@@ -11,6 +14,7 @@
 #include "bbport_toggles.h"
 #include "bbport_free_check.h"
 #include "engine/key_prompts.h"
+#include "engine/hud_clean.h"
 #include <zlib.h>
 #include <cstdlib>
 #include <cstring>
@@ -730,22 +734,60 @@ bool ReadUiFile(const std::filesystem::path& path, std::vector<u8>& pixels, int&
     return true;
 }
 
-void Halve(std::vector<u8>& pixels, int& w, int& h) {
+// A 2x2 box reduction. Colour is weighted by alpha, so transparent texels (black in most sheets)
+// don't darken the edges of what is drawn, and sRGB data is averaged as light, not as its encoding.
+void Halve(std::vector<u8>& pixels, int& w, int& h, bool srgb) {
+    static const auto decode = [] {
+        std::array<float, 256> t{};
+        for (int i = 0; i < 256; ++i) {
+            const float c = float(i) / 255.0f;
+            t[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return t;
+    }();
+    static const auto encode = [] {
+        std::array<u8, 4096> t{};
+        for (int i = 0; i < 4096; ++i) {
+            const float c = float(i) / 4095.0f;
+            const float e = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+            t[i] = u8(std::clamp(e * 255.0f + 0.5f, 0.0f, 255.0f));
+        }
+        return t;
+    }();
+    const auto to_byte = [srgb](float c) {
+        c = std::clamp(c, 0.0f, 1.0f);
+        return srgb ? encode[int(c * 4095.0f + 0.5f)] : u8(c * 255.0f + 0.5f);
+    };
     const int nw = std::max(1, w / 2), nh = std::max(1, h / 2);
     std::vector<u8> out(std::size_t(nw) * nh * 4);
     for (int y = 0; y < nh; ++y)
-        for (int x = 0; x < nw; ++x)
-            for (int c = 0; c < 4; ++c) {
-                int sum = 0;
-                for (int dy = 0; dy < 2; ++dy)
-                    for (int dx = 0; dx < 2; ++dx)
-                        sum += pixels[(std::size_t(std::min(h - 1, y * 2 + dy)) * w + std::min(w - 1, x * 2 + dx)) * 4 + c];
-                out[(std::size_t(y) * nw + x) * 4 + c] = u8(sum / 4);
+        for (int x = 0; x < nw; ++x) {
+            float weighted[3] = {}, plain[3] = {}, alpha = 0.0f;
+            for (int dy = 0; dy < 2; ++dy)
+                for (int dx = 0; dx < 2; ++dx) {
+                    const u8* p = &pixels[(std::size_t(std::min(h - 1, y * 2 + dy)) * w + std::min(w - 1, x * 2 + dx)) * 4];
+                    const float a = float(p[3]) / 255.0f;
+                    for (int c = 0; c < 3; ++c) {
+                        const float v = srgb ? decode[p[c]] : float(p[c]) / 255.0f;
+                        weighted[c] += v * a;
+                        plain[c] += v;
+                    }
+                    alpha += a;
+                }
+            u8* o = &out[(std::size_t(y) * nw + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                o[c] = to_byte(alpha > 0.0f ? weighted[c] / alpha : plain[c] / 4.0f);
             }
+            o[3] = u8(alpha / 4.0f * 255.0f + 0.5f);
+        }
     pixels.swap(out);
     w = nw;
     h = nh;
 }
+}
+
+bool TextureCache::UiReplacementsLoaded() {
+    return !Pack().keys.empty();
 }
 
 void TextureCache::NoteUiTexture(Image& image) {
@@ -804,40 +846,205 @@ Image* TextureCache::UiReplacement(const Image& image) {
         ui_missing.insert(image.ui_key);
         return nullptr;
     }
-    while (u32(w) > kUiLargestSide || u32(h) > kUiLargestSide) {
-        Halve(pixels, w, h);
+    const vk::Format format = UiFormat(image.info.pixel_format);
+    // A BC1 the game reads as RGB has no alpha: its three-colour blocks' fourth texel is opaque
+    // black there, where the replacement (made from the RGBA reading) holds alpha 0.
+    if (image.info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
+        image.info.pixel_format == vk::Format::eBc1RgbSrgbBlock) {
+        for (std::size_t i = 3; i < pixels.size(); i += 4) {
+            pixels[i] = 255;
+        }
     }
-    ImageInfo info{};
-    info.pixel_format = UiFormat(image.info.pixel_format);
-    info.type = AmdGpu::ImageType::Color2D;
-    info.size = {u32(w), u32(h), 1};
-    info.resources.levels = 1;
-    info.resources.layers = 1;
-    info.num_bits = 32;
-    info.pitch = u32(w);
-    info.mips_layout[0] = {u32(pixels.size()), u32(w), u32(h), 0};
-    auto replacement = std::make_unique<Image>(instance, runtime, slot_image_views, info);
-    scheduler.EndRendering();
-    auto& stream = buffer_cache.GetStreamBuffer();
-    const u64 offset = stream.Copy(pixels.data(), pixels.size(), 256);
-    const vk::BufferImageCopy copy{
-        .bufferOffset = offset,
-        .bufferRowLength = 0,
-        .bufferImageHeight = 0,
-        .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {u32(w), u32(h), 1},
-    };
-    runtime.UploadImage(replacement.get(), &stream, std::span{&copy, 1});
-    ui_bytes += pixels.size();
+    while (u32(w) > kUiLargestSide || u32(h) > kUiLargestSide) {
+        Halve(pixels, w, h, format == vk::Format::eR8G8B8A8Srgb);
+    }
+    Image* out = UploadUi(image.ui_key, pixels, w, h, format);
     static int told = 0;
     if (told++ < 8) {
         std::printf("UI textures: %ux%u drawn from its %dx%d replacement (%llu MiB in use)\n", image.info.size.width,
                     image.info.size.height, w, h, static_cast<unsigned long long>(ui_bytes >> 20));
     }
-    Image* out = replacement.get();
-    ui_images.emplace(image.ui_key, std::move(replacement));
     return out;
+}
+
+// Scales the rectangle of `src` (`src_w` wide) up `s` times into the same rectangle of `dst`
+// (`dst_w` wide): bilinear, weighted by alpha, within the rectangle.
+static void UpscaleRect(const std::vector<u8>& src, int src_w, int rx, int ry, int rw, int rh, std::vector<u8>& dst,
+                 int dst_w, int s) {
+    for (int y = ry * s; y < (ry + rh) * s; ++y) {
+        for (int x = rx * s; x < (rx + rw) * s; ++x) {
+            const float u = std::clamp((float(x) + 0.5f) / float(s) - 0.5f, float(rx), float(rx + rw - 1));
+            const float v = std::clamp((float(y) + 0.5f) / float(s) - 0.5f, float(ry), float(ry + rh - 1));
+            const int x0 = int(u), y0 = int(v);
+            const int x1 = std::min(x0 + 1, rx + rw - 1), y1 = std::min(y0 + 1, ry + rh - 1);
+            const float fx = u - float(x0), fy = v - float(y0);
+            const int tx[4] = {x0, x1, x0, x1}, ty[4] = {y0, y0, y1, y1};
+            const float weight[4] = {(1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy};
+            float acc[4] = {};
+            for (int k = 0; k < 4; ++k) {
+                const u8* t = &src[(std::size_t(ty[k]) * src_w + tx[k]) * 4];
+                const float a = weight[k] * float(t[3]);
+                for (int c = 0; c < 3; ++c) {
+                    acc[c] += a * float(t[c]);
+                }
+                acc[3] += a;
+            }
+            u8* out = &dst[(std::size_t(y) * dst_w + x) * 4];
+            for (int c = 0; c < 3; ++c) {
+                out[c] = acc[3] > 0.0f ? u8(std::clamp(acc[c] / acc[3] + 0.5f, 0.0f, 255.0f)) : 0;
+            }
+            out[3] = u8(std::clamp(acc[3] + 0.5f, 0.0f, 255.0f));
+        }
+    }
+}
+
+Image* TextureCache::UploadUi(u64 key, std::vector<u8>& pixels, int w, int h, vk::Format format) {
+    const bool srgb = format == vk::Format::eR8G8B8A8Srgb;
+    // The full mip chain: a menu draws its art at a quarter of the replacement's size (a 4x copy at
+    // the game's own size), and a single level sampled that small skips three texels in four.
+    ImageInfo info{};
+    info.pixel_format = format;
+    info.type = AmdGpu::ImageType::Color2D;
+    info.size = {u32(w), u32(h), 1};
+    info.resources.layers = 1;
+    info.num_bits = 32;
+    info.pitch = u32(w);
+    u64 bytes = 0;
+    for (u32 level = 0, lw = u32(w), lh = u32(h); level < info.mips_layout.size(); ++level) {
+        info.mips_layout[level] = {lw * lh * 4, lw, lh, u32(bytes)};
+        bytes += u64(lw) * lh * 4;
+        info.resources.levels = level + 1;
+        if (lw == 1 && lh == 1) {
+            break;
+        }
+        lw = std::max(1u, lw / 2);
+        lh = std::max(1u, lh / 2);
+    }
+    auto replacement = std::make_unique<Image>(instance, runtime, slot_image_views, info);
+    scheduler.EndRendering();
+    // A level at a time: a 4096x4096 chain (85 MB) at once is most of the stream buffer.
+    auto& stream = buffer_cache.GetStreamBuffer();
+    for (u32 level = 0; level < info.resources.levels; ++level) {
+        if (level) {
+            Halve(pixels, w, h, srgb);
+        }
+        const vk::BufferImageCopy copy{
+            .bufferOffset = stream.Copy(pixels.data(), pixels.size(), 256),
+            .imageSubresource = {vk::ImageAspectFlagBits::eColor, level, 0, 1},
+            .imageExtent = {u32(w), u32(h), 1},
+        };
+        runtime.UploadImage(replacement.get(), &stream, {&copy, 1});
+    }
+    ui_bytes += bytes;
+    Image* out = replacement.get();
+    ui_images.emplace(key, std::move(replacement));
+    return out;
+}
+
+// The HUD's sheet is never replaced (key prompts are drawn into it), and the gaps between its
+// sprites carry colour: the HUD bars' glows blend theirs in, and filtering read it past their edges
+// as a faint box. While 4K menus are loaded it is drawn from a cleaned copy (HudClean), with mips,
+// filtered like a replacement: the 4K art for the sheet, cleaned by bb-ui-4k pack (HudArt), when
+// the drawn sheet is the one the art was made from, with the key prompts that aren't the game's
+// own scaled up into it; else the sheet itself, cleaned here. A copy per drawing of the sheet (the
+// key prompts' choices); the oldest beyond kHudCopies is freed once the GPU is past the draws
+// recorded so far.
+void TextureCache::CleanHud(Image& image, const std::vector<u8>& sheet) {
+    // KeyPromptData leaves the bytes of the game's button textures; only the HUD's are this size.
+    if (sheet.size() != KeyPrompts::kHudBytes || !UiReplacementsLoaded()) {
+        return;
+    }
+    const u8* data = sheet.data();
+    const u64 key = XXH3_64bits(data, sheet.size()) ^ 0x6875642d636c65ull; // "hud-cle"
+    image.ui_key = key;
+    if (ui_images.count(key)) {
+        return;
+    }
+    const int sw = int(KeyPrompts::kHudWidth), sh = int(KeyPrompts::kHudHeight);
+    std::vector<u8> small(std::size_t(sw) * sh * 4);
+    KeyPrompts::DecodeHud(data, small.data());
+    std::array<u64, 3> prompts{};
+    const bool same_sheet = KeyPrompts::HudHashes(data, prompts) == HudClean::kSheetMasked;
+    const bool art = same_sheet && HudArt();
+    static bool told = false;
+    if (!same_sheet && !told && HudArt()) {
+        told = true;
+        std::printf("UI textures: the HUD's sheet isn't the one its 4K art was made from; drawn from itself\n");
+    }
+    std::vector<u8> pixels;
+    int w = sw, h = sh, scaled = 0;
+    if (art) {
+        pixels = hud_art.pixels;
+        w = hud_art.w;
+        h = hud_art.h;
+        const int s = w / sw;
+        const auto rects = KeyPrompts::HudPrompts();
+        for (std::size_t i = 0; i < rects.size(); ++i) {
+            if (prompts[i] == HudClean::kSheetPrompts[i]) {
+                continue;
+            }
+            const auto& r = rects[i];
+            UpscaleRect(small, sw, r.x, r.y, r.w, r.h, pixels, w, s);
+            // The gaps around the prompt took the colour of the game's prompt (bb-ui-4k pack):
+            // filled again, a few texels around it too.
+            constexpr int kMargin = 4;
+            const int x0 = std::max(0, (r.x - kMargin) * s), y0 = std::max(0, (r.y - kMargin) * s);
+            const int x1 = std::min(w, (r.x + r.w + kMargin) * s), y1 = std::min(h, (r.y + r.h + kMargin) * s);
+            HudClean::Fill(pixels, w, x0, y0, x1 - x0, y1 - y0);
+            ++scaled;
+        }
+    } else {
+        pixels = std::move(small);
+        HudClean::Clean(pixels, w, h, 1, false);
+    }
+    const u64 before = ui_bytes;
+    UploadUi(key, pixels, w, h, UiFormat(image.info.pixel_format));
+    hud_copies.emplace_back(key, ui_bytes - before);
+    constexpr std::size_t kHudCopies = 3;
+    while (hud_copies.size() > kHudCopies) {
+        const auto [old, bytes] = hud_copies.front();
+        hud_copies.pop_front();
+        const auto it = ui_images.find(old);
+        if (it == ui_images.end()) {
+            continue;
+        }
+        scheduler.DeferOperation([this, copy = std::move(it->second)]() mutable {
+            for (auto& backing : copy->backing_images) {
+                for (const ImageViewId view : backing.image_view_ids) {
+                    slot_image_views.erase(view);
+                }
+            }
+            copy.reset();
+        });
+        ui_images.erase(it);
+        ui_bytes -= bytes;
+    }
+    if (art) {
+        std::printf("UI textures: the HUD's sheet drawn from its 4K art (%d key prompts scaled up into it)\n", scaled);
+    } else {
+        std::printf("UI textures: the HUD's sheet drawn from a cleaned copy\n");
+    }
+}
+
+bool TextureCache::HudArt() {
+    if (!hud_art.tried) {
+        hud_art.tried = true;
+        const UiPack& pack = Pack();
+        int w = 0, h = 0;
+        const int sw = int(KeyPrompts::kHudWidth), sh = int(KeyPrompts::kHudHeight);
+        if (!pack.keys.empty() && ReadUiFile(pack.dir / HudClean::kArtFile, hud_art.pixels, w, h) && w % sw == 0 &&
+            h == sh * (w / sw) && u32(w) <= kUiLargestSide) {
+            hud_art.w = w;
+            hud_art.h = h;
+        } else {
+            hud_art.pixels = {};
+            if (pack.keys.count(HudClean::kArtKey)) {
+                std::printf("UI textures: the 4K menus have no cleaned HUD art (%s); rebuild them for a 4K HUD\n",
+                            HudClean::kArtFile);
+            }
+        }
+    }
+    return !hud_art.pixels.empty();
 }
 
 bool TextureCache::KeyPromptData(const Image& image, std::vector<u8>& data) {
@@ -1663,6 +1870,7 @@ void TextureCache::RefreshImage(Image& image) {
     BB_SECTION(RefreshUpload);
     runtime.UploadImage(&image, buffer, image_copies);
     NoteUiTexture(image);
+    CleanHud(image, keycaps);
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

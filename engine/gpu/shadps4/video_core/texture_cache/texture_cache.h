@@ -478,10 +478,27 @@ private:
     void NoteUiTexture(Image& image);
 public:
     Image* UiReplacement(const Image& image);
+    /// The HUD's sheet: its cleaned copy, as a replacement (UiReplacement). `sheet`: the bytes
+    /// KeyPromptData left (the sheet with any key prompts drawn in).
+    void CleanHud(Image& image, const std::vector<u8>& sheet);
+    /// Whether 4K menus are loaded (BB_UI_4K): the UI draws then sample smoothly
+    /// (Rasterizer::SmoothUiSampler).
+    static bool UiReplacementsLoaded();
 private:
+    /// A replacement's image from RGBA texels, with its mip chain, as ui_images[key].
+    Image* UploadUi(u64 key, std::vector<u8>& pixels, int w, int h, vk::Format format);
     std::unordered_map<u64, std::unique_ptr<Image>> ui_images;
     std::unordered_set<u64> ui_missing;
     u64 ui_bytes = 0;
+    /// CleanHud's copies (key, bytes), oldest first: one per drawing of the key prompts.
+    std::deque<std::pair<u64, u64>> hud_copies;
+    /// The cleaned 4K art for the HUD's sheet (HudClean::kArtFile), read once; empty without it.
+    bool HudArt();
+    struct {
+        std::vector<u8> pixels;
+        int w = 0, h = 0;
+        bool tried = false;
+    } hud_art;
 
     /// Removes the image and any views/surface metas that reference it.
     void DeleteImage(ImageId image_id);
