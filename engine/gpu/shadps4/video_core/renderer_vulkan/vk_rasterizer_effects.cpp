@@ -132,12 +132,16 @@ void Rasterizer::EffectsBlendedScene() {
 
 void Rasterizer::EffectsBeforeUpscaler(u64 compute_hash) {
     if (effects_wanted && compute_hash == upscaler->TriggerHash()) {
+        const auto camera = camera_motion->PassMatrices();
+        volumetric_light->SetCamera({camera.view, camera.inv_view, camera.valid});
         volumetric_light->Composite(upscaler->SceneColor(), "the upscaler");
     }
 }
 
 void Rasterizer::EffectsBeforeResources(const GraphicsPipeline* pipeline) {
     if (effects_wanted && FragmentHash(pipeline) == HdrPostHash) {
+        const auto camera = camera_motion->PassMatrices();
+        volumetric_light->SetCamera({camera.view, camera.inv_view, camera.valid});
         volumetric_light->Composite();
     }
 }

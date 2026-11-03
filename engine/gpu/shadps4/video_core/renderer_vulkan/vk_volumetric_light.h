@@ -2,12 +2,14 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <span>
 #include <vector>
 
 #include <span>
 
 #include "video_core/buffer_cache/buffer.h"
+#include "video_core/renderer_vulkan/lamp_fog_lights.h"
 #include "video_core/renderer_vulkan/vk_contact_shadow.h"
 #include "video_core/renderer_vulkan/vk_point_shadow.h"
 
@@ -21,12 +23,13 @@ public:
                     SceneTargets& scene_targets);
     ~VolumetricLight();
 
-    void Reset() { ready = tinted = false; scene = {}; fog_lights.clear(); }
+    void Reset() { ready = tinted = false; scene = {}; fog_lights.Clear(); }
     void Integrate(VideoCore::ImageId shadow_target, const vk::DescriptorImageInfo& depth,
                    const ContactShadow::Inputs& inputs);
     void Tint(const vk::DescriptorBufferInfo& lighting, u32 offset_bytes);
     void Scene(VideoCore::ImageId color);
     void AddPointLights(const u32* constants, const u32* lights, u32 count);
+    void SetCamera(const LampFog::Camera& camera) { fog_camera = camera; }
     void Composite(VideoCore::ImageId fallback = {}, const char* where = "HDR post");
 
 private:
@@ -52,7 +55,10 @@ private:
     std::unique_ptr<VideoCore::Buffer> tint_state;
     std::unique_ptr<VideoCore::Buffer> fog_data;
     std::array<u32, 16> fog_matrix{};
-    std::vector<std::array<u32, 16>> fog_lights;
+    LampFog::FrameLights fog_lights;
+    LampFog::Memory fog_memory;
+    LampFog::Camera fog_camera;
+    std::chrono::steady_clock::time_point fog_memory_time{};
     vk::UniqueSampler sampler;
     VideoCore::UniqueImage fog;
     vk::UniqueImageView fog_view;

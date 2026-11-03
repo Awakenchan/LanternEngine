@@ -31,6 +31,7 @@ constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
 constexpr vk::ImageSubresourceRange ColorRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 constexpr u32 FogLightsAt = 256, FogMaxLights = 64;
 constexpr u32 FogBytes = FogLightsAt + FogMaxLights * 64;
+static_assert(FogBytes <= 65536, "vkCmdUpdateBuffer takes at most 64 KiB");
 struct Params {
     u32 offsets, steps;
     float reach, density, strength, anisotropy, bias, tilt;
@@ -383,18 +384,10 @@ void VolumetricLight::AddPointLights(const u32* constants, const u32* lights, u3
         !BbSettings::Get().effects[BbSettings::EffectPointFog].load(std::memory_order_relaxed)) {
         return;
     }
-    if (fog_lights.empty()) {
+    if (fog_lights.Empty()) {
         std::copy_n(constants, fog_matrix.size(), fog_matrix.begin());
     }
-    for (u32 i = 0; i < count && fog_lights.size() < FogMaxLights; ++i) {
-        std::array<u32, 16> light;
-        std::copy_n(lights + i * 16, light.size(), light.begin());
-        if (std::ranges::none_of(fog_lights, [&](const auto& known) {
-                return std::equal(known.begin(), known.begin() + 4, light.begin());
-            })) {
-            fog_lights.push_back(light);
-        }
-    }
+    fog_lights.Add(lights, count);
 }
 
 void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights, u32 w, u32 h) {
@@ -460,7 +453,7 @@ void VolumetricLight::Composite(VideoCore::ImageId fallback, const char* where) 
     const auto color_id = scene ? scene : fallback;
     const auto uid = scene ? scene_uid : (fallback ? texture_cache.GetImage(fallback).image_uid : 0);
     const bool has_tint = tinted;
-    const auto lamp_lights = fog_lights;
+    const auto seen_lights = fog_lights.Lights();
     Reset();
     if (!has_result || !Enabled() || !color_id) return;
     if (!has_tint) {
@@ -517,7 +510,20 @@ void VolumetricLight::Composite(VideoCore::ImageId fallback, const char* where) 
         std::printf("Volumetric lighting: scene and shadow viewport sizes differ; off\n");
         return;
     }
-    RecordLampFog(lamp_lights, w, h);
+    if (!BbSettings::Get().effects[BbSettings::EffectPointFog].load(std::memory_order_relaxed)) {
+        fog_memory.Clear();
+    } else {
+        const auto now = std::chrono::steady_clock::now();
+        // Bounded: a hitch or a menu without the scene should not count as the lights being gone.
+        const float seconds = std::clamp(
+            std::chrono::duration<float>(now - fog_memory_time).count(), 0.0f, 0.1f);
+        fog_memory_time = now;
+        // The memory fades lights at the limit; Select is the bound for the game's list as it is,
+        // which the memory passes through without a camera.
+        const auto drawn_lights = fog_memory.Update(seen_lights, fog_camera, seconds, FogMaxLights);
+        const auto lamp_lights = LampFog::Select(drawn_lights, FogMaxLights);
+        RecordLampFog(lamp_lights.lights, w, h);
+    }
     const vk::DescriptorImageInfo raw{*sampler, *fog_view, vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo filtered{{}, *filtered_view, vk::ImageLayout::eGeneral};
     EffectPass::Mark(10, "volumetric filter");
