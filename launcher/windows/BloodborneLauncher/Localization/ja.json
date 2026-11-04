@@ -1647,5 +1647,10 @@
   "The saved settings are damaged.": "保存された設定が壊れています。",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060・1080p、ほぼ全オンで 47〜51 FPS を測定。",
   " (experimental)": "（実験的）",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "ほぼすべてオン：間接光、ボリューメトリック、より鮮明な反射、柔らかい影。最も重い設定です。負荷は未測定で、古いGPUでは大きな低下が予想されます。GPUで実行できない効果は自動でオフになります。"
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "ほぼすべてオン：間接光、ボリューメトリック、より鮮明な反射、柔らかい影。最も重い設定です。負荷は未測定で、古いGPUでは大きな低下が予想されます。GPUで実行できない効果は自動でオフになります。",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "狩人",
+  "No hunters yet: they show up here once the game has saved": "狩人はまだいません。ゲームがセーブすると表示されます",
+  "Level {0}  ·  {1} bosses": "レベル {0}  ·  ボス {1} 体",
+  "{0} played": "プレイ時間 {0}"
 }

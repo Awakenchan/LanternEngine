@@ -1647,5 +1647,10 @@
   "The saved settings are damaged.": "Die gespeicherten Einstellungen sind beschädigt.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " 47 bis 51 FPS gemessen auf einer RTX 5060 in 1080p mit fast allem an.",
   " (experimental)": " (experimentell)",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Fast alles an: indirektes Licht, Volumetrik, schärfere Reflexionen und weiche Schatten. Am anspruchsvollsten; die Kosten wurden nicht gemessen, auf älteren GPUs ist mit einem starken Einbruch zu rechnen. Was Ihre GPU nicht kann, schaltet sich selbst ab."
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Fast alles an: indirektes Licht, Volumetrik, schärfere Reflexionen und weiche Schatten. Am anspruchsvollsten; die Kosten wurden nicht gemessen, auf älteren GPUs ist mit einem starken Einbruch zu rechnen. Was Ihre GPU nicht kann, schaltet sich selbst ab.",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "Jäger",
+  "No hunters yet: they show up here once the game has saved": "Noch keine Jäger: Sie erscheinen hier, sobald das Spiel gespeichert hat",
+  "Level {0}  ·  {1} bosses": "Stufe {0}  ·  {1} Bosse",
+  "{0} played": "{0} gespielt"
 }

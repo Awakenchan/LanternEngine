@@ -13,6 +13,7 @@
 #include "bbport_toggles.h"
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace Vulkan {
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
@@ -424,7 +425,42 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
     resample_pipelines.emplace_back(key, std::move(pipeline));
     return result;
 }
+void SceneTargets::DropForgotten() {
+    const auto uids = releases.Take();
+    if (uids.empty()) {
+        return;
+    }
+    std::vector<std::unique_ptr<Entry>> doomed;
+    for (const u64 uid : uids) {
+        if (!tracked.erase(uid)) {
+            continue;
+        }
+        TakeProxies(entries, uid, 16, Key, doomed);
+    }
+    if (doomed.empty()) {
+        return;
+    }
+    for (auto& slot : recent) {
+        for (const auto& entry : doomed) {
+            if (slot.second == entry.get()) {
+                slot = {};
+            }
+        }
+    }
+    for (const auto& entry : doomed) {
+        released_bytes += entry->image.size_bytes;
+    }
+    released_proxies += doomed.size();
+    scheduler.DeferOperation([doomed = std::move(doomed)]() mutable { doomed.clear(); });
+    if (released_proxies - release_report_proxies >= 256) {
+        release_report_proxies = released_proxies;
+        std::printf("Scene resolution: %llu proxies of freed images released (%llu MiB), %zu live\n",
+                    static_cast<unsigned long long>(released_proxies),
+                    static_cast<unsigned long long>(released_bytes >> 20), entries.size());
+    }
+}
 SceneTargets::Entry& SceneTargets::Get(VideoCore::ImageId id, u32 level) {
+    DropForgotten();
     auto& original = *lookup(id, 0);
     const u64 key = Key(original.image_uid, level);
     // A draw has up to six targets, mostly the same as the previous draw's.

@@ -414,6 +414,16 @@ private:
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
     void DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                     bool is_indexed, u32 index_offset);
+    struct GxRegister {
+        u16 index;
+        u32 value;
+    };
+    std::array<GxRegister, 160> gx_registers{};
+    u32 num_gx_registers = 0;
+    const void* gx_state = nullptr;
+    void ApplyGxRecord(const GraphicsPipeline* pipeline, const PreparedDraw*& used_prepared, u64 gx_record,
+                       bool is_indexed_draw);
+    static void SwapGxRegisters(AmdGpu::Regs& regs, GxRegister* list, u32 count);
     static bool DrawPipeWanted();
     bool UseDrawPipe() const;
     bool OnStageA() const;
@@ -855,6 +865,17 @@ private:
     std::array<u64, 1u << 16> waited_on{};
     u64 newest_pending_write = 0;
     PendingReads pending_reads;
+    struct ConstantCopy {
+        VAddr address;
+        u32 size;
+        u32 version;
+        u64 at;
+        u64 offset;
+        u64 hash;
+    };
+    std::array<ConstantCopy, 4096> constant_copies{};
+    std::vector<u64> gpu_written_granules = std::vector<u64>(1u << 14);
+    u64 constant_checks = 0;
     PendingReads pending_write_table; ///< the same per granule for GPU writes queued (NotePendingGpuWrite)
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
@@ -876,6 +897,20 @@ private:
     u32 num_ring_stages = 0;
     /// bbport: the vertex stream V#s of the packet being recorded (stage B; empty elsewhere).
     std::span<const AmdGpu::Buffer> packet_vsharps;
+    std::span<const u64> packet_vkeys;
+    std::span<const u64> packet_view_keys;
+    u64 packet_index_key = 0;
+    struct ObjectBind {
+        u64 key;
+        VAddr base;
+        u64 size;
+        u64 generation;
+        const VideoCore::Buffer* buffer;
+        u64 offset;
+    };
+    std::array<ObjectBind, 4096> object_binds{};
+    u64 object_bind_checks = 0;
+    std::pair<const VideoCore::Buffer*, u64> BindByObject(u64 key, VAddr base, u64 size);
     const RingBinding* FindRingBinding(const Shader::Info& stage, u32 index) const {
         for (u32 i = 0; i < num_ring_stages; ++i) {
             if (ring_stages[i].info == &stage) {

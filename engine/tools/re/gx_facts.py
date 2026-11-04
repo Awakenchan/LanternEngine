@@ -95,6 +95,8 @@ SWAP_CHAIN_LAYOUT = {'target stride': 0x2c, 'description': 0x300, 'buffer count'
 SWAP_CHAIN_HOLDER = 0x348
 UPLOAD_RESOURCE = 0x26b35e0
 UPDATE_SUBRESOURCE = 0x2168a20
+CONSTANT_UPDATES = {'dynamic': (0x26adb90, '554889e5415741564155415453 4883ec28'.replace(' ', '')),
+                    'default': (0x26b3560, '554889e5415741564155415453 4883ec18'.replace(' ', ''))}
 GAMMA_RAMP = (0x26d6b20, 0x380, 0x401)
 TEXTURE_HOLDERS = {'CreateTexture2D': (0x2171d60, 3), 'CreateTexture3D': (0x21723a0, 4)}
 RECORD_DRAW_ENTRIES = {0x21696c0: '554889e5415741564155415453 50', 0x2169780: '554889e5415741564155415453 50',
@@ -149,6 +151,16 @@ BIND_CALLS = {'the vertex buffer flush': 0x26cfcf0, 'the ring allocator': 0x26ad
               'the shader table': 0x26d04e0, 'setShaderStages': 0x1076030, 'the fetch pointer': 0x1076390,
               'setVsShader': 0x1075480, 'setPsShader': 0x10753c0, 'the prefetch': 0x1073f50,
               'the pixel semantics': 0x10873a0, 'setPsInputs': 0x1075000}
+RENDER_WRITERS = {0x1072fd0: (0x8e, None), 0x1073090: (0x1e0, 0xffff1fff), 0x1073100: (0x105, None),
+                  0x10733a0: (0x200, 0xc07007ff), 0x1073400: (0x10b, 0xffffff), 0x1073190: (0x10c, None),
+                  0x1076b30: (0x204, 0xf7fe03f), 0x1076e00: (0x205, 0x393fff), 0x10765e0: (0x10f, None),
+                  0x10766d0: (0x94, 0x7fff)}
+RENDER_FLUSHES = {FLUSH_OUTPUT_MERGER: ((0x1072fd0, 0x1073090, 0x1073100, 0x10733a0, 0x1073400, 0x1073190),
+                                       (0x4d0, 0x568, 0x4d8, 0x584), (0x546c8f4, 0x546ca1c)),
+                  0x26d3370: ((0x1076b30, 0x1076e00, 0x10765e0, 0x10766d0), (0x240, 0x248, 0x3c8), (0x546ca58,))}
+TARGET_WRITERS = {0x10738b0: ((0x318, 0x31c, 0xf), (0x1086ca0,)), 0x10739b0: ((0x10, 0x11, 0x2, 0x5, 0x2af, 0xf), (0x1072770, 0x1072790))}
+TARGET_FLUSH = (0x26d2790, (0x4e0, 0x520))
+VERTEX_FLUSH = (0x26cfcf0, (0xa260, 0x28cc, 0x28cd, 0x20, 0x120, 0x1a0))
 USER_DATA_BASES = 0x48d15c0
 USER_DATA_VALUES = (0x2e40, 0x2c0c, 0x2c4c, 0x2c8c, 0x2ccc, 0x2d0c, 0x2d4c)
 
@@ -264,6 +276,23 @@ def main(path):
     for f, entry in RECORD_DRAW_ENTRIES.items():
         entry = entry.replace(' ', '')
         check(e.read(f, len(entry) // 2).hex() == entry, f'draw 0x{f:x} has the entry the record hook expects')
+    for writer, (register, mask) in RENDER_WRITERS.items():
+        written = immediates(e, writer)
+        check(register in written and (mask is None or mask in written),
+              f'{names.get(writer, hex(writer))} 0x{writer:x} writes context register 0x{register:x}' + (f' masked by 0x{mask:x}' if mask else ''))
+    for flush, (writers, offsets, defaults) in RENDER_FLUSHES.items():
+        called, read = calls(flush), immediates(e, flush)
+        check(all(w in called for w in writers), f'flush 0x{flush:x} writes its state through ' + ', '.join(hex(w) for w in writers))
+        check(all(o in read for o in offsets), '  from pending state ' + ', '.join(f'+0x{o:x}' for o in offsets))
+        check(all(d in rip_targets(e, flush) for d in defaults), '  with the default state at ' + ', '.join(hex(d) for d in defaults))
+    for writer, (registers, checks) in TARGET_WRITERS.items():
+        check(all(r in immediates(e, writer) for r in registers) and all(c in calls(writer) for c in checks),
+              f'{names.get(writer, hex(writer))} writes ' + ', '.join(hex(r) for r in registers) + ' after ' + ', '.join(hex(c) for c in checks))
+    flush, offsets = TARGET_FLUSH
+    check(all(w in calls(flush) for w in TARGET_WRITERS) and all(o in immediates(e, flush) for o in offsets),
+          f'output flush 0x{flush:x} sets the targets at +0x4e0 and the depth view at +0x520 through both writers')
+    flush, offsets = VERTEX_FLUSH
+    check(all(o in immediates(e, flush) for o in offsets), f'vertex flush 0x{flush:x} builds the V# table at +0xa260 from the vertex buffers, strides and offsets, copying the entries at +0x28cc and +0x28cd')
     creator = SWAP_CHAIN['creator']
     check(e.read(creator, len(SWAP_CHAIN_ENTRY) // 2).hex() == SWAP_CHAIN_ENTRY, f'swap chain creator 0x{creator:x} has the entry the hook expects')
     check([e.function(c)[0] for c in e.callers(creator)] == [SWAP_CHAIN['wrapper']], f'  called only by 0x{SWAP_CHAIN["wrapper"]:x}')
@@ -276,6 +305,13 @@ def main(path):
     check(SWAP_CHAIN_LAYOUT['buffer count'] in presented, f'present 0x{SWAP_CHAIN["present"]:x} reads the buffer count at +0x328')
     check(SWAP_CHAIN_HOLDER in presented and SWAP_CHAIN_LAYOUT['target stride'] in presented,
           '  and points the holder at +0x348 at each buffer through its target')
+    for kind, (update, entry) in CONSTANT_UPDATES.items():
+        check(e.read(update, len(entry) // 2).hex() == entry, f'{kind} buffer update 0x{update:x} has the entry the hook expects')
+        check({e.function(c)[0] for c in e.callers(update)} == {UPDATE_SUBRESOURCE}, f'  called only by UpdateSubresource 0x{UPDATE_SUBRESOURCE:x}')
+    dynamic = CONSTANT_UPDATES['dynamic'][0]
+    check(RING_ALLOCATOR[0] in calls(dynamic) and 0x26ae700 in calls(dynamic), f'  the dynamic update takes new ring memory (0x{RING_ALLOCATOR[0]:x}) and a rename entry (0x26ae700)')
+    check(0x26b1c40 in calls(CONSTANT_UPDATES['default'][0]), '  the default update writes through the command stream (0x26b1c40)')
+    check(not any(e.function(c)[0] == UPDATE_SUBRESOURCE for c in e.callers(RING_ALLOCATOR[0])), '  UpdateSubresource takes ring memory only through the dynamic update')
     uploads = {e.function(c)[0] for c in e.callers(UPLOAD_RESOURCE)}
     check(uploads == {UPDATE_SUBRESOURCE, GAMMA_RAMP[0]}, f'0x{UPLOAD_RESOURCE:x} is an upload: called by UpdateSubresource 0x{UPDATE_SUBRESOURCE:x} and the gamma ramp 0x{GAMMA_RAMP[0]:x} only')
     check(calls(GAMMA_RAMP[0]).count(UPLOAD_RESOURCE) == 3 and GAMMA_RAMP[1] in immediates(e, GAMMA_RAMP[0]) and GAMMA_RAMP[2] in immediates(e, GAMMA_RAMP[0]),

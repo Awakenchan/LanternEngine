@@ -1095,6 +1095,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             }
             TraceBinding(device_addr, size, is_written, is_written ? 0 : 2);
             note_hle(0);
+            ++obtain_paths[is_written ? 1 : 0];
             if (!is_written && !is_texel_buffer) {
                 if (const auto shadow = ShadowCopy(device_addr, size)) {
                     return *shadow;
@@ -1114,6 +1115,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
         BB_SECTION(ObtainStream);
         note_hle(1);
+        ++obtain_paths[2];
         if (stats) {
             auto& region = Stats().regions[RegionKey(device_addr)];
             ++region.stream_count;
@@ -1148,6 +1150,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     EnsureResident(arena, first_block, last_block);
     BB_SECTION(ObtainVram);
     note_hle(2);
+    ++obtain_paths[is_written ? 4 : 3];
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
     if (GuestInPlace()) {
         BbStats::bound_vram_bytes.fetch_add(size, std::memory_order_relaxed);
@@ -3124,6 +3127,11 @@ void BufferCache::ProcessPendingUnmaps() {
     }
 }
 
+u64 BufferCache::BindGeneration() const noexcept {
+    return ResidencyGeneration() ^ (u64(arenas.size()) << 48) ^
+           (MemoryTracker::cpu_writes.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull);
+}
+
 bool BufferCache::IsInPlace(VAddr addr, u64 size) const {
     if (!GuestInPlace() || size == 0) {
         return false;
@@ -3239,6 +3247,9 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         });
     track_scope.End();
 
+    if (src_buffer || !chunk_copies.empty()) {
+        ++obtain_paths[5];
+    }
     if (src_buffer) {
         runtime.CopyBuffer(src_buffer, arena, copies);
     }

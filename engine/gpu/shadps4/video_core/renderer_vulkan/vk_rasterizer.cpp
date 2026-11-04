@@ -6,6 +6,7 @@
 #endif
 #include "bbport_platform.h"
 #include "engine/gx_trace.h"
+#include "engine/gx_records.h"
 #include <bit>
 #include <map>
 #include <thread>
@@ -766,7 +767,9 @@ struct DrawPacket {
     std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> cb_extent;
     AmdGpu::CbDbExtent db_extent;
     u32 num_vsharps; ///< V#s of the vertex streams, after the indirect arguments
-    u32 pad;
+    u32 num_gx_registers;
+    u64 index_key;
+    u32 num_view_keys;
     u64 ring_end; ///< constant ring position after this packet's copies
 };
 struct PacketStage {
@@ -852,6 +855,11 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // constant binding instead of a scan of the writes (a list scan was ~5% of this thread).
     newest_pending_write = draw_pipe->NextPacket();
     pending_write_table.Note(address, size, newest_pending_write);
+    const u64 first = address >> 20, last = (address + size - 1) >> 20;
+    for (u64 g = first; g <= last && g - first < 64; ++g) {
+        const u64 at = std::min<u64>(g, gpu_written_granules.size() * 64 - 1);
+        gpu_written_granules[at >> 6] |= u64(1) << (at & 63);
+    }
 }
 
 bool Rasterizer::ReadTrackingFiltered() {
@@ -978,6 +986,80 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     }
     const u64 alignment = std::max<u64>(instance.StorageMinAlignment(),
                                         instance.UniformMinAlignment());
+    const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
+    const u32 gx_stage = stage.sw_stage == Shader::SwStage::Vertex     ? 0
+                         : stage.sw_stage == Shader::SwStage::Fragment ? 1
+                                                                       : 2;
+    const bool tracked = gx && gx_stage < 2 && BbEngine::GxRecords::ConstantsTracked();
+    std::array<std::pair<VAddr, u32>, 16> versions{};
+    u32 num_versions = 0;
+    if (tracked) {
+        const auto& gs = gx->stages[gx_stage];
+        for (u32 slot = 0; slot < 16; ++slot) {
+            const u8 at = gs.constants[slot];
+            if (at == BbEngine::GxBindings::kUnbound || at >= gx->descriptors) {
+                continue;
+            }
+            const u32* words = gx->words[at];
+            versions[num_versions++] = {VAddr(words[0]) | (VAddr(words[1] & 0xfff) << 32),
+                                        gs.constant_versions[slot]};
+        }
+        if (!BbEngine::GxRecords::Intact()) {
+            num_versions = 0;
+        }
+    }
+    const auto version_of = [&](VAddr address, u32& version) {
+        for (u32 i = 0; i < num_versions; ++i) {
+            if (versions[i].first == address) {
+                version = versions[i].second;
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto written_by_gpu = [&](VAddr address, u64 size) {
+        const u64 first = address >> 20, last = (address + size - 1) >> 20;
+        for (u64 g = first; g <= last; ++g) {
+            const u64 at = std::min<u64>(g, gpu_written_granules.size() * 64 - 1);
+            if (gpu_written_granules[at >> 6] >> (at & 63) & 1) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto copy_slot = [&](VAddr address, u64 size) -> ConstantCopy& {
+        const u64 key = (address >> 4) ^ (size << 40);
+        return constant_copies[(key * 0x9E3779B97F4A7C15ull) >> 52];
+    };
+    const auto reuse = [&](u32 index, VAddr address, u64 size) {
+        u32 version;
+        if (!num_versions || !version_of(address, version)) {
+            return false;
+        }
+        auto& memo = copy_slot(address, size);
+        const bool known = memo.address == address && memo.size == size && memo.version == version &&
+                           constant_ring->Reusable(memo.at) && !written_by_gpu(address, size);
+        if (!known) {
+            BbEngine::GxRecords::NoteConstant(false, false, true, address, u32(size));
+            return false;
+        }
+        const bool check = memo.hash != 0;
+        bool same = true;
+        if (check && memory->IsValidGpuMapping(address, size)) {
+            same = (XXH3_64bits(reinterpret_cast<const void*>(address), size) | 1) == memo.hash;
+            if (same && !BbEngine::GxRecords::Compared()) {
+                memo.hash = 0;
+            }
+        }
+        BbEngine::GxRecords::NoteConstant(same, check, same, address, u32(size));
+        if (!same) {
+            memo.address = 0;
+            return false;
+        }
+        constant_ring->Hold(memo.at);
+        out.push_back({index, static_cast<u32>(size), memo.offset, address});
+        return true;
+    };
     const auto copy = [&](u32 index, const void* source, VAddr address, u64 size) {
         const auto offset = constant_ring->Allocate(size, alignment);
         if (!offset) {
@@ -991,6 +1073,14 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         }
         constant_ring->Flush(*offset, size);
         out.push_back({index, static_cast<u32>(size), *offset, address});
+        u32 version;
+        if (!source && num_versions && version_of(address, version)) {
+            const bool hashed = (BbEngine::GxRecords::Compared() || (++constant_checks & 63) == 0) &&
+                                memory->IsValidGpuMapping(address, size);
+            copy_slot(address, size) = {
+                address, static_cast<u32>(size), version, constant_ring->LastAbsolute(), *offset,
+                hashed ? XXH3_64bits(reinterpret_cast<const void*>(address), size) | 1 : 0};
+        }
         return true;
     };
     // Compute stages may run as HLE copy shaders, which read their buffers on the recording
@@ -1027,6 +1117,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         // written by the GPU (now or by work still queued for the recording thread). What is not
         // copied is read on the recording thread: a CPU write over these bytes on this thread
         // waits for the packet (WaitForPendingReads).
+        if (!hle_candidate && size != 0 && size <= VideoCore::BufferCache::STREAM_THRESHOLD &&
+            reuse(index, address, size)) {
+            continue;
+        }
         if (size == 0 || size > VideoCore::BufferCache::STREAM_THRESHOLD ||
             buffer_cache.IsRegionGpuModified(address, size) || PendingWriteOverlaps(address, size) ||
             !copy(index, nullptr, address, size) || hle_candidate) {
@@ -1112,15 +1206,48 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     // the index buffer are still read there: a DumpConstRam over them waits for this packet.
     thread_local boost::container::static_vector<AmdGpu::Buffer, Shader::NUM_BUFFERS> vsharps;
     vsharps.clear();
+    thread_local boost::container::static_vector<u64, Shader::NUM_BUFFERS> vkeys;
+    vkeys.clear();
+    const bool by_object = BbEngine::GxRecords::BindsByObject() && gx_state;
+    u64 index_key = 0;
     BbSections::ScopeA inputs_scope{BbSections::AInputs};
     if (pipeline && !pipeline->IsCompute()) {
         const auto* graphics = static_cast<const GraphicsPipeline*>(pipeline);
         if (const auto& fetch = graphics->GetFetchShader();
             fetch && fetch->attributes.size() <= vsharps.capacity()) {
             const auto& vs = graphics->GetStage(Shader::SwStage::Vertex);
+            const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
             for (const auto& attrib : fetch->attributes) {
-                const auto buffer = attrib.GetSharp(vs);
+                u32 words[4];
+                const bool recorded = gx && BbEngine::GxBindings::VertexWords(*gx, attrib.dword_offset, words);
+                AmdGpu::Buffer buffer{};
+                if (recorded) {
+                    std::memcpy(&buffer, words, sizeof words);
+                    buffer.base_address += attrib.inst_offset;
+                    if (attrib.data_format) {
+                        buffer.data_format = attrib.data_format;
+                        buffer.num_format = attrib.num_format;
+                    }
+                }
+                if (!recorded || BbEngine::GxRecords::Compared() || (draw_pipe->packets & 63) == 0) {
+                    const auto old = attrib.GetSharp(vs);
+                    if (recorded) {
+                        for (u32 w = 0; w < 4; ++w) {
+                            BbEngine::GxRecords::NoteWord(2, attrib.dword_offset + w,
+                                                          reinterpret_cast<const u32*>(&buffer)[w],
+                                                          reinterpret_cast<const u32*>(&old)[w], vs.pgm_hash);
+                        }
+                    }
+                    if (!recorded || BbEngine::GxRecords::Compared()) {
+                        buffer = old;
+                    }
+                }
                 vsharps.push_back(buffer);
+                vkeys.push_back(recorded && by_object
+                                    ? BbEngine::GxBindings::VertexKey(
+                                          *static_cast<const BbEngine::GxBindings::State*>(gx_state),
+                                          attrib.dword_offset)
+                                    : 0);
                 if (buffer.base_address != 0 && buffer.GetSize() > 0) {
                     if (BbCeStats::Enabled()) {
                         BbCeStats::Check(BbCeStats::Vertex, buffer.base_address, buffer.GetSize());
@@ -1144,6 +1271,28 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     inputs_scope.End();
     size += AlignPacket(u32(vsharps.size() * sizeof(AmdGpu::Buffer)));
+    size += AlignPacket(u32(vsharps.size() * sizeof(u64)));
+    if (by_object && is_indexed && !cs && !indirect) {
+        const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
+        if (gx->render.index_known && gx->render.index_base == liverpool->regs.index_base_address.Address<VAddr>()) {
+            index_key = gx->index_key;
+        }
+    }
+    u32 num_view_keys = 0;
+    thread_local std::array<u64, 2 * BbEngine::GxBindings::kMaxViewKeys> view_keys;
+    if (by_object && !cs && !indirect) {
+        const auto* gx = static_cast<const BbEngine::GxBindings::State*>(gx_state);
+        num_view_keys = std::min(gx->num_view_keys, BbEngine::GxBindings::kMaxViewKeys);
+        std::memcpy(view_keys.data(), gx->view_keys, num_view_keys * 2 * sizeof(u64));
+    }
+    if (by_object && !BbEngine::GxRecords::Intact()) {
+        std::fill(vkeys.begin(), vkeys.end(), 0);
+        index_key = 0;
+        num_view_keys = 0;
+    }
+    size += AlignPacket(num_view_keys * 2 * u32(sizeof(u64)));
+    const u32 gx_count = pipeline && !cs && !indirect ? num_gx_registers : 0;
+    size += AlignPacket(u32(gx_count * sizeof(GxRegister)));
     const u32 interval = VerifyInterval();
     const bool verify = interval && (draw_pipe->packets % interval) == 0;
     if (verify) {
@@ -1170,6 +1319,9 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     packet.db_extent = liverpool->last_db_extent;
     packet.ring_end = constant_ring ? constant_ring->Position() : 0;
     packet.num_vsharps = static_cast<u32>(vsharps.size());
+    packet.index_key = index_key;
+    packet.num_view_keys = num_view_keys;
+    packet.num_gx_registers = gx_count;
     out += sizeof(DrawPacket);
     std::memcpy(out, blocks.data(), num_blocks * sizeof(u16));
     out += AlignPacket(num_blocks * sizeof(u16));
@@ -1211,6 +1363,12 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::memcpy(out, vsharps.data(), vsharps.size() * sizeof(AmdGpu::Buffer));
     out += AlignPacket(u32(vsharps.size() * sizeof(AmdGpu::Buffer)));
+    std::memcpy(out, vkeys.data(), vkeys.size() * sizeof(u64));
+    out += AlignPacket(u32(vsharps.size() * sizeof(u64)));
+    std::memcpy(out, view_keys.data(), num_view_keys * 2 * sizeof(u64));
+    out += AlignPacket(num_view_keys * 2 * u32(sizeof(u64)));
+    std::memcpy(out, gx_registers.data(), gx_count * sizeof(GxRegister));
+    out += AlignPacket(u32(gx_count * sizeof(GxRegister)));
     if (verify) {
         std::memcpy(out, &liverpool->regs, sizeof(AmdGpu::Regs));
         out += sizeof(AmdGpu::Regs);
@@ -1360,6 +1518,15 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     }
     self.packet_vsharps = {reinterpret_cast<const AmdGpu::Buffer*>(in), packet.num_vsharps};
     in += AlignPacket(u32(packet.num_vsharps * sizeof(AmdGpu::Buffer)));
+    self.packet_vkeys = {reinterpret_cast<const u64*>(in), packet.num_vsharps};
+    in += AlignPacket(u32(packet.num_vsharps * sizeof(u64)));
+    self.packet_view_keys = {reinterpret_cast<const u64*>(in), packet.num_view_keys * 2};
+    in += AlignPacket(packet.num_view_keys * 2 * u32(sizeof(u64)));
+    self.packet_index_key = packet.index_key;
+    thread_local std::array<GxRegister, 160> gx_swapped;
+    const u32 gx_count = std::min<u32>(packet.num_gx_registers, gx_swapped.size());
+    std::memcpy(gx_swapped.data(), in, gx_count * sizeof(GxRegister));
+    in += AlignPacket(u32(packet.num_gx_registers * sizeof(GxRegister)));
     if (packet.verify) {
         // The resource tables the GPU thread walked must read the same now: else a write
         // still queued here (WriteData, DMA) changed them after that thread read them.
@@ -1453,12 +1620,17 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         self.DrawIndirectRecord(static_cast<const GraphicsPipeline*>(packet.pipeline),
                                 packet.is_indexed, *indirect);
     } else {
+        SwapGxRegisters(regs, gx_swapped.data(), gx_count);
         self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
                         packet.is_indexed, packet.index_offset);
+        SwapGxRegisters(regs, gx_swapped.data(), gx_count);
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
     self.packet_vsharps = {};
+    self.packet_vkeys = {};
+    self.packet_view_keys = {};
+    self.packet_index_key = 0;
     if (self.constant_ring) {
         self.constant_ring->Stamp(packet.ring_end);
     }
@@ -1756,6 +1928,15 @@ void Rasterizer::PrintPipeStats() {
             }
             last_sections[s] = now_cycles;
         }
+        static std::array<u64, 6> last_paths{};
+        if (packets > 0) {
+            const auto& paths = VideoCore::BufferCache::obtain_paths;
+            const auto per = [&](u32 i) { return double(paths[i] - last_paths[i]) / packets; };
+            std::printf("\n  stage B buffers per packet: in place %.2f read %.2f written, stream %.2f, "
+                        "VRAM %.2f read %.2f written, %.3f with uploads",
+                        per(0), per(1), per(2), per(3), per(4), per(5));
+            last_paths = paths;
+        }
         static std::array<u64, BbSections::ACount> last_a{};
         static u64 last_a_draws = 0;
         const u64 a_draws = BbSections::a_draws.load(std::memory_order_relaxed);
@@ -1932,6 +2113,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     if (!pipeline || Shader::Info::srt_walk_faults != srt_faults) {
         return;
     }
+    num_gx_registers = 0;
+    gx_state = nullptr;
+    if (gx_record && (BbEngine::GxRecords::Compared() || BbEngine::GxRecords::Used())) {
+        BbSections::ScopeA record_scope{BbSections::ARecord};
+        ApplyGxRecord(pipeline, used_prepared, gx_record, is_indexed);
+    }
     if (BbEngine::GxTrace::On()) {
         if (const void* sample = BbEngine::GxTrace::TakeSample()) {
             for (const auto* stage : pipeline->GetStages()) {
@@ -1958,9 +2145,189 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     }
     if (pipelined && FilterDrawPasses()) {
         PostDraw(pipeline, used_prepared, is_indexed, index_offset);
+        num_gx_registers = 0;
+        gx_state = nullptr;
         return;
     }
+    const u32 gx_count = num_gx_registers;
+    num_gx_registers = 0;
+    gx_state = nullptr;
+    SwapGxRegisters(liverpool->regs, gx_registers.data(), gx_count);
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
+    SwapGxRegisters(liverpool->regs, gx_registers.data(), gx_count);
+}
+
+void Rasterizer::SwapGxRegisters(AmdGpu::Regs& regs, GxRegister* list, u32 count) {
+    for (u32 i = 0; i < count; ++i) {
+        std::swap(regs.reg_array[AmdGpu::Regs::ContextRegWordOffset + list[i].index], list[i].value);
+    }
+}
+
+void Rasterizer::ApplyGxRecord(const GraphicsPipeline* pipeline, const PreparedDraw*& used_prepared,
+                               u64 gx_record, bool is_indexed_draw) {
+    namespace Gx = BbEngine::GxBindings;
+    static_assert(sizeof(Gx::Entry) == sizeof(Shader::Native::TablePlan::Entry));
+    const auto& regs = liverpool->regs;
+    static const bool layout = [&] {
+        const auto at = [&](const void* field) {
+            return u32(reinterpret_cast<const u32*>(field) - regs.reg_array.data()) -
+                   AmdGpu::Regs::ContextRegWordOffset;
+        };
+        const bool same =
+            at(&regs.color_target_mask) == 0x8e && at(&regs.blend_control[0]) == 0x1e0 &&
+            at(&regs.blend_constants) == 0x105 && at(&regs.depth_control) == 0x200 &&
+            at(&regs.stencil_control) == 0x10b && at(&regs.stencil_ref_front) == 0x10c &&
+            at(&regs.stencil_ref_back) == 0x10d && at(&regs.clipper_control) == 0x204 &&
+            at(&regs.polygon_control) == 0x205 && at(&regs.viewports[0]) == 0x10f &&
+            at(&regs.viewport_depths[0]) == 0xb4 && at(&regs.viewport_scissors[0]) == 0x94 &&
+            at(&regs.color_buffers[0]) == 0x318 && at(&regs.depth_buffer) == 0x10;
+        if (!same) {
+            std::printf("GX records: the register layout is not GX's; render state stays with the registers\n");
+        }
+        return same;
+    }();
+    constexpr Shader::SwStage kStages[Gx::kStages] = {Shader::SwStage::Vertex,
+                                                      Shader::SwStage::Fragment};
+    const u32 unfilled = pipeline_cache.GxUnfilled();
+    const auto refresh = [&](u32 s) {
+        if ((unfilled >> s) & 1) {
+            const_cast<Shader::Info*>(pipeline->GetStages()[u32(kStages[s])])->RefreshFlatBuf();
+        }
+    };
+    const Gx::State* state = BbEngine::GxRecords::Taken(gx_record);
+    if (!state) {
+        refresh(0);
+        refresh(1);
+        BbEngine::GxRecords::NoteDraw(Gx::NoState, 0, false);
+        return;
+    }
+    const bool compare = BbEngine::GxRecords::Compared();
+    struct FillOp {
+        u16 flat;
+        u8 dynamic;
+        Gx::Fill fill;
+        u32 offset;
+    };
+    struct FillPlan {
+        const Shader::Info* info = nullptr;
+        u64 shader = 0;
+        u64 inputs_hash = 0;
+        u32 size = 0;
+        std::vector<FillOp> ops;
+        Gx::Reason reason = Gx::Covered;
+    };
+    thread_local std::unordered_map<u64, FillPlan> plans;
+    thread_local std::vector<Gx::Fill> fills;
+    thread_local std::vector<u32> scratch;
+    Gx::Reason bindings = Gx::Covered;
+    for (u32 s = 0; s < Gx::kStages; ++s) {
+        const auto* info = pipeline->GetStages()[u32(kStages[s])];
+        if (!info || (!compare && !((unfilled >> s) & 1))) {
+            continue;
+        }
+        const Gx::Stage& stage = state->stages[s];
+        auto& flat = const_cast<Shader::Info*>(info)->flattened_ud_buf;
+        const auto& table_plan = info->table_plan;
+        const u32 size = u32(flat.size());
+        if (plans.size() > 8192) {
+            plans.clear();
+        }
+        FillPlan& plan = plans[reinterpret_cast<u64>(info) * 0x9E3779B97F4A7C15ull ^ stage.shader];
+        if (plan.info != info || plan.shader != stage.shader || plan.inputs_hash != stage.inputs_hash ||
+            plan.size != size) {
+            plan.info = info;
+            plan.shader = stage.shader;
+            plan.inputs_hash = stage.inputs_hash;
+            plan.size = size;
+            plan.ops.clear();
+            fills.assign(size, Gx::Fill{});
+            const Gx::Plan entries{reinterpret_cast<const Gx::Entry*>(table_plan.entries.data()),
+                                   u32(table_plan.entries.size()), table_plan.valid};
+            plan.reason = size > 0xffff ? Gx::Outside : Gx::Prepare(stage, entries, size, fills.data());
+            for (u32 f = 0; f < size && plan.reason == Gx::Covered; ++f) {
+                if (fills[f].from == Gx::FromNone) {
+                    continue;
+                }
+                const bool table = f >= Shader::Native::TablePlan::FirstFlat;
+                const auto* entry = table ? &table_plan.entries[f - Shader::Native::TablePlan::FirstFlat] : nullptr;
+                plan.ops.push_back({u16(f), u8(entry && entry->expr_len), fills[f], entry ? entry->offset : 0});
+            }
+        }
+        Gx::Reason reason = state->reason != Gx::Covered ? static_cast<Gx::Reason>(state->reason) : plan.reason;
+        u32* out = flat.data();
+        if (compare && reason == Gx::Covered) {
+            scratch.assign(flat.begin(), flat.end());
+            out = scratch.data();
+        }
+        for (const FillOp& op : plan.ops) {
+            if (reason != Gx::Covered) {
+                break;
+            }
+            const u32 offset =
+                op.dynamic ? table_plan.Offset(table_plan.entries[op.flat - Shader::Native::TablePlan::FirstFlat], out)
+                           : op.offset;
+            reason = Gx::Value(*state, s, op.fill, offset, out[op.flat]);
+        }
+        if (reason != Gx::Covered) {
+            bindings = bindings == Gx::Covered ? reason : bindings;
+            if (!compare) {
+                refresh(s);
+            }
+            continue;
+        }
+        if (compare) {
+            for (const FillOp& op : plan.ops) {
+                BbEngine::GxRecords::NoteWord(s, op.flat, out[op.flat], flat[op.flat], info->pgm_hash);
+            }
+        }
+    }
+    if (!compare && !BbEngine::GxRecords::Intact()) {
+        for (u32 s = 0; s < Gx::kStages; ++s) {
+            if (const auto* info = pipeline->GetStages()[u32(kStages[s])]) {
+                const_cast<Shader::Info*>(info)->RefreshFlatBuf();
+            }
+        }
+        BbEngine::GxRecords::NoteDraw(Gx::NoState, 0, false);
+        return;
+    }
+    if (unfilled) {
+        used_prepared = nullptr;
+    }
+    std::array<Gx::Register, Gx::kMaxRegisters> list;
+    thread_local u64 last_render = 0;
+    thread_local bool last_clean = false;
+    const bool unchanged = !compare && last_clean && state->render.hash == last_render;
+    const u32 count = layout && !unchanged ? Gx::Registers(state->render, list.data()) : 0;
+    gx_state = state;
+    if (state->render.index_known && is_indexed_draw) {
+        BbEngine::GxRecords::NoteTarget(-2, state->render.index_base, regs.index_base_address.Address());
+    }
+    u32 differing = 0;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 old = regs.reg_array[AmdGpu::Regs::ContextRegWordOffset + list[i].index];
+        BbEngine::GxRecords::NoteRegister(list[i].index, list[i].value, old);
+        if (!compare && old != list[i].value && differing < gx_registers.size()) {
+            gx_registers[differing++] = {list[i].index, list[i].value};
+        }
+    }
+    if (compare) {
+        for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS && i < 8; ++i) {
+            if (state->render.color[i]) {
+                BbEngine::GxRecords::NoteTarget(int(i), state->render.color[i],
+                                                regs.color_buffers[i].Address());
+            }
+        }
+        if (state->render.depth) {
+            BbEngine::GxRecords::NoteTarget(-1, state->render.depth, regs.depth_buffer.DepthAddress());
+        }
+    } else {
+        num_gx_registers = differing;
+    }
+    if (count) {
+        last_render = state->render.hash;
+        last_clean = differing == 0;
+    }
+    BbEngine::GxRecords::NoteDraw(bindings, 0, layout);
 }
 
 // BB_PROXY_TRACE (defined with BindTextures).
@@ -3264,11 +3631,31 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
         }
     }
 
-    // Map buffers for merged ranges
+    const auto key_of = [&](VAddr base) -> u64 {
+        for (u32 j = 0; j < packet_vsharps.size() && j < packet_vkeys.size(); ++j) {
+            if (packet_vsharps[j].base_address == base) {
+                return packet_vkeys[j];
+            }
+        }
+        return 0;
+    };
     for (auto& range : ranges_merged) {
         const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        u64 key = packet_vkeys.empty() ? 0 : 0x9E3779B97F4A7C15ull;
+        for (const auto& buffer : guest_buffers) {
+            if (!key) {
+                break;
+            }
+            if (buffer.base_address == 0 || buffer.GetSize() == 0 ||
+                buffer.base_address < range.base_address || buffer.base_address >= range.end_address) {
+                continue;
+            }
+            const u64 part = key_of(buffer.base_address);
+            key = part ? (key ^ part) * 0x100000001B3ull | 1 : 0;
+        }
         std::tie(range.buffer, range.offset) =
-            buffer_cache.ObtainBuffer(range.base_address, size, false);
+            key ? BindByObject(key, range.base_address, size)
+                : buffer_cache.ObtainBuffer(range.base_address, size, false);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
     }
 
@@ -3301,6 +3688,34 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     v.num_buffers = static_cast<u32>(guest_buffers.size());
 }
 
+std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindByObject(u64 key, VAddr base, u64 size) {
+    const u64 slot_key = (key ^ base ^ (size << 32)) * 0x9E3779B97F4A7C15ull;
+    auto& bind = object_binds[slot_key >> 52];
+    if (bind.key == key && bind.base == base && bind.size == size &&
+        bind.generation == buffer_cache.BindGeneration()) {
+        if (!BbEngine::GxRecords::Compared() && (++object_bind_checks & 63) != 0) {
+            buffer_cache.NoteBound(base, size);
+            BbEngine::GxRecords::NoteBind(true, false, true, base, size);
+            return {bind.buffer, bind.offset};
+        }
+        const u64 uploads = VideoCore::BufferCache::obtain_paths[5];
+        const auto found = buffer_cache.ObtainBuffer(base, u32(size), false);
+        const bool same = found.first == bind.buffer && found.second == bind.offset &&
+                          VideoCore::BufferCache::obtain_paths[5] == uploads;
+        BbEngine::GxRecords::NoteBind(same, true, same, base, size);
+        if (!same) {
+            bind.key = 0;
+        }
+        return found;
+    }
+    const auto found = buffer_cache.ObtainBuffer(base, u32(size), false);
+    BbEngine::GxRecords::NoteBind(false, false, true, base, size);
+    if (buffer_cache.Persistent(found.first)) {
+        bind = {key, base, size, buffer_cache.BindGeneration(), found.first, found.second};
+    }
+    return found;
+}
+
 void Rasterizer::BindIndexBuffer(u32 index_offset) {
     ResolveIndexBuffer(index_offset);
     EmitIndexBuffer();
@@ -3327,7 +3742,8 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
     const auto [buffer, offset] =
-        buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
+        packet_index_key ? BindByObject(packet_index_key, index_address, index_buffer_size)
+                         : buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
     index_bind = {buffer->Handle(), offset, index_type};
 }
@@ -3676,8 +4092,19 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                u64 view_key = 0;
+                if (!desc.is_written && !desc.is_formatted) {
+                    for (u32 k = 0; k + 1 < packet_view_keys.size(); k += 2) {
+                        if (packet_view_keys[k] == vsharp.base_address) {
+                            view_key = packet_view_keys[k + 1];
+                            break;
+                        }
+                    }
+                }
+                const auto [buffer, offset] =
+                    view_key ? BindByObject(view_key, vsharp.base_address, size)
+                             : buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                                         desc.is_formatted);
                 TraceShaderBinding(stage, vsharp.base_address, size, desc.is_written,
                                    buffer_cache.IsInPlace(vsharp.base_address, size),
                                    buffer_cache.IsAnyInPlace(vsharp.base_address, size));

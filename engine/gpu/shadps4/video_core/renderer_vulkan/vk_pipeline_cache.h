@@ -163,6 +163,9 @@ public:
     /// and flattened user data match; null to take the regular path.
     const GraphicsPipeline* TryPreparedPipeline(const PreparedDraw& prepared);
 
+    [[nodiscard]] u32 GxUnfilled() const noexcept {
+        return gx_unfilled;
+    }
     /// bbport: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {
         return used_prepared;
@@ -230,7 +233,8 @@ private:
         Shader::Info* vertex = nullptr;
         Shader::Info* fragment = nullptr;
     };
-    bool RestoreGxPipeline(const GxPipeline& memo);
+    bool RestoreGxPipeline(const GxPipeline& memo, bool from_record);
+    u32 gx_unfilled = 0;
     void NoteGxRecords();
     std::unordered_map<u64, GxPipeline> gx_pipelines;
     u64 gx_hits = 0, gx_misses = 0, gx_differ = 0, gx_none = 0;

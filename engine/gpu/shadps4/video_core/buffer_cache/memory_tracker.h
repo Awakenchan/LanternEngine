@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <algorithm>
 #include <deque>
 #include <mutex>
@@ -96,7 +97,10 @@ public:
     }
 
     /// Mark region as CPU modified, notifying the device_tracker about this change
+    static inline std::atomic<u64> cpu_writes{0};
+
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
+        cpu_writes.fetch_add(1, std::memory_order_relaxed);
         IteratePages<false>(dirty_cpu_addr, query_size,
                             [](RegionManager* manager, u64 offset, size_t size) {
                                 std::scoped_lock lk{manager->lock};

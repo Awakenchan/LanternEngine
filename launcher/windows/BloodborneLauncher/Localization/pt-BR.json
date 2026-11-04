@@ -1647,5 +1647,10 @@
   "The saved settings are damaged.": "As configurações salvas estão danificadas.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " 47 a 51 FPS medidos em uma RTX 5060 a 1080p com quase tudo ligado.",
   " (experimental)": " (experimental)",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Quase tudo ligado: luz indireta, volumétricos, reflexos mais nítidos e sombras suaves. A opção mais pesada; o custo não foi medido, espere grande queda em GPUs antigas. O que sua GPU não puder executar se desliga sozinho."
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Quase tudo ligado: luz indireta, volumétricos, reflexos mais nítidos e sombras suaves. A opção mais pesada; o custo não foi medido, espere grande queda em GPUs antigas. O que sua GPU não puder executar se desliga sozinho.",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "Caçadores",
+  "No hunters yet: they show up here once the game has saved": "Nenhum caçador ainda: eles aparecem aqui depois que o jogo salvar",
+  "Level {0}  ·  {1} bosses": "Nível {0}  ·  {1} chefes",
+  "{0} played": "{0} jogados"
 }

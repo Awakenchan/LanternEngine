@@ -190,6 +190,19 @@ int main() {
         assert(result == 0xff00ff00);
     }
     std::puts("Scene targets: half-resolution mip level proxy roundtrip PASS");
+    const std::size_t before_release = targets.ProxyCount();
+    assert(before_release >= 1);
+    targets.Forget(images[half_id].image_uid);
+    const auto again_id = images.insert(instance, runtime, views, ci);
+    targets.Attachment(again_id, cv);
+    assert(targets.ProxyCount() == before_release);
+    assert(!targets.Tracks(images[half_id].image_uid));
+    targets.Forget(images[again_id].image_uid);
+    targets.Forget(images[color_id].image_uid);
+    targets.Attachment(depth_id, dv);
+    assert(targets.ProxyCount() == before_release - 2);
+    scheduler.Finish();
+    std::puts("Scene targets: proxies of freed images released PASS");
     scheduler.Finish();
     vmaDestroyBuffer(instance.GetAllocator(),readback,allocation);
 }

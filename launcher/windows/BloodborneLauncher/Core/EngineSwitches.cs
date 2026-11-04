@@ -86,7 +86,7 @@ namespace BloodborneLauncher.Core
         private static readonly Choice[] AutoOnOff = { new(L.T("Auto"), ""), new(L.T("On"), "1"), new(L.T("Off"), "0") };
 
         public static readonly string[] NativeSwitches =
-            { "LANTERN_GX_DRAWS", "LANTERN_GX_TEXTURES", "LANTERN_GX_BUFFERS", "LANTERN_GX_RECORDS", "LANTERN_READ_FILTER", "LANTERN_LIFTER" };
+            { "LANTERN_GX_DRAWS", "LANTERN_GX_TEXTURES", "LANTERN_GX_BUFFERS", "LANTERN_GX_RECORDS", "LANTERN_GX_NATIVE", "LANTERN_READ_FILTER", "LANTERN_LIFTER" };
 
         public static readonly IReadOnlyList<EngineSwitch> All = new[]
         {
@@ -94,6 +94,7 @@ namespace BloodborneLauncher.Core
             OnUnless0("LANTERN_GX_TEXTURES", Performance, L.T("Native renderer: textures"), L.T("Images and depth targets taken from the game's own texture objects. Turn off if something draws wrong or crashes")),
             OnUnless0("LANTERN_GX_BUFFERS", Performance, L.T("Native renderer: buffers"), L.T("The game's upload memory stays in place. Turn off if something draws wrong or crashes")),
             OnUnless0("LANTERN_GX_RECORDS", Performance, L.T("Native renderer: pipelines"), L.T("Each draw's pipeline chosen from the game's own state. Turn off if something draws wrong or crashes")),
+            OnUnless0("LANTERN_GX_NATIVE", Performance, L.T("Native renderer: draws"), L.T("Bindings, render state, vertex and index buffers taken from the game's own objects instead of its command buffers. New in beta 31; turn off if something draws wrong or crashes")),
             OnUnless0("LANTERN_READ_FILTER", Performance, L.T("Native renderer: read tracking"), L.T("Watches fewer memory reads. Turn off if something draws wrong or crashes")),
             OnUnless0("LANTERN_LIFTER", Performance, L.T("Native shader compiler"), L.T("Lantern's own shader compiler. Switching recompiles every shader once. Turn off if something draws wrong or crashes")),
             Pick("BB_GPU_ID", Graphics, L.T("Graphics card"),

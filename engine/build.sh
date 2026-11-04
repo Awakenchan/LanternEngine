@@ -187,6 +187,10 @@ if [[ ${1:-} == --test ]]; then
     out/sys-rtc-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Wno-deprecated-declarations -I. tests/test_toml_patch.cpp start/toml_patch.cpp start/xml.cpp start/common.cpp -lexpat -lz $([[ -n $windows ]] && echo -lbcrypt) -o out/toml-patch-test
     out/toml-patch-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_gx_records.cpp gpu/shim/engine/gx_bindings.cpp -o out/gx-records-test
+    out/gx-records-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror "${threads[@]}" -I. tests/test_scene_proxy_release.cpp "${test_link[@]}" -o out/scene-proxy-release-test
+    out/scene-proxy-release-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_mutex.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-mutex-test
     out/sys-mutex-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_thread.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-thread-test

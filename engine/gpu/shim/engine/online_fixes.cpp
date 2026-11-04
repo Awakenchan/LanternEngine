@@ -457,7 +457,21 @@ const Site kPersonalWorldSites[] = {
     {0x17d88c2, {0x74, 0x0f}, {0x66, 0x90}},
     {0x17d6adc, {0x74, 0x0a}, {0xeb, 0x1e}},
     {0x18e4fbf, {0x74, 0x1b}, {0xeb, 0x1b}},
+    {0x17dc3d6, {0x0f, 0x84, 0xa5, 0x0c, 0x00, 0x00}, {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00}},
+    {0x17dc3e3, {0x0f, 0x85, 0x98, 0x0c, 0x00, 0x00}, {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00}},
+    {0x17d4f62, {0x74, 0x26}, {0x66, 0x90}},
+    {0x17d4f6f, {0x75, 0x1c}, {0x66, 0x90}},
+    {0x17d52d9, {0x74, 0x26}, {0x66, 0x90}},
+    {0x17d52e6, {0x75, 0x1c}, {0x66, 0x90}},
+    {0x17d5649, {0x74, 0x26}, {0x66, 0x90}},
+    {0x17d5656, {0x75, 0x1c}, {0x66, 0x90}},
+    {0x17d681f, {0x74, 0x09}, {0xeb, 0x1d}},
+    {0x17dd191, {0x08, 0xc1}, {0x30, 0xc9}},
+    {0x18d88ca, {0x74, 0x09}, {0xeb, 0x7e}},
 };
+constexpr std::size_t kBlockParts = 0x15b09d0;
+constexpr std::uint8_t kBlockPartsEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
+                                             0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0xe8, 0x01, 0x00, 0x00};
 constexpr std::size_t kEmevdDispatch = 0x17b93a0;
 constexpr std::uint8_t kEmevdDispatchEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x53, 0x50, 0x48, 0x8b,
                                                 0x86, 0xb0, 0x00, 0x00, 0x00, 0x8b, 0x08};
@@ -2289,6 +2303,7 @@ void OwnWorldRepair(std::uint8_t* image, std::size_t size) {
 }
 
 void WorldCopyInstall(const std::uint8_t* image, std::size_t size);
+void OwnPickupsBeforeTreasure();
 
 bool ItemPacketInRoom(std::uint64_t kind) {
     if (kind != kItemPacket || !g_personal_world.load(std::memory_order_relaxed)) return false;
@@ -2308,18 +2323,25 @@ std::int64_t __attribute__((sysv_abi)) OnSendItemAll(std::uint64_t, const std::u
     return 1;
 }
 
+std::int64_t __attribute__((sysv_abi)) OnBlockParts(std::uint64_t, const std::uint64_t*) {
+    OwnPickupsBeforeTreasure();
+    return 0;
+}
+
 bool PersonalWorld(std::uint8_t* image, std::size_t size) {
     if (const char* off = std::getenv("BB_PERSONAL_WORLD"); off && std::strcmp(off, "0") == 0) return false;
     const bool sites = std::all_of(std::begin(kPersonalWorldSites), std::end(kPersonalWorldSites), [&](const Site& site) {
         return Matches(image, size, site.at, site.original.begin(), site.original.size());
     });
-    Hook hooks[2];
+    Hook hooks[3];
     if (!sites || !Prepare(hooks[0], image, size, kSendItemTo, kSendItemToEntry, OnSendItemTo) ||
-        !Prepare(hooks[1], image, size, kSendItemAll, kSendItemAllEntry, OnSendItemAll)) {
+        !Prepare(hooks[1], image, size, kSendItemAll, kSendItemAllEntry, OnSendItemAll) ||
+        !Prepare(hooks[2], image, size, kBlockParts, kBlockPartsEntry, OnBlockParts)) {
+        for (Hook& hook : hooks) Discard(hook);
         Say("seamless: loot and NPC progress stay the game's: its item code is not 1.09's");
         return false;
     }
-    Commit(std::span(hooks, 2));
+    Commit(std::span(hooks, 3));
     for (const Site& site : kPersonalWorldSites) WriteCode(image + site.at, site.patched.begin(), site.patched.size());
     g_personal_world = true;
     Say("seamless: each hunter has its own loot, drops and NPC progress in the host's world");
@@ -2677,6 +2699,12 @@ WorldCopy::Group OwnBits(std::uint32_t group, const WorldCopy::Group& shared) {
     if (!g_personal_world.load(std::memory_order_relaxed)) return {};
     if (WorldCopy::IsPickupGroup(group)) return shared;
     WorldCopy::Group own{};
+    if (WorldCopy::IsNpcGroup(group)) {
+        own = shared;
+        for (const FlagRange& r : kProgressFlags)
+            if (r.kind == kKeepSet || r.kind == kDungeonFlag) WorldCopy::Remove(own, WorldCopy::RangeBits(group, r.first, r.last));
+        return own;
+    }
     for (const FlagRange& r : kProgressFlags)
         if (r.kind != kKeepSet && r.kind != kDungeonFlag) WorldCopy::Add(own, WorldCopy::RangeBits(group, r.first, r.last));
     for (std::size_t i = 0; i < own.size(); ++i) own[i] &= shared[i];
@@ -2768,6 +2796,26 @@ std::uint8_t* OverlayBuffer(std::uint64_t head, std::uint32_t key) {
     }
     if (best == head || Field<std::uint32_t>(best, 0x20) != key) return nullptr;
     return reinterpret_cast<std::uint8_t*>(Field<std::uint64_t>(best, 0x28));
+}
+
+void OwnPickupsBeforeTreasure() {
+    static std::atomic<std::int64_t> said{0};
+    if (!g_personal_world.load(std::memory_order_relaxed)) return;
+    const std::uint64_t man = Global(kFlagMan);
+    if (!man || Field<std::int32_t>(man, 0x80, -1) != 1 || Field<std::uint32_t>(man, 0x20) != kFlagStride) return;
+    const std::uint64_t pool = Field<std::uint64_t>(man, 0x28);
+    const std::uint64_t head = Field<std::uint64_t>(man, 0x90);
+    const std::uint64_t first = head ? Field<std::uint64_t>(head, 0) : 0;
+    if (!pool || !head || !first || first == head) return;
+    int bytes = 0;
+    for (const SharedGroup& g : SharedGroups()) {
+        if (!WorldCopy::IsPickupGroup(g.group)) continue;
+        if (std::uint8_t* to = OverlayBuffer(head, g.key))
+            bytes += WorldCopy::CopyMasked(to, reinterpret_cast<const std::uint8_t*>(pool + std::uint64_t(g.key) * kFlagStride), g.own);
+    }
+    const std::int64_t now = SteadyNowMs();
+    if (bytes && now - said.exchange(now, std::memory_order_relaxed) > 10000)
+        Say("seamless: this hunter's own pickups are in its copy of the host's world before the map's treasure is placed: %d byte(s) differed", bytes);
 }
 
 constexpr int kMostOwnBytesAtOnce = 32;

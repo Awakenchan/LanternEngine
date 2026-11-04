@@ -62,6 +62,8 @@ int main() {
         Add(both, more);
         Check(both[0] == 0x01 && both[12] == 0xff, "own bits add up");
         Check(IsPickupGroup(52400) && IsPickupGroup(50000) && !IsPickupGroup(12400), "pickup flags are type 5");
+        Check(IsNpcGroup(1) && IsNpcGroup(72400) && IsNpcGroup(73600) && !IsNpcGroup(0) && !IsNpcGroup(2) && !IsNpcGroup(12400) && !IsNpcGroup(52400),
+              "NPC state 1000-1999 and the type 7 talk blocks are a hunter's own");
     }
 
     Group own{}, host{}, full{};

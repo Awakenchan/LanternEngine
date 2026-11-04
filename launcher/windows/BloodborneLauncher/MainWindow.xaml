@@ -319,7 +319,7 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <Grid Grid.RowSpan="4" IsHitTestVisible="False" Background="{DynamicResource WindowBaseBrush}" ClipToBounds="True">
+        <Grid x:Name="BaseLayer" Grid.RowSpan="4" IsHitTestVisible="False" Background="{DynamicResource WindowBaseBrush}" ClipToBounds="True">
             <!-- Glass (Modern): the game's own artwork, blurred and darkened, behind the frosted panes. -->
             <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="1" Margin="-60" Visibility="Collapsed"
                    RenderOptions.BitmapScalingMode="LowQuality">

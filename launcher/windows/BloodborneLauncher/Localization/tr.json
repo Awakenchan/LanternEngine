@@ -1647,5 +1647,10 @@
   "The saved settings are damaged.": "Kayıtlı ayarlar bozuk.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060'ta 1080p ve neredeyse her şey açıkken 47-51 FPS ölçüldü.",
   " (experimental)": " (deneysel)",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Neredeyse her şey açık: dolaylı ışık, hacimsel efektler, daha net yansımalar ve yumuşak gölgeler. En ağır seçenek; maliyeti ölçülmedi, eski GPU'larda büyük düşüş bekleyin. GPU'nuzun çalıştıramadığı efekt kendini kapatır."
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Neredeyse her şey açık: dolaylı ışık, hacimsel efektler, daha net yansımalar ve yumuşak gölgeler. En ağır seçenek; maliyeti ölçülmedi, eski GPU'larda büyük düşüş bekleyin. GPU'nuzun çalıştıramadığı efekt kendini kapatır.",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "Avcılar",
+  "No hunters yet: they show up here once the game has saved": "Henüz avcı yok: oyun kaydettiğinde burada görünürler",
+  "Level {0}  ·  {1} bosses": "Seviye {0}  ·  {1} boss",
+  "{0} played": "{0} oynandı"
 }

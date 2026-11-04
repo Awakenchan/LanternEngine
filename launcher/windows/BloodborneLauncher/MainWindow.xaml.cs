@@ -389,7 +389,9 @@ namespace BloodborneLauncher
             wash.Freeze(); // never changes: frozen brushes skip change tracking
             BackdropShade.Fill = wash;
             var mode = s.Str("ui_background");
-            if (mode == "none")
+            var mica = mode == "mica" && Environment.OSVersion.Version.Build >= 22000;
+            ApplyMica(mica, shade);
+            if (mode == "none" || mode == "mica")
             {
                 _backdropLoad++; // a picture still loading is not shown
                 BackdropImage.Visibility = Visibility.Collapsed;
@@ -412,6 +414,24 @@ namespace BloodborneLauncher
         }
 
         private int _backdropLoad;
+
+        private void ApplyMica(bool on, Color shade)
+        {
+            if (on)
+            {
+                var tint = new SolidColorBrush(LauncherTheme.WithAlpha(shade, 0x66));
+                tint.Freeze();
+                BaseLayer.Background = tint;
+                Background = Brushes.Transparent;
+                if (WindowBackdropType != Wpf.Ui.Controls.WindowBackdropType.Mica)
+                    WindowBackdropType = Wpf.Ui.Controls.WindowBackdropType.Mica;
+                return;
+            }
+            if (WindowBackdropType != Wpf.Ui.Controls.WindowBackdropType.None)
+                WindowBackdropType = Wpf.Ui.Controls.WindowBackdropType.None;
+            BaseLayer.SetResourceReference(System.Windows.Controls.Panel.BackgroundProperty, "WindowBaseBrush");
+            SetResourceReference(BackgroundProperty, "WindowBaseBrush");
+        }
 
         /// <summary>Finds and decodes the background picture on a worker thread (the game folder may be
         /// on a slow or sleeping disk, and a big PNG takes a while to decode), then shows it.</summary>
@@ -643,6 +663,75 @@ namespace BloodborneLauncher
         private void MinimizeWindow_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
         private void MaximizeWindow_Click(object sender, RoutedEventArgs e) =>
             WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            if (System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle) is { } source)
+                source.AddHook(SnapLayoutHook);
+        }
+
+        private System.Windows.Controls.Button? VisibleMaximize()
+        {
+            if (WinButtons.IsVisible && WinMaximize.IsVisible) return WinMaximize;
+            if (!MacButtons.IsVisible) return null;
+            return MacButtons.Children.OfType<System.Windows.Controls.Button>()
+                .FirstOrDefault(b => (string)b.ToolTip == L.T("Maximize") && b.IsVisible);
+        }
+
+        private bool OverMaximize(IntPtr lParam)
+        {
+            if (VisibleMaximize() is not { } button) return false;
+            var x = unchecked((short)(long)lParam);
+            var y = unchecked((short)((long)lParam >> 16));
+            try
+            {
+                var p = button.PointFromScreen(new Point(x, y));
+                return p.X >= 0 && p.Y >= 0 && p.X < button.ActualWidth && p.Y < button.ActualHeight;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private void SetMaximizeHover(bool on)
+        {
+            if (on) WinMaximize.SetResourceReference(BackgroundProperty, "SidebarItemHoverBrush");
+            else WinMaximize.ClearValue(BackgroundProperty);
+        }
+
+        private IntPtr SnapLayoutHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            const int NcHitTest = 0x0084, NcMouseMove = 0x00A0, NcLButtonDown = 0x00A1, NcLButtonUp = 0x00A2,
+                NcMouseLeave = 0x02A2, HtMaxButton = 9;
+            switch (msg)
+            {
+                case NcHitTest:
+                    if (OverMaximize(lParam))
+                    {
+                        handled = true;
+                        return new IntPtr(HtMaxButton);
+                    }
+                    SetMaximizeHover(false);
+                    break;
+                case NcMouseMove:
+                    SetMaximizeHover(wParam.ToInt32() == HtMaxButton);
+                    break;
+                case NcMouseLeave:
+                    SetMaximizeHover(false);
+                    break;
+                case NcLButtonDown when wParam.ToInt32() == HtMaxButton:
+                    handled = true;
+                    break;
+                case NcLButtonUp when wParam.ToInt32() == HtMaxButton:
+                    handled = true;
+                    SetMaximizeHover(false);
+                    MaximizeWindow_Click(this, new RoutedEventArgs());
+                    break;
+            }
+            return IntPtr.Zero;
+        }
 
         // ---------------------------------------------------------------- navigation
 

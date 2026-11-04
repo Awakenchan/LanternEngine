@@ -111,6 +111,10 @@ constexpr bool IsPickupGroup(std::uint32_t group) {
     return group / 10000 == 5;
 }
 
+constexpr bool IsNpcGroup(std::uint32_t group) {
+    return group == 1 || group / 10000 == 7;
+}
+
 inline Group RangeBits(std::uint32_t group, std::uint32_t first, std::uint32_t last) {
     Group bits{};
     const std::uint32_t from = group * 1000, to = from + kGroupBytes * 8 - 1;

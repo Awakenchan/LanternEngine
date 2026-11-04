@@ -252,7 +252,30 @@ objects, targets, and the views, samplers and constant buffers the shaders' inpu
 that moves when an object's address is reused. It reaches stage A beside the draw's record NOP. A record seen
 before gives its pipeline at once, without the key and the shader specialization; a new one goes the old way
 and is remembered. `=2` always goes the old way and counts a record that would have chosen another pipeline.
-Written, not yet run in the game.
+Run on 2026-10-31: 411,449 pipelines from the record, 0 differ.
+
+### Whole draws: bindings and render state from the record
+
+`LANTERN_GX_RECORDS=3` (`=2` compares instead): at the record's stamp the draw's descriptors are copied from
+GX's slots for the vertex and pixel shaders' used slots (views at `+0x10`, samplers or GX's default at
+`0x546c8b0`, constant buffers as GX's bind builds them from the current address, the global buffer at shader
+`+0xf0`), with the shaders' input tables, the spill words Lantern's bind left for each upload input and GX's
+ring copy of its shared block (`+0xb360` of the bind state), and the render state from the pending state and
+its state objects (defaults `0x546ca58`, `0x546c8f4`, `0x546ca1c`). Per shader and GX shader object, stage A
+keeps a fill plan: for every word of the flattened user data, its source in the record (a user data register
+through the input naming it; a table word through the table plan's entry and the table input, views 8 words,
+samplers and buffers 4; an upload word from the spill; a nested table through the spilled pointer's input).
+A pipeline from the record then skips the table walk in guest memory: the user data registers are copied and
+the rest is filled from the record, computed offsets with the plan's own expressions. A shader whose plan has a
+word with no source, or a draw with an unbound slot, walks the tables as before and is counted by reason.
+First `=3` run (2026-11-03, before the fill): 9,128,304 draws, every one's bindings and render state from the
+record, nothing drawn wrong. The render state becomes the registers GX's flushes write (`gx_facts.py`):
+`CB_TARGET_MASK` and `CB_BLEND0-7_CONTROL` from the blend object (`& 0xffff1fff`), the blend color from `+0x568`,
+`DB_DEPTH_CONTROL`, `DB_STENCIL_CONTROL` and both `DB_STENCILREFMASK`s from the depth-stencil object and the
+reference at `+0x584`, `PA_CL_CLIP_CNTL` and `PA_SU_SC_MODE_CNTL` from the rasterizer object, viewport 0 as
+scale `w/2, -h/2, max-min` and offset `x+w/2, y+h/2, 0` with depth range 0-1, and viewport scissor 0 when the
+rasterizer object enables it. `=3` puts them in the draw's register copy for the draw only; `=2` compares them
+and the color and depth target addresses with the registers. Render target descriptions are the next part.
 
 ## Still to find, with our own tools
 

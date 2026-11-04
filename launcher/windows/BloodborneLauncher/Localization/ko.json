@@ -1647,5 +1647,10 @@
   "The saved settings are damaged.": "저장된 설정이 손상되었습니다.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060, 1080p에서 거의 모두 켜고 47~51 FPS 측정.",
   " (experimental)": " (실험적)",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "거의 전부 켜짐: 간접광, 볼류메트릭, 더 선명한 반사, 부드러운 그림자. 가장 무거운 설정이며 비용은 측정되지 않았고 오래된 GPU에서는 큰 저하가 예상됩니다. GPU가 실행할 수 없는 효과는 자동으로 꺼집니다."
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "거의 전부 켜짐: 간접광, 볼류메트릭, 더 선명한 반사, 부드러운 그림자. 가장 무거운 설정이며 비용은 측정되지 않았고 오래된 GPU에서는 큰 저하가 예상됩니다. GPU가 실행할 수 없는 효과는 자동으로 꺼집니다.",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "사냥꾼",
+  "No hunters yet: they show up here once the game has saved": "아직 사냥꾼이 없습니다. 게임이 저장되면 여기에 표시됩니다",
+  "Level {0}  ·  {1} bosses": "레벨 {0}  ·  보스 {1}",
+  "{0} played": "플레이 시간 {0}"
 }

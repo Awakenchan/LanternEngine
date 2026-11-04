@@ -1627,5 +1627,10 @@
   "The saved settings are damaged.": "已儲存的設定已損毀。",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060 在 1080p 幾乎全開時測得 47 至 51 FPS。",
   " (experimental)": "（實驗性）",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "幾乎全部開啟：間接光、體積效果、更清晰的反射和柔和陰影。這是最重的選項；負擔尚未測量，舊顯示卡上預計會大幅下降。顯示卡無法執行的效果會自動關閉。"
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "幾乎全部開啟：間接光、體積效果、更清晰的反射和柔和陰影。這是最重的選項；負擔尚未測量，舊顯示卡上預計會大幅下降。顯示卡無法執行的效果會自動關閉。",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "獵人",
+  "No hunters yet: they show up here once the game has saved": "還沒有獵人：遊戲存檔後會顯示在這裡",
+  "Level {0}  ·  {1} bosses": "等級 {0}  ·  {1} 個 Boss",
+  "{0} played": "已遊玩 {0}"
 }

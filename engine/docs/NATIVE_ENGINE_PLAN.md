@@ -6,7 +6,7 @@ details are in `GX_NATIVE_PLAN.md`, the module-by-module rewrite in `OWN_CODE_PL
 
 ## Progress (updated with every step)
 
-Last update: 2026-10-31, after beta 24 (0.9.39-beta.24): the native switches ship on by default, and the old renderer still does everything phases F and H cover. Keep this section short: what is true now, one line
+Last update: 2026-11-03, after beta 30 (0.9.39-beta.30; betas 25-30 changed no native code): the native switches ship on by default, and the old renderer still does everything phases F and H cover. Keep this section short: what is true now, one line
 per step. Details belong in the commit that did the step.
 
 | Phase | State |
@@ -14,7 +14,7 @@ per step. Details belong in the commit that did the step.
 | A. Tools (Ghidra, full dump, GX facts) | done 2026-10-29 |
 | B. GX trace | done: 0 differences over 5.36 million draws in three areas; **a boss is still to check** |
 | C. GX objects | done: every bound object known over 2.2 million draws |
-| D. Draws from GX | **in progress, on in beta 24.** The resource bind is Lantern's for 90% of binds (`LANTERN_GX_DRAWS`), 0 differences. `LANTERN_GX_RECORDS` picks a draw's pipeline from a GX record; `=2`, the comparison with the old way, ran once on 2026-10-31: 411,449 pipelines from the record at its last report, 0 differ, no crash. Next: take the draw's bindings and render state from the record |
+| D. Draws from GX | **in progress, on in beta 24; the record path (`LANTERN_GX_NATIVE`, bindings, render state, vertex, index and resource buffers by object) on by default from beta 31.** The resource bind is Lantern's for 90% of binds (`LANTERN_GX_DRAWS`), 0 differences. `LANTERN_GX_RECORDS` picks a draw's pipeline from a GX record (`=2` on 2026-10-31: 411,449 pipelines, 0 differ). Since 2026-11-03 the record also carries the draw's bindings and render state: `=3` takes them from it (9.1 million draws, every one covered, nothing drawn wrong) and fills each shader's user data without the table walk, but stage A still decodes GX's register packets too, so no FPS gain (pipeline 1.4-1.5 to 1.6-1.7 us a draw); `=2` compares; `=1` stays the default |
 | E. Buffers and textures by object | **in progress, on in beta 24.** Textures, depth targets and display buffers come from GX objects and a texture holds its image (`LANTERN_GX_TEXTURES`); 99.99% of lookups map to an object, and 3,631 of 4,377 first lookups in one boot skip the resolver. GX's upload arena stays in place (`LANTERN_GX_BUFFERS`): write faults 5,500 a second to 0 standing still. The old search and resolver still take the rest, so `texture_cache` and `buffer_cache` cannot go yet |
 | F. Compute, clears, copies, queries | not started |
 | G. Shaders | **in progress, on in beta 24** (`LANTERN_LIFTER`): all 9,847 programs lift, 0 different from the recompiler on the dev cache for every family profile. Install-time builds are not done |
@@ -238,8 +238,44 @@ scheduler's `EndRendering` and `SceneTargets` when the scene is reduced. Eboot w
 
 ## Order and what comes next
 
-1. **D:** bindings and render state from the record.
-2. **E:** what the log still sends to the resolver, by reason, until it can go. Then the boss check left from **B**.
+**Left:** 7 of 10 phases are open (D, E, F, G, H, I, J's GnmDriver). Since 2026-11-04 the steps are built back to
+back, each behind a switch with the old path kept, and tested in batches: full native first, then tuning (the user's call). D has 1 step left (d), which waits on stage B. A gain comes only when a step
+removes old work: the record so far was added on top of the PM4 decode.
+
+1. **D:** (a) done 2026-11-04: the fill as a compiled list per shader took stage A from 5.8-7.3 to 4.1-5.1 us a
+   draw (record 2.0-2.3 to 0.54-0.65 us), the user felt the FPS gain; (b) done, run 2026-11-04 (16.9 million draws, 0 register, target or index differences): render targets and the
+   depth target as GX's writers set them, the vertex V# table from GX's bind, the index buffer compared, and `=3`
+   carries only the registers that differ, built only when the render state's hash changes; (c) re-scoped 2026-11-04:
+   GX's flushes (`0x26d2230`, `0x26d3370`) already compare each state with the last value written and write only what
+   changed, so skipping their packets saves little. Instead the pipeline memo now also keeps the draws that get motion
+   vectors or position capture (fixed at startup): with `object_motion=1` they were 27% of draws and always paid the
+   key (1.2 us); the memo holds 262,144 records. Run 2026-11-04: 82% of pipelines from the record, 1.6% from the key,
+   key 1.21 to 0.2 us and stage A 6.6 to 4.5-5.0 us a draw, 0 differences over 4.3 million draws, about 215,000 draws/s.
+   Stage A now waits on stage B (stage B busy 97%, stage A waited 2%), so (d), the constants (1.4 us in stage A), waits
+   too: the next gain is in stage B, whose bind (textures 0.69, ObtainBuffer 0.60, buffers 0.40 us a packet) is **E**.
+   Correction the same day: stage A is full as well (the GPU command thread idle 1.7%), so both need to shrink. (d) built
+   2026-11-04, not yet run (`NATIVE_BUFFERS.md`): each constant buffer address has a version that GX's two update paths
+   (`0x26adb90` dynamic, `0x26b3560` default, both only from UpdateSubresource) bump; the record carries it; stage A binds
+   an unchanged buffer's earlier ring copy (held until the draw has run) with no checks or copy. First run: 43% of
+   195 million constant buffers reused, 0 of 1.3 million checks differ, but constants stayed at 1.56 us (a GPU-capped
+   scene) because every copy was hashed; now one copy in 64 is hashed and checked at its first reuse, `=2` checks
+   every reuse. Second run: 40% reused, 0 differ, but constants 1.84-2.05 us against 1.36-1.44 without it: the
+   version and copy lookups cost more than the copy, so it is off by default (`LANTERN_GX_CONSTANTS=1` turns it on)
+   until stage A's per-binding work is gone; E first.
+2. **E:** Lantern's own buffers and textures, owned by GX objects, replace shadPS4's `buffer_cache` and `texture_cache`
+   (`NATIVE_BUFFERS.md`). The run on 2026-11-04 counted stage B's buffer bindings per packet: VRAM 1.27 read and 0.10
+   written, stream copies 0.46, in place 0.03, uploads 0. (1) built, not yet run: each GX buffer has a version that its
+   creation, release and both UpdateSubresource paths bump; the record names every vertex stream's buffer (from GX's
+   slot tables at `+0x25b8`/`+0x2638`) and the index buffer, and stage B binds them through Lantern's bind table by
+   object and version instead of `ObtainBuffer` (`LANTERN_GX_BINDS=0` turns it off; `=2` checks every binding, `=3`
+   one in 64). (2) built, not yet run: shader resource buffers through the same table, keyed by their GX view's buffer
+   object (the record lists each read-only buffer view's address and key; the GX buffer vtable `0x535f3a0` confirms the
+   resource is a buffer). Run 2026-11-04 (with (2)): 60% of vertex, index and resource bindings by object, stage B's
+   VRAM path 1.27 to 0.62 bindings a packet, ObtainBuffer 0.60 to 0.45 us, vertex 0.40 to 0.28 us; 17 of 214,188 checks
+   differed, all large vertex ranges around loading stalls (data written into a buffer after GX made it), so the table
+   now also starts over after any CPU write the memory tracker sees. (3) textures by object (a texture already holds its
+   image); (4) Lantern's own GPU memory for GX's buffers and textures, so the address path keeps only memory no GX call
+   describes. Then what still goes to the resolver, by reason, and the boss check left from **B**.
 3. **F:** compute, clears, copies, queries and completions. After this the PM4 walk only orders tokens.
 4. **G:** every shader built at install, once all are confirmed to come from the game's files.
 5. **H**, then **I** in one release once the betas are clean. **J** finishes with GnmDriver at that point.

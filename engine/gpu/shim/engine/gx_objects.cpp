@@ -164,6 +164,12 @@ struct Foreign {
 };
 std::vector<Foreign> g_foreign;
 
+std::array<std::atomic<u32>, 1u << 16> g_buffer_versions{};
+
+std::atomic<u32>& BufferVersionOf(u64 object) {
+    return g_buffer_versions[((object >> 3) * 0x9E3779B97F4A7C15ull) >> 48];
+}
+
 void NoteResource(u64 object, Kind kind, const u32* description, u64 base, u64 bytes = 0, bool display = false) {
     if (!base) return;
     Resource fresh;
@@ -231,6 +237,7 @@ template <int C> std::int64_t __attribute__((sysv_abi)) OnCreate(std::uint64_t, 
         g_made[kind].fetch_add(1, std::memory_order_relaxed);
         Note(made, C, third, reinterpret_cast<const void*>(third));
         if (kind == Buffer) {
+            BufferVersionOf(made).fetch_add(1, std::memory_order_release);
             NoteResource(made, kind, reinterpret_cast<const u32*>(third), Peek<u64>(made + kResourceBase), Peek<u32>(third));
         } else if (kind == Texture2D || kind == Texture3D) {
             NoteResource(made, kind, reinterpret_cast<const u32*>(third), Peek<u64>(made + kResourceBase), Peek<u32>(made + kResourceBytes));
@@ -307,6 +314,7 @@ std::int64_t __attribute__((sysv_abi)) OnUploadPool(std::uint64_t, const std::ui
 
 template <int V> std::int64_t __attribute__((sysv_abi)) OnRelease(std::uint64_t, const std::uint64_t* saved) {
     const u64 address = saved[5];
+    if (kVtables[V].kind == Buffer) BufferVersionOf(address).fetch_add(1, std::memory_order_release);
     if (kVtables[V].kind == Buffer || kVtables[V].kind == Texture2D || kVtables[V].kind == Texture3D) DropResource(address);
     Shard& shard = ShardFor(address);
     std::scoped_lock lock(shard.mutex);
@@ -431,6 +439,14 @@ void CheckDispatch(std::uint64_t pending) {
 
 bool TexturesOwned() {
     return g_textures_owned.load(std::memory_order_relaxed);
+}
+
+std::uint32_t BufferVersion(std::uint64_t object) {
+    return BufferVersionOf(object).load(std::memory_order_acquire);
+}
+
+void TouchBuffer(std::uint64_t object) {
+    BufferVersionOf(object).fetch_add(1, std::memory_order_release);
 }
 
 std::uint64_t Epoch() {
@@ -647,7 +663,7 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const char* buffers_env = std::getenv("LANTERN_GX_BUFFERS");
     const bool buffers = !buffers_env || buffers_env[0] == '1';
     const char* records = std::getenv("LANTERN_GX_RECORDS");
-    const bool want_records = !records || records[0] == '1' || records[0] == '2';
+    const bool want_records = !records || records[0] == '1' || records[0] == '2' || records[0] == '3';
     if (!textures && !buffers && !want_records && (!on || on[0] != '1')) return false;
     for (const Vtable& v : kVtables) {
         if (v.offset + 16 > size || Peek<u64>(reinterpret_cast<u64>(image) + v.offset) != reinterpret_cast<u64>(image) + v.complete ||

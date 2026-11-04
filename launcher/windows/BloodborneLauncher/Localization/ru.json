@@ -1647,5 +1647,10 @@
   "The saved settings are damaged.": "Сохранённые настройки повреждены.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " Измерено 47-51 FPS на RTX 5060 в 1080p почти со всеми эффектами.",
   " (experimental)": " (эксперимент)",
-  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Почти всё включено: непрямой свет, объёмные эффекты, более чёткие отражения и мягкие тени. Самый тяжёлый вариант; нагрузка не измерялась, на старых GPU ждите сильного падения. Эффект, который GPU не тянет, выключится сам."
+  "Nearly everything on: indirect light, volumetrics, sharper reflections and soft shadows. The heaviest choice; its cost has not been measured, so expect a large drop on older GPUs. An effect your GPU cannot run turns itself off.": "Почти всё включено: непрямой свет, объёмные эффекты, более чёткие отражения и мягкие тени. Самый тяжёлый вариант; нагрузка не измерялась, на старых GPU ждите сильного падения. Эффект, который GPU не тянет, выключится сам.",
+  "Windows Mica": "Windows Mica",
+  "Hunters": "Охотники",
+  "No hunters yet: they show up here once the game has saved": "Охотников пока нет: они появятся здесь, когда игра сохранится",
+  "Level {0}  ·  {1} bosses": "Уровень {0}  ·  боссов: {1}",
+  "{0} played": "наиграно {0}"
 }

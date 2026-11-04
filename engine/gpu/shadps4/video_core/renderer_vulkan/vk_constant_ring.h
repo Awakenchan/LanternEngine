@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 
@@ -38,7 +39,7 @@ public:
         if (at % Capacity + size > Capacity) {
             at += Capacity - at % Capacity; // wrap to the ring start
         }
-        const auto in_use = [&] { return at + size > Capacity && at + size - Capacity > retired; };
+        const auto in_use = [&] { return at + size > Capacity && at + size - Capacity > Floor(); };
         if (in_use()) {
             Retire();
             if (in_use()) {
@@ -46,7 +47,26 @@ public:
             }
         }
         position = at + size;
+        last_at = at;
         return at % Capacity;
+    }
+
+    [[nodiscard]] u64 LastAbsolute() const noexcept {
+        return last_at;
+    }
+
+    [[nodiscard]] bool Reusable(u64 at) const noexcept {
+        return at + Capacity / 2 >= position && holds_count < holds.size();
+    }
+
+    void Hold(u64 at) {
+        ++position;
+        const u64 until = position;
+        while (holds_count && holds[(holds_head + holds_count - 1) % holds.size()].at >= at) {
+            --holds_count;
+        }
+        holds[(holds_head + holds_count) % holds.size()] = {at, until};
+        ++holds_count;
     }
 
     [[nodiscard]] u8* Data(u64 offset) noexcept {
@@ -88,6 +108,14 @@ private:
         last_published = end;
     }
 
+    u64 Floor() {
+        while (holds_count && holds[holds_head].until <= retired) {
+            holds_head = (holds_head + 1) % holds.size();
+            --holds_count;
+        }
+        return holds_count ? std::min(retired, holds[holds_head].at) : retired;
+    }
+
     void Retire() {
         auto* semaphore = scheduler.GetWorkSemaphore();
         semaphore->Refresh();
@@ -106,6 +134,13 @@ private:
     };
     Scheduler& scheduler;
     VideoCore::Buffer buffer;
+    struct HoldEntry {
+        u64 at;
+        u64 until;
+    };
+    std::array<HoldEntry, 4096> holds{};
+    u64 holds_head = 0, holds_count = 0;
+    u64 last_at = 0;
     u64 position = 0;     ///< stage A
     u64 retired = 0;      ///< stage A: the GPU is done with everything before this
     u64 pending_end = 0, pending_tick = 0, last_published = 0; ///< stage B

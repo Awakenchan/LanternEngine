@@ -23,6 +23,7 @@
 #include <iterator>
 #include <unordered_map>
 #include "common/assert.h"
+#include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/hash.h"
@@ -2361,6 +2362,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
         if (download_images.contains(image_id)) {
             download_images.erase(image_id);
         }
+    }
+    if (image.scene_proxy && runtime.scene_targets) {
+        runtime.scene_targets->Forget(image.image_uid);
     }
 
     // bbport (GPU hang guard): kept for ImageFreeDelayFrames() frames first (FlushImageGraveyard).

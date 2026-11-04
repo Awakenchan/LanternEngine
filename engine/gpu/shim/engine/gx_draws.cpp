@@ -58,6 +58,7 @@ constexpr u32 kBufferWord1 = 0x108000, kBufferWord3 = 0x00077fac;
 std::atomic<bool> g_on{false};
 u64 g_image = 0;
 std::atomic<u64> g_native{0}, g_game{0}, g_words{0};
+thread_local u64 g_bound = 0;
 
 template <typename T> T Peek(u64 address) {
     T value{};
@@ -395,12 +396,29 @@ std::int64_t __attribute__((sysv_abi)) OnBind(std::uint64_t, const std::uint64_t
     if (tessellation) Call(g_image + kSetTessellation, commands, tessellation, Peek<u32>(state + kStateTessellation + 4));
     Call(g_image + kOutputFlush, context + kContextOutput, context, pending);
     Count(g_native);
+    g_bound = state;
     return 1;
 }
 }
 
 bool On() {
     return g_on.load(std::memory_order_relaxed);
+}
+
+std::uint64_t BoundState() {
+    return g_bound;
+}
+
+void ForgetBound() {
+    g_bound = 0;
+}
+
+std::uint64_t SpillArea(std::uint64_t state, int stage) {
+    return state + (stage ? kPixel.spill : kVertex.spill);
+}
+
+std::uint64_t SharedBlockCopy(std::uint64_t state) {
+    return Peek<u64>(state + kSharedCopy);
 }
 
 void Report() {

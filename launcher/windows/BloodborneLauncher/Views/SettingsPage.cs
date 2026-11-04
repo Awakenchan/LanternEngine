@@ -108,7 +108,7 @@ namespace BloodborneLauncher.Views
 
             SettingCombo(SymbolRegular.ImageEdit24, L.T("Background"),
                 SettingRow.Classic ? L.T("Shown in the Modern layout (Classic's panes are solid)") : L.T("The picture behind the glass panes"),
-                new[] { new Choice(L.T("Purple lantern"), "lantern"), new Choice(L.T("Orange lantern"), "lantern-orange"), new Choice(L.T("Game artwork"), "game"), new Choice(L.T("Your picture"), "custom"), new Choice(L.T("None"), "none") },
+                new[] { new Choice(L.T("Purple lantern"), "lantern"), new Choice(L.T("Orange lantern"), "lantern-orange"), new Choice(L.T("Game artwork"), "game"), new Choice(L.T("Your picture"), "custom"), new Choice(L.T("Windows Mica"), "mica"), new Choice(L.T("None"), "none") },
                 "ui_background", changed: () =>
                 {
                     ShowAppearance();

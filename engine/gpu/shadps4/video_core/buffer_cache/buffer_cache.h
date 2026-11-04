@@ -126,6 +126,14 @@ public:
     /// copy, VRAM], with their bytes.
     static inline bool hle_obtain = false;
     static inline std::array<u64, 6> hle_path_calls{}, hle_path_bytes{};
+    static inline std::array<u64, 6> obtain_paths{};
+    [[nodiscard]] u64 BindGeneration() const noexcept;
+    [[nodiscard]] bool Persistent(const Buffer* buffer) const noexcept {
+        return buffer != &stream_buffer && buffer != shadow_buffer.get();
+    }
+    void NoteBound(VAddr address, u64 size) {
+        NoteUse(address, size);
+    }
 
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,

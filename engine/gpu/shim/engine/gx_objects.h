@@ -58,6 +58,8 @@ void NoteOverlap(const char* action, std::size_t length);
 void NoteImage(std::uint64_t address, std::uint32_t bytes, std::uint64_t uid, std::uint32_t width, std::uint32_t height,
                std::uint32_t format);
 std::uint64_t Epoch();
+std::uint32_t BufferVersion(std::uint64_t object);
+void TouchBuffer(std::uint64_t object);
 bool BuffersOwned();
 bool TakeUploadArena(std::uint64_t* base, std::uint64_t* bytes);
 void Report();
