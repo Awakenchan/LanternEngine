@@ -79,6 +79,15 @@ using (var packed = new MemoryStream())
 var odd = Looks.Parse(Good.Replace("\"x\"", "\"a\\u202Eb\\u0007c" + new string('n', 200) + "\""));
 Require(odd.Name.Length <= 48 && !odd.Name.Contains('‮') && !odd.Name.Contains('\a'), "A name was not cleaned");
 
+var steady = EngineSwitches.All.SingleOrDefault(s => s.Env == "BB_VOLUMETRIC_STEADY");
+Require(steady != null, "The steady sunlight color switch is missing from the Engine page");
+Require(steady!.Group == EngineSwitches.Graphics, "The steady sunlight color switch is not in the Graphics group");
+Require(steady.Kind == SwitchKind.Toggle && steady.Default == steady.On, "The steady sunlight color switch is not on by default");
+Require(!Looks.Knobs.Any(k => k.Key.Contains("steady", StringComparison.OrdinalIgnoreCase) || k.Key == steady.Env),
+    "A look knob uses the steady sunlight color switch");
+Require(!Choices.Effects.Any(e => e.Key.Contains("steady", StringComparison.OrdinalIgnoreCase) || e.Key == steady.Env),
+    "An effect row uses the steady sunlight color switch");
+
 var ini = new IniFile();
 ini.Set("graphics_bloom", "2");
 ini.Set("upscaler", "dlss");

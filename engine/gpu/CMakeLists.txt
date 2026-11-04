@@ -334,6 +334,7 @@ foreach(effect_test
         "directional-shadow-test;test_directional_shadows.cpp"
         "rt-shadow-test;test_rt_shadows.cpp"
         "point-volumetric-test;test_point_volumetric.cpp"
+        "volumetric-tint-test;test_volumetric_tint.cpp"
         "effect-pipelines-test;test_effect_pipelines.cpp")
     list(GET effect_test 0 effect_test_name)
     list(GET effect_test 1 effect_test_source)
