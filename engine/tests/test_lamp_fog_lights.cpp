@@ -380,6 +380,47 @@ int main() {
             assert(time >= 5.0f);
         }
     }
+    // An idle enemy's torch that jumps further in one frame than a light moves is still one light:
+    // no copy of it is left behind to glow where the enemy stood once it is dead.
+    {
+        Memory memory;
+        auto torch = Make(0, 0, 6, 8.5f, 2.4f, 1.4f, 0.6f);
+        torch[7] = std::bit_cast<uint32_t>(0.5f);
+        auto jumped = Make(0.4f, -1.7f, 6, 8.5f, 2.45f, 1.4f, 0.6f);
+        jumped[7] = torch[7];
+        std::vector<Light> drawn;
+        for (int i = 0; i < int(10.0f / Frame); ++i) {
+            drawn = memory.Update(std::vector<Light>{torch}, At(0), Frame);
+        }
+        for (int i = 0; i < 60; ++i) {
+            drawn = memory.Update(std::vector<Light>{jumped}, At(0), Frame);
+            assert(drawn.size() == 1);
+        }
+        float time = 0;
+        while (!memory.Update({}, At(0), Frame).empty()) {
+            time += Frame;
+            assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
+        }
+    }
+    // The takeover is for the lights the game spawns, of the same kind, in the same moment: the
+    // map's own lamps, a light of another reach or colour, a jump too far and a light the game
+    // dropped a while ago all stay as they were.
+    for (const int what : {0, 1, 2, 3, 4}) {
+        Memory memory;
+        auto first = Make(0, 0, 6, 8.5f, 2.4f, 1.4f, 0.6f);
+        first[7] = std::bit_cast<uint32_t>(what == 0 ? 20.0f : 0.5f);
+        auto second = Make(0.4f, -1.7f, 6, what == 1 ? 5.0f : 8.5f, what == 2 ? 0.5f : 2.4f, 1.4f, 0.6f);
+        if (what == 3) second = Make(0.4f, -3.5f, 6, 8.5f, 2.4f, 1.4f, 0.6f);
+        second[7] = first[7];
+        std::vector<Light> drawn;
+        for (int i = 0; i < int(10.0f / Frame); ++i) memory.Update(std::vector<Light>{first}, At(0), Frame);
+        if (what == 4) {
+            for (int i = 0; i < 12; ++i) memory.Update({}, At(0), Frame);
+        }
+        drawn = memory.Update(std::vector<Light>{second}, At(0), Frame);
+        for (int i = 0; i < 60; ++i) drawn = memory.Update(std::vector<Light>{second}, At(0), Frame);
+        assert(drawn.size() == 2);
+    }
     // A lamp prop the game spawns (colour about 1.2), listed for a moment close by and left out for
     // a second, is a lamp, not a flash: held, and back at full when listed again. Not judged late
     // either: a flash's colour is read as the game drops it, not when the camera comes by.

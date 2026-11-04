@@ -182,6 +182,12 @@ public:
     static constexpr float ShortLived = 2.0f, ShortLivedNear = 15.0f, FlashBrightness = 1.4f;
     // The light is judged in the moments after the game drops it, not later when the camera comes by.
     static constexpr float FlashWindow = 0.1f;
+    // A spawned light can jump further in one frame than a light can move (an idle enemy's torch
+    // moved 1.7 m at once), so the game's list has it in a new place as it leaves the old one. The
+    // old entry was left behind as a standing lamp, with the light's colour, when the enemy died.
+    // A spawned light with nothing to match takes over an entry of the same kind that was listed a
+    // moment ago and is within this distance.
+    static constexpr float JumpDistance = 3.0f, JumpWindow = 0.1f;
     // Word 7 of a record is 20 or more (20, 50, 1000) on the map's own lights and 1 or less on the
     // lights the game spawns.
     static constexpr float MapLightWord = 5.0f;
@@ -242,6 +248,17 @@ public:
                         SameRadius * std::max(radius, known_radius)) {
                     nearest = i;
                     nearest_distance = distance;
+                }
+            }
+            if (nearest == remembered.size() && Spawned(light)) {
+                float jump_distance = JumpDistance * JumpDistance;
+                for (size_t i = 0; i < matched.size(); ++i) {
+                    const float distance = DistanceSquared(world, remembered[i].world);
+                    if (!matched[i] && remembered[i].since_seen <= JumpWindow &&
+                        distance <= jump_distance && SameKind(light, remembered[i].record)) {
+                        nearest = i;
+                        jump_distance = distance;
+                    }
                 }
             }
             if (nearest != remembered.size()) {
@@ -416,6 +433,25 @@ private:
             }
         }
         return lights;
+    }
+
+    // A light the game spawns, not one of the map's own.
+    static bool Spawned(const Light& light) {
+        return std::bit_cast<float>(light[7]) < MapLightWord;
+    }
+
+    // The same word 7, about the same reach and about the same colour.
+    static bool SameKind(const Light& a, const Light& b) {
+        if (a[7] != b[7] || std::abs(Radius(a) - Radius(b)) > SameRadius * std::max(Radius(a), Radius(b))) {
+            return false;
+        }
+        for (size_t i = 4; i < 7; ++i) {
+            const float x = std::bit_cast<float>(a[i]), y = std::bit_cast<float>(b[i]);
+            if (!(std::abs(x - y) <= 0.25f * std::max(x, y) + 0.05f)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static float Radius(const Light& light) {
