@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <tuple>
 #include <vector>
 #include "gpu/shadps4/video_core/renderer_vulkan/lamp_fog_lights.h"
 
@@ -214,7 +215,10 @@ int main() {
         for (const float radius : {2.0f, 30.0f}) {
             Memory memory;
             const std::vector<Light> lamp{Make(0, 0, 0, radius)};
-            memory.Update(lamp, At(0), Frame);
+            // Listed for longer than a flash is.
+            for (int i = 0; i < int((Memory::ShortLived + 0.5f) / Frame); ++i) {
+                memory.Update(lamp, At(0), Frame);
+            }
             std::vector<Light> drawn;
             for (float walked = 0; walked < x; walked += 10) {
                 drawn = memory.Update({}, At(std::min(walked + 10, x)), Frame);
@@ -335,6 +339,116 @@ int main() {
             assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
         }
         assert(time >= Memory::HoldMoving);
+    }
+    // A carried torch that stops, then goes when its carrier dies, is not taken for a standing lamp
+    // because it stood still a while: it is gone as quickly as one that was moving.
+    {
+        Memory memory;
+        std::vector<Light> drawn;
+        for (int i = 0; i < 60; ++i) {
+            drawn = memory.Update(std::vector<Light>{Make(float(i) * 0.1f, 0, 10, 5)}, At(0), Frame);
+        }
+        const std::vector<Light> stopped{Make(5.9f, 0, 10, 5)};
+        for (int i = 0; i < int(10.0f / Frame); ++i) drawn = memory.Update(stopped, At(0), Frame);
+        assert(drawn.size() == 1 && Word(drawn[0], 4) == 1.0f);
+        float time = 0;
+        while (!memory.Update({}, At(0), Frame).empty()) {
+            time += Frame;
+            assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
+        }
+    }
+    // A flash (a thrown fire bottle's lights): listed for under a second close to the camera and
+    // then dropped, it goes as fast as a moving light. The same light far off, or listed for
+    // longer, is a lamp the game left out and is held.
+    for (const auto& [distance, listed_seconds, goes] :
+         {std::tuple{8.0f, 0.5f, true}, std::tuple{8.0f, 1.9f, true}, std::tuple{8.0f, 3.0f, false},
+          std::tuple{14.0f, 0.5f, true}, std::tuple{16.0f, 0.5f, false},
+          std::tuple{30.0f, 0.5f, false}}) {
+        Memory memory;
+        const std::vector<Light> flash{Make(0, 0, distance, 5, 2.4f, 1.2f, 0.6f)};
+        std::vector<Light> drawn;
+        for (int i = 0; i < int(listed_seconds / Frame); ++i) {
+            drawn = memory.Update(flash, At(0), Frame);
+        }
+        float time = 0;
+        while (!memory.Update({}, At(0), Frame).empty() && time < 5.0f) {
+            time += Frame;
+        }
+        if (goes) {
+            assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
+        } else {
+            assert(time >= 5.0f);
+        }
+    }
+    // A lamp prop the game spawns (colour about 1.2), listed for a moment close by and left out for
+    // a second, is a lamp, not a flash: held, and back at full when listed again. Not judged late
+    // either: a flash's colour is read as the game drops it, not when the camera comes by.
+    {
+        Memory memory;
+        const std::vector<Light> prop{Make(0, 0, 8, 7.5f, 1.2f, 0.78f, 0.43f)};
+        std::vector<Light> drawn;
+        for (int i = 0; i < int(0.5f / Frame); ++i) memory.Update(prop, At(0), Frame);
+        for (int i = 0; i < 60; ++i) drawn = memory.Update({}, At(0), Frame);
+        assert(drawn.size() == 1);
+        Memory far_then_near;
+        const std::vector<Light> bright{Make(40, 0, 5, 5, 2.4f, 1.2f, 0.6f)};
+        for (int i = 0; i < int(0.5f / Frame); ++i) far_then_near.Update(bright, At(0), Frame);
+        for (int i = 0; i < 120; ++i) drawn = far_then_near.Update({}, At(0), Frame);
+        assert(drawn.size() == 1);
+        // The camera walks up to it: close now, but not judged as a flash.
+        for (int i = 1; i <= 70; ++i) drawn = far_then_near.Update({}, At(float(i) * 0.5f), Frame);
+        assert(drawn.size() == 1);
+    }
+    // One of the map's own lamps (word 7 is 20, 50 or 1000) listed that briefly and dropped close
+    // by is a lamp the game left out: held, whatever its colour.
+    for (const float word7 : {20.0f, 50.0f, 1000.0f}) {
+        Memory memory;
+        auto lamp = Make(0, 0, 8, 5, 2.4f, 1.2f, 0.6f);
+        lamp[7] = std::bit_cast<uint32_t>(word7);
+        const std::vector<Light> listed{lamp};
+        for (int i = 0; i < int(0.5f / Frame); ++i) memory.Update(listed, At(0), Frame);
+        std::vector<Light> drawn;
+        for (int i = 0; i < 60; ++i) drawn = memory.Update({}, At(0), Frame);
+        assert(drawn.size() == 1);
+        // And one the game spawned (word 7 is 1) is not.
+        Memory spawned;
+        lamp[7] = std::bit_cast<uint32_t>(1.0f);
+        const std::vector<Light> flash{lamp};
+        for (int i = 0; i < int(0.5f / Frame); ++i) spawned.Update(flash, At(0), Frame);
+        for (int i = 0; i < 60; ++i) drawn = spawned.Update({}, At(0), Frame);
+        assert(drawn.empty());
+    }
+    // A light that was dropped close and young comes back as the same light, with no second copy.
+    {
+        Memory memory;
+        const std::vector<Light> lamp{Make(0, 0, 8, 5)};
+        std::vector<Light> drawn;
+        for (int i = 0; i < 30; ++i) memory.Update(lamp, At(0), Frame);
+        for (int i = 0; i < 6; ++i) memory.Update({}, At(0), Frame);
+        for (int i = 0; i < 2 * FadedIn; ++i) drawn = memory.Update(lamp, At(0), Frame);
+        assert(drawn.size() == 1 && Word(drawn[0], 4) == 1.0f);
+        // Listed long enough now: the long hold.
+        for (int i = 0; i < 60; ++i) drawn = memory.Update({}, At(0), Frame);
+        assert(drawn.size() == 1 && Word(drawn[0], 4) == 1.0f);
+    }
+    // A standing lamp whose position comes out a little different each frame is not taken for a
+    // carried torch, however long it is watched, though the camera walks up to it from far off and
+    // the estimate gets better.
+    for (const bool walks_up : {false, true}) {
+        Memory memory;
+        std::vector<Light> drawn;
+        float camera_x = walks_up ? -70.0f : 0.0f;
+        for (int i = 0; i < 20 * 60; ++i) {
+            if (walks_up) camera_x = std::min(25.0f, camera_x + 0.1f);
+            const float distance = 30.0f - camera_x;
+            const float wobble = 0.4f * (Memory::SameLight + Memory::SameLightPerMetre * distance);
+            drawn = memory.Update(
+                std::vector<Light>{Make(30.0f - camera_x, i % 2 ? wobble : -wobble, 10, 5)},
+                At(camera_x), Frame);
+        }
+        assert(drawn.size() == 1 && Word(drawn[0], 4) == 1.0f);
+        for (int i = 0; i < 60; ++i) drawn = memory.Update({}, At(camera_x), Frame);
+        assert(drawn.size() == 1 && Word(drawn[0], 4) == 1.0f);
     }
     // Two lamps side by side stay two, and each keeps its own colour.
     {

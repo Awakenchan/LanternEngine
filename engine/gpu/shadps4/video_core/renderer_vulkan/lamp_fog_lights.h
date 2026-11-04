@@ -169,6 +169,22 @@ public:
     // Lamps come out of the view-space records wobbling while the camera moves, by more the further
     // off they are, so a frame-to-frame test counted whole lists of lamps as moving.
     static constexpr float SameLight = 0.5f, SameLightPerMetre = 0.05f;
+    // A light that has strayed this many times that distance from where it first appeared is carried
+    // by something (an enemy's torch), and stays so: it can stop for longer than MovedRecently, and
+    // when the enemy dies the game drops it for good, so it is not held like a lamp the game left out.
+    static constexpr float CarriedFactor = 4.0f;
+    // A flash: a thrown fire bottle makes lights that are listed for a second or less, bright
+    // (colour 1.5 and up), and are then gone for good, a few metres from the camera. A bright light
+    // the game spawns that it stops listing after so short a time, this close, is not held like a
+    // lamp the game left out. A dim one is: the game lists lamp props (colour about 1.2) late and
+    // leaves them out for a second or two while the camera is near them, and then lists them again.
+    // The map's own lamps are not included either way.
+    static constexpr float ShortLived = 2.0f, ShortLivedNear = 15.0f, FlashBrightness = 1.4f;
+    // The light is judged in the moments after the game drops it, not later when the camera comes by.
+    static constexpr float FlashWindow = 0.1f;
+    // Word 7 of a record is 20 or more (20, 50, 1000) on the map's own lights and 1 or less on the
+    // lights the game spawns.
+    static constexpr float MapLightWord = 5.0f;
     // And how far its reach may differ. Lamps can stand closer than that distance (a blue river
     // light under a warm bridge lamp): taken for one, the game listing either alone switched one
     // fog between the two lights' colours and sizes.
@@ -241,17 +257,36 @@ public:
                 known.world = world;
                 known.record = light;
                 known.since_seen = 0.0f;
+                known.listed_for += seconds;
+                known.flash = false;
+                // The estimate of where a light is moves by up to `same`, more the further off it
+                // was seen: strayed further than that from where it began, with room to spare.
+                known.slack = std::max(known.slack, same);
+                if (DistanceSquared(world, known.origin) >
+                    CarriedFactor * CarriedFactor * known.slack * known.slack) {
+                    known.carried = true;
+                }
             } else if (remembered.size() < MaxRemembered) {
                 // Long past the hold it would take to count as moving.
                 remembered.push_back({.record = light,
                                       .world = world,
                                       .settled = world,
+                                      .origin = world,
+                                      .slack = same,
                                       .colour = Limited(light),
                                       .since_moved = MovedRecently});
             }
         }
 
         std::erase_if(remembered, [&](Known& known) {
+            if (known.since_seen > 0.0f && known.since_seen <= FlashWindow &&
+                known.listed_for < ShortLived &&
+                !(std::bit_cast<float>(known.record[7]) >= MapLightWord) &&
+                std::max({std::bit_cast<float>(known.record[4]), std::bit_cast<float>(known.record[5]),
+                          std::bit_cast<float>(known.record[6])}) >= FlashBrightness &&
+                DistanceSquared(known.world, position) <= ShortLivedNear * ShortLivedNear) {
+                known.flash = true;
+            }
             const bool moving = Moving(known);
             const bool kept = moving ? known.since_seen <= HoldMoving
                                      : known.since_seen <= HoldStill || Near(known, position);
@@ -290,6 +325,14 @@ private:
         std::array<float, 3> world{};
         // Where it last came to rest: a light moves when it strays from here.
         std::array<float, 3> settled{};
+        // Where it first appeared, and how far off the estimate of a position has been.
+        std::array<float, 3> origin{};
+        float slack = 0.0f;
+        bool carried = false;
+        // Seconds the game has listed it, and whether it was a flash when the game dropped it: it
+        // goes as a moving light does, until it is listed again.
+        float listed_for = 0.0f;
+        bool flash = false;
         // The colour drawn, limited as the shader limits it: it follows the game's.
         std::array<float, 3> colour{};
         float weight = 0.0f, since_seen = 0.0f, since_moved = 0.0f;
@@ -298,8 +341,9 @@ private:
         bool wanted = true, shown = false;
     };
 
+
     static bool Moving(const Known& known) {
-        return known.since_moved < MovedRecently;
+        return known.carried || known.flash || known.since_moved < MovedRecently;
     }
 
     // The lights taken when there are more than `limit`: the ones that count most, in the frame's
