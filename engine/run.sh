@@ -83,7 +83,7 @@ fi
 # The engine's own features (the executable's identity, which every engine hook checks: keyboard
 # and mouse, PC menus, camera, widescreen...; the Dream mirror and PC menus), as bb-start.exe does
 # on Windows. Never taken from the caller's environment.
-unset BB_DREAM_MIRROR_ASSET BB_ENGINE_IMAGE_SHA256 BB_FILE_FIXES BB_PC_MENU_ASSETS BB_REBIRTH_ASSET
+unset BB_DREAM_MIRROR_ASSET BB_ENGINE_IMAGE_SHA256 BB_FILE_FIXES BB_PC_MENU_ASSETS BB_REBIRTH_ASSET BB_UI_SIZE BB_WIDE_UI_MOVIES BB_WIDE_OPTION_MOVIE
 while IFS= read -r line; do
     if [[ $line == env:* ]]; then export "${line#env:}"; else printf '%s\n' "$line"; fi
 done < <("$PYTHON" scripts/engine_features.py "$game" --out "$out" --data "$data" --config "$BB_CONFIG")
@@ -150,6 +150,14 @@ elif [[ -n ${scaled_output:-} ]]; then
 fi
 "$PYTHON" scripts/patches.py --out "$out" --fps "$fps" --extra "${BB_PATCHES:-}" --settings "$BB_CONFIG" --game-dir "$game" --render-res "${BB_RENDER_RES:-}" --output-res "${BB_OUTPUT_RES:-}" \
     --patches-dir "${BB_PATCHES_DIR:-$data/patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}"
+if [[ -f "$out/patches-info.json" ]]; then
+    ui_patch=$("$PYTHON" -c "import json; print(json.load(open('$out/patches-info.json')).get('ui_size', ''))" 2>/dev/null || true)
+    if [[ -n $ui_patch && $ui_patch != "1920x1080" ]]; then
+        export BB_UI_SIZE=$ui_patch
+    elif [[ $ui_patch == "1920x1080" ]]; then
+        unset BB_UI_SIZE
+    fi
+fi
 # The GPU cache as bb-start.exe keeps it on Windows: recompiled by bb-shader-lab when the shader
 # compiler changed, then the shipped shader catalog seeded, so pipelines are built at the start
 # instead of in play. Packages only (packaging/linux/bb-start sets BB_GPU_USER_DIR).

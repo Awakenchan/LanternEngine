@@ -66,6 +66,37 @@ def prepare(game, out, data, config):
                     env['BB_REBIRTH_ASSET'] = str(menus / 'dvdroot_ps4/script/talk/m24_02_00_00.talkesdbnd.dcx')
             except (OSError, ValueError) as error:
                 print(f'Engine: native PC menus disabled: {error}', flush=True)
+        if settings_value(config, 'widescreen') != '0':
+            try:
+                from patches import output_size, read_settings, ui_size
+                from engine_assets import prepare_wide_movies
+                settings = read_settings(config)
+                out_res = output_size(settings)
+                ui = ui_size(settings, out_res)
+                if ui[0] * 1080 != ui[1] * 1920:
+                    env['BB_UI_SIZE'] = f'{ui[0]}x{ui[1]}'
+                    print(f"Widescreen: UI viewport {env['BB_UI_SIZE']} (the 16:9 stage centred in it)", flush=True)
+                    option_movie = None
+                    if env.get('BB_PC_MENU_ASSETS'):
+                        prepared = Path(env['BB_PC_MENU_ASSETS']) / 'dvdroot_ps4/menu/optionsetting.gfx'
+                        option_movie = prepared if prepared.is_file() else None
+                    tool = next((out / name for name in ('bb-engine-assets', 'bb-engine-assets.exe') if (out / name).is_file()),
+                                out / 'bb-engine-assets')
+                    movies = prepare_wide_movies(game, option_movie, (data / 'engine-assets').resolve(),
+                                                 tool.resolve(), ui[0], ui[1])
+                    listing = ''
+                    for relative, path, _ in movies:
+                        resolved_path = Path(path).resolve()
+                        if option_movie and relative == 'dvdroot_ps4/menu/optionsetting.gfx':
+                            env['BB_WIDE_OPTION_MOVIE'] = str(resolved_path)
+                        else:
+                            listing += f'{relative}\t{resolved_path}\n'
+                    if listing:
+                        wide_file = (out / 'wide-ui-movies.txt').resolve()
+                        wide_file.write_text(listing, encoding='utf-8')
+                        env['BB_WIDE_UI_MOVIES'] = str(wide_file)
+            except (OSError, ValueError) as error:
+                print(f'Widescreen: UI preparation disabled: {error}', flush=True)
     except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
         print(f'Engine: enhancement preparation skipped: {error}', flush=True)
     if os.environ.get('BB_EFFECT_FIXES', '') != '0':
