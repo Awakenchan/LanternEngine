@@ -87,4 +87,11 @@ var mine = Looks.FromCurrent(ini, "Now", "");
 Require(mine.Values.Count == 1 && mine.Values["graphics_bloom"] == "2", "FromCurrent took the wrong values");
 Require(Looks.IsCurrent(mine, ini), "A look of the current values reads as current");
 
+// Steady fog is a choice between two kinds of fog, not part of a look; it is an Engine > Graphics switch
+// (BB_POINT_FOG_STEADY) and starts on, as the engine's default does.
+var steadyFog = EngineSwitches.All.SingleOrDefault(e => e.Env == "BB_POINT_FOG_STEADY");
+Require(steadyFog != null, "Steady lamp fog is not an Engine switch");
+Require(steadyFog!.Group == EngineSwitches.Graphics, "Steady lamp fog is not in the Engine Graphics group");
+Require(steadyFog.Default == steadyFog.On, "Steady lamp fog does not start on");
+
 Console.WriteLine("PASS looks: " + Looks.Knobs.Length + " knobs, " + Looks.Presets.Count + " presets");
