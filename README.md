@@ -6,7 +6,7 @@ Lantern Engine runs your own copy of Bloodborne on Windows and Linux: a launcher
 
 **No game files are included.** You need your own legal copy of Bloodborne (CUSA03173) with update 1.09, dumped from your own PS4.
 
-**Help:** [Help & FAQ](https://lantern-engine.netlify.app): setup, a graphics settings guide, fixes for common problems and the beta guide. Bug reports go to the `#issues` forum on the [Discord](https://discord.gg/d3Uv3Cfr5x).
+**Help:** [Help & FAQ](https://awakenchan.github.io/LanternEngine/): setup, a graphics settings guide, fixes for common problems and the beta guide. Bug reports go to the `#issues` forum on the [Discord](https://discord.gg/d3Uv3Cfr5x).
 
 ## Install
 

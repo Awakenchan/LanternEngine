@@ -1,4 +1,10 @@
-# Netlify: the help and FAQ page (faq/index.html), published as it is on every push to main.
+# The help and FAQ page moved to GitHub Pages (.github/workflows/pages.yml); this sends the old address there.
 [build]
   publish = "faq"
   command = ""
+
+[[redirects]]
+  from = "/*"
+  to = "https://awakenchan.github.io/LanternEngine/:splat"
+  status = 301
+  force = true

@@ -57,9 +57,10 @@ jobs:
               if last:
                   embed["footer"] = {"text": "Beta: not tested yet" if pre else "Stable release"}
               message = {"username": "Bloodborne PC", "embeds": [embed]}
-              if pre and index == 0:
-                  message["content"] = "<@&1566302090169417788>"
-                  message["allowed_mentions"] = {"roles": ["1566302090169417788"]}
+              if index == 0:
+                  role = "1566302090169417788" if pre else "1566302050172539031"
+                  message["content"] = f"<@&{role}>"
+                  message["allowed_mentions"] = {"roles": [role]}
               payload = json.dumps(message).encode()
               if os.environ.get("DISCORD_DRY_RUN"):
                   print(index + 1, len(chunks), len(embed["description"]), len(embed["title"]), repr(text[:40]))

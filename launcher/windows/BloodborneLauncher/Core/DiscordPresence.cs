@@ -17,7 +17,7 @@ namespace BloodborneLauncher.Core
     public static class DiscordPresence
     {
         private const string LanternApp = "1561836572364505089";
-        private const string LogoLink = "https://lantern-engine.netlify.app/lantern-logo.png";
+        private const string LogoLink = "https://awakenchan.github.io/LanternEngine/lantern-logo.png";
         /// <summary>A second app named "Bloodborne"; empty until it is registered.</summary>
         private const string BloodborneApp = "";
 
