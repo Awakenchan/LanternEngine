@@ -278,6 +278,7 @@
   .st.fixed { color: var(--good); }
   .st.open { color: var(--open); }
   .st.tip { color: var(--accent); }
+  .bt { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: .72em; font-weight: 600; letter-spacing: .02em; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); vertical-align: 2px; }
   .answer { padding: 4px 0 22px 24px; max-width: 64ch; }
   .answer > :first-child { margin-top: 0; }
   .answer p { margin: 0 0 12px; }
@@ -460,6 +461,7 @@
           <li><a href="#start">Getting started</a></li>
           <li><a href="#graphics">Graphics</a></li>
           <li><a href="#questions">Questions</a></li>
+          <li><a href="#coop">Seamless co-op</a></li>
           <li><a href="#fix">Fixing problems</a></li>
           <li><a href="#players">Players asked</a></li>
           <li><a href="#known">Known issues</a></li>
@@ -481,7 +483,7 @@ GPU fault: 3 addresses
 <span class="w">STOP: GPU library assertion failed</span>
 bb-probe exited with code 23
 - the game exited (code 23) -</pre>
-            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.37</span></div>
+            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.39 beta 31</span></div>
             <div class="ui-back" id="crash-back">
               <div class="ui-modal" role="dialog" aria-label="The game crashed">
                 <h4>The game crashed</h4>
@@ -521,7 +523,7 @@ bb-probe exited with code 23
           </div>
           <div class="step">
             <h3>Or export the log</h3>
-            <p>No crash window? In the launcher open <span class="k">More › Log</span>, then <span class="k">Export…</span> Do it right after the problem, before you start the game again.</p>
+            <p>No crash window? In the launcher open <span class="k">Game output</span>, then <span class="k">Export…</span> Do it right after the problem, before you start the game again.</p>
             <p>The last session's log is also saved as <code>logs\last_session.log</code> in the Lantern Engine folder.</p>
           </div>
           <div class="step">
@@ -540,14 +542,14 @@ bb-probe exited with code 23
                   <div class="ui-row3"><span class="ui-btn">Close</span><span class="ui-btn ring">Copy report</span><span class="ui-btn def">Use safe mode</span></div>
                 </div>
               </div>
-              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.37</span></div>
+              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.39 beta 31</span></div>
             </div>
           </div>
           <div class="shot">
             <div data-ui role="img" aria-label="The launcher's More, Log page with the Copy, Export and Clear buttons">
               <div class="ui-pills sub"><span>Mods</span><span>Cheats</span><span>Engine</span><span class="on">Log</span></div>
               <div class="ui-tools"><span class="ui-tog" aria-pressed="true"></span><span>Follow new output</span><span class="grow"></span><span class="ui-btn">Copy</span><span class="ui-btn ring">Export…</span><span class="ui-btn">Clear</span></div>
-              <pre class="ui-log">Lantern Engine 0.9.37
+              <pre class="ui-log">Lantern Engine 0.9.39 beta 31
 GPU: NVIDIA GeForce RTX 3070 Ti
 Shaders: 4,812 pipelines ready
 Loading: begins
@@ -590,7 +592,7 @@ Loading: begins
         <details>
           <summary>How do I copy or export my log?</summary>
           <div class="answer">
-            <p>In the launcher: <span class="k">More › Log</span>, then <span class="k">Copy</span> or <span class="k">Export…</span> Do it right after the problem happens, before you start the game again.</p>
+            <p>In the launcher: <span class="k">Game output</span> in the sidebar (with tabs: <span class="k">More › Log</span>), then <span class="k">Copy</span> or <span class="k">Export…</span> Do it right after the problem happens, before you start the game again.</p>
             <p>The log of the last session is also saved as <code>logs\last_session.log</code> in the Lantern Engine folder.</p>
           </div>
         </details>
@@ -617,7 +619,7 @@ Loading: begins
             <ul>
               <li>Say "game folder" or "my copy of the game" instead.</li>
               <li>"Download" counts too, even for the launcher: say "get it from the releases page".</li>
-              <li>Send logs as a file, not pasted lines: <span class="k">More › Log › Export…</span>, or <span class="k">Copy report</span> after a crash (Discord turns a long paste into a file). Log lines contain some of these words.</li>
+              <li>Send logs as a file, not pasted lines: <span class="k">Game output › Export…</span>, or <span class="k">Copy report</span> after a crash (Discord turns a long paste into a file). Log lines contain some of these words.</li>
             </ul>
           </div>
         </details>
@@ -777,7 +779,7 @@ Loading: begins
   <section id="questions">
     <div class="sec-head">
       <h2 class="rv">Common questions</h2>
-      <p class="lead rv" style="--d:80ms">Shaders, co-op, online play, mods, keys and saves.</p>
+      <p class="lead rv" style="--d:80ms">Shaders, saves, co-op with bells, online play, mods and keys.</p>
     </div>
     <div class="qa rv" style="--d:120ms">
       <div class="qa-list">
@@ -813,7 +815,7 @@ Loading: begins
         <details>
           <summary>Are my saves backed up?</summary>
           <div class="answer">
-            <p>Yes. The launcher backs up your saves at each start, and every 10 minutes while you play when they changed. Find them in <span class="k">Play › Save backups</span>.</p>
+            <p>Yes. The launcher backs up your saves at each start, and every 10 minutes while you play when they changed. Find them on the <b>Saves</b> page under <b>Backups</b>, with <b>Restore</b> beside each one. The same page shows your hunters and profiles, and imports saves from shadPS4 or a PS4.</p>
           </div>
         </details>
         <details>
@@ -840,26 +842,7 @@ Loading: begins
         <details>
           <summary>How do I play seamless co-op?</summary>
           <div class="answer">
-            <p>Seamless co-op lets up to 4 hunters play the host's world together in a private, encrypted room. Nobody is sent home after a boss or when someone dies, and you don't need The Hunter's Dream or open ports.</p>
-            <ol>
-              <li>Everyone: in the launcher open the <b>Online</b> page, turn on <b>Play online</b> and <b>Seamless co-op</b>, and set your <b>Plate name</b>, the name the others see above your hunter (up to 16 characters, spaces and symbols allowed).</li>
-              <li>The host picks <b>Host</b>, presses <b>Copy invite code</b> and sends the code to friends.</li>
-              <li>Friends pick <b>Join</b>, copy the code and press <b>Paste invite code</b>.</li>
-              <li>Start the game. The host picks <b>Start summon</b> in the co-op menu (F2, or L3 + D-pad Up) and friends pick <b>Send sign</b>: no bells needed. The bells still work too: anywhere, even after the area boss is dead, and need no Insight. The screen shows how the summon is going: looking, found, connecting, connected.</li>
-            </ol>
-            <p>In the game, <b>F2</b> (or hold <b>L3</b> and press <b>D-pad Up</b>) opens the co-op menu. The host can start a session without ringing a bell, bring or kick each hunter, bring everyone and end the session. A guest can start a summon, ask the host to bring them and return to their own world. Bring works within the same area. The list shows each hunter's ping and connection state; the Co-op tab of the in-game menu can turn off connection status, join and leave notices, and requests.</p>
-            <p>Voice chat is in the same menu: turn it on or off, mute your microphone or a single hunter, pick push to talk (V by default, or any key or mouse button) or talking, and set the voice volume up to 500%. Voice goes through the room's encryption on its own connection, sent only while you speak, so it never slows down the game.</p>
-            <p>Rooms are private unless the host chooses otherwise. <b>Open my room to visitors</b> is off by default. While it is on, the host's game gives the room's invite code to Lantern's co-op server, and the Lantern event team can see it in Discord and join for surprise events, so that room is not private from them. Everyone in the room sees a line when a visitor joins, the host can Kick them, and nobody is moved: guests keep control of their own summons. Turning it off or leaving takes the room off the list at once; New room retires a code they already saw.</p>
-            <p>Guests keep their own stats in the host's world. A guest's lamp takes only that guest home and on to the lamp; the host's world stays put.</p>
-            <p>With <b>Play online</b> off the game is fully offline: no seamless room, and cheats work.</p>
-            <p>Your room and invite code stay the same through updates. <b>New room</b> makes a new code and the old one stops working.</p>
-            <p>Guests keep the progress made while they were in the host's world (bosses, lamps, shortcuts, story and NPC steps) in their own save, never the host's earlier progress. Chalice dungeons work with the party too. Everyone needs the same Lantern Engine version.</p>
-          </div>
-        </details>
-        <details>
-          <summary>Who hosts the co-op servers?</summary>
-          <div class="answer">
-            <p>Lantern's seamless co-op rooms run on a server in Frankfurt, Germany, sponsored by <a href="https://1337hosting.com">1337 Hosting</a>. Thank you to them for keeping co-op free for everyone. It works well across Europe and reaches the Middle East and the US East Coast with decent latency.</p>
+            <p>Up to 4 hunters play the host's world together in a private room, with no bells needed and nobody sent home after a boss. It's in the betas for now: see <a href="#coop">Seamless co-op</a> for the full guide.</p>
           </div>
         </details>
         <details>
@@ -867,7 +850,7 @@ Loading: begins
           <div class="answer">
             <p>Unpack each mod into its own folder inside <code>mods</code>, so that it holds <code>dvdroot_ps4</code>:</p>
             <p><code>mods\Mod name\dvdroot_ps4\chr\…</code></p>
-            <p>Then turn it on and set the load order in <span class="k">More › Mods</span>. The lowest mod in the list wins when two mods change the same file. ZIP or 7z archives have to be unpacked first. Mods that replace <code>eboot.bin</code>, DLL injectors and script plugins don't work. Mods work on exFAT and FAT32 drives too.</p>
+            <p>Then turn it on and set the load order in <span class="k">Mods &amp; patches</span>. The lowest mod in the list wins when two mods change the same file. ZIP or 7z archives have to be unpacked first. Mods that replace <code>eboot.bin</code>, DLL injectors and script plugins don't work. Mods work on exFAT and FAT32 drives too.</p>
           </div>
         </details>
         <details>
@@ -881,7 +864,7 @@ Loading: begins
         <details>
           <summary>The Debug Menu won't start</summary>
           <div class="answer">
-            <p>The debug menu needs the font files <code>DbgFont14h.ccm</code> and <code>DbgFont14h.tpf</code> in <code>dvdroot_ps4\font</code>, either in your game folder or in an enabled mod (<span class="k">More › Mods</span>). The fonts are on <a href="https://www.nexusmods.com/bloodborne/mods/253">Nexus Mods</a>.</p>
+            <p>The debug menu needs the font files <code>DbgFont14h.ccm</code> and <code>DbgFont14h.tpf</code> in <code>dvdroot_ps4\font</code>, either in your game folder or in an enabled mod (<span class="k">Mods &amp; patches</span>). The fonts are on <a href="https://www.nexusmods.com/bloodborne/mods/253">Nexus Mods</a>.</p>
             <p>They have to be the packed files. A <code>DbgFont14h-tpf-dcx</code> folder (unpacked with WitchyBND) does not work: repack it. Don't copy them into an <code>out\mod-game-…</code> folder. The engine makes that folder new at every start.</p>
           </div>
         </details>
@@ -889,6 +872,136 @@ Loading: begins
           <summary>Trophies</summary>
           <div class="answer">
             <p>The <b>Trophies</b> page lists them with their pictures. You can use your own trophy sound in WAV, MP3 or M4A, and set its volume.</p>
+          </div>
+        </details>
+      </div>
+      <div class="pane" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <section id="coop">
+    <div class="sec-head">
+      <h2 class="rv">Seamless co-op <span class="bt">Beta</span></h2>
+      <p class="lead rv" style="--d:80ms">Play the host's world together, up to 4 hunters, in a private encrypted room. In the 0.9.39 betas; get one from <a href="#beta-join">Join or leave the beta</a>.</p>
+    </div>
+    <div class="qa rv" style="--d:120ms">
+      <div class="qa-list">
+        <details>
+          <summary>What is seamless co-op?</summary>
+          <div class="answer">
+            <p>Seamless co-op is Lantern's own co-op, separate from the game's bells and from The Hunter's Dream. Up to 4 hunters play the host's world in one room:</p>
+            <ul>
+              <li>Nobody is sent home after a boss or when someone dies.</li>
+              <li>The host's lamp takes the whole party along.</li>
+              <li>You don't need a Hunter's Dream account, open ports or Insight.</li>
+              <li>Everything between you is encrypted. Nobody else can join unless the host opens the room.</li>
+            </ul>
+            <p>Everyone needs <b>the same Lantern Engine version</b> and Bloodborne 1.09.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Set it up: host and guests</summary>
+          <div class="answer">
+            <ol>
+              <li>Everyone: update to the newest beta (<span class="k">Settings › Updates</span>, channel <b>Beta</b>).</li>
+              <li>Everyone: on the launcher's <b>Online</b> page, turn on <b>Play online</b> and <b>Seamless co-op</b>.</li>
+              <li>Everyone: set your <b>Plate name</b>, the name the others see above your hunter (up to 16 characters).</li>
+              <li>The host sets <b>Role</b> to <b>Host</b>, presses <b>Copy invite code</b> and sends the code to friends (Discord DM, for example).</li>
+              <li>Guests set <b>Role</b> to <b>Join</b>, copy the code and press <b>Paste invite code</b>.</li>
+              <li>Everyone starts the game and loads their own hunter.</li>
+            </ol>
+            <p>The invite code stays the same through updates, so you only send it once. <b>New room</b> makes a new code, and the old one stops working.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Summon each other</summary>
+          <div class="answer">
+            <ol>
+              <li>Press <b>F2</b> (controller: hold <b>L3</b> and press <b>D-pad Up</b>) to open the co-op menu.</li>
+              <li>The host picks <b>Start summon</b>. Guests pick <b>Send sign</b>.</li>
+              <li>The screen shows how it goes: looking, found, connecting, connected. Guests arrive beside the host.</li>
+            </ol>
+            <p>The bells work too: anywhere, even after the area boss is dead, and with no Insight. If summons give up too soon on a slow connection, raise <b>Summon sign timeout</b> on the Online page.</p>
+          </div>
+        </details>
+        <details>
+          <summary>The co-op menu (F2)</summary>
+          <div class="answer">
+            <ul>
+              <li><b>Host:</b> start a session without a bell, bring or kick each hunter, <b>Bring all</b>, and end the session. Bring works within the same area.</li>
+              <li><b>Guest:</b> start a summon, ask the host to bring you, or return to your own world. The host sees "asks to come to you" and accepts with <b>Bring</b>.</li>
+              <li>The list shows each hunter's ping and connection: <b>reconnecting</b> means their connection dropped for a moment.</li>
+              <li><b>Voice chat:</b> turn it on or off, mute yourself or one hunter, pick push to talk (<b>V</b> by default, or any key or mouse button) or open mic, and set the volume up to 500%. It is encrypted like the rest and only sent while you speak.</li>
+              <li>The <b>Co-op</b> tab of the in-game menu (<b>Insert</b>) can hide connection status, join and leave lines, ping on the party HUD, and requests.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Lamps, deaths and bosses</summary>
+          <div class="answer">
+            <ul>
+              <li><b>The host's lamp</b> takes the whole party to the new place. Nobody goes home.</li>
+              <li><b>A guest's lamp</b> asks the host first. The host accepts in the F2 menu, and then everyone travels together.</li>
+              <li>A guest's lamp to the <b>Hunter's Dream</b> goes alone and leaves the party, because that's where you level up. Summon them back afterwards.</li>
+              <li><b>Deaths:</b> a hunter who dies gets back up, and the party stays together. Nobody is sent home.</li>
+              <li><b>Bosses:</b> killing a boss keeps the session. Every hunter in the fight gets the kill, the boss's drop and its rewards in their own save.</li>
+              <li><b>Chalice dungeons</b> work with the party too.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Items, loot and progress</summary>
+          <div class="answer">
+            <p>A guest plays the host's world like their own:</p>
+            <ul>
+              <li><b>Each hunter's own:</b> items, chests, enemy drops and NPC quests.</li>
+              <li><b>Shared:</b> bosses, lamps, doors, shortcuts and story.</li>
+              <li>Guests keep their own stats and level.</li>
+              <li>A guest's save keeps what was done while they were in the host's world. It never gets the host's earlier progress.</li>
+              <li>An NPC is one character for the whole room: killing or angering one does it for everyone.</li>
+            </ul>
+            <p>New in 0.9.39 beta 31: guests get the map's items and chests, their full enemy drops, and NPCs that talk through windows. This hasn't been played with two hunters yet, so please tell us in #issues if a guest still misses items.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Play with no server (direct connection)</summary>
+          <div class="answer">
+            <p>The host's game can run the room itself instead of Lantern's server. Set it under <b>Connection</b> on the Online page.</p>
+            <ul>
+              <li>It needs a way to reach the host: the same network, a VPN such as Tailscale or Radmin, or a forwarded port (TCP 38765 by default).</li>
+              <li>The invite code carries the host's address, so guests still just paste it.</li>
+              <li>Guests' traffic goes straight to the host. That's often the lowest ping when you're far from Europe.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Visitors: Open my room to visitors</summary>
+          <div class="answer">
+            <p>Rooms are private unless the host chooses otherwise. <b>Open my room to visitors</b> is off by default.</p>
+            <p>While it's on, the host's game gives the room's invite code to Lantern's co-op server. The Lantern event team can then see it in Discord and join for surprise events, so that room isn't private from them.</p>
+            <ul>
+              <li>Everyone in the room sees a line when a visitor joins, and the host can <b>Kick</b> them.</li>
+              <li>Nobody is moved: guests keep control of their own summons.</li>
+              <li>Turning it off or leaving takes the room off the list at once. <b>New room</b> retires a code they already saw.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Something goes wrong</summary>
+          <div class="answer">
+            <ul>
+              <li>Check that everyone is on <b>the same version</b>. Mixed versions can't share a room, and a guest can lose items.</li>
+              <li>Press <b>Test</b> on the Online page to check the connection.</li>
+              <li>Use the <b>same gameplay mods</b> as the host, or none. Different mods can make items go missing for a guest.</li>
+              <li>With <b>Play online</b> off, the game is fully offline: no room, and cheats work.</li>
+              <li>To report a problem, post <b>both</b> players' logs (<span class="k">Game output › Export…</span>) in #issues, and say who was host.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Who hosts the co-op servers?</summary>
+          <div class="answer">
+            <p>Lantern's seamless co-op rooms run on a server in Frankfurt, Germany, sponsored by <a href="https://1337hosting.com">1337 Hosting</a>. Thank you to them for keeping co-op free for everyone. It works well across Europe and reaches the Middle East and the US East Coast with decent latency.</p>
           </div>
         </details>
       </div>
@@ -932,7 +1045,7 @@ Loading: begins
               <li>Lower <span class="k">Display › Output resolution</span> to 1080p or less, and use a lower <b>Quality preset</b> (Performance).</li>
               <li>Use fewer texture or model mods: HD texture packs need much more video memory.</li>
               <li>Close browsers and recorders while playing.</li>
-              <li>Keep <span class="k">More › Engine › Use more VRAM for textures</span> off on cards with 4–6 GB.</li>
+              <li>Keep <span class="k">Engine switches › Use more VRAM for textures</span> off on cards with 4–6 GB.</li>
             </ul>
           </div>
         </details>
@@ -957,7 +1070,9 @@ Loading: begins
           <summary>Flickering, stretched or missing textures</summary>
           <div class="answer">
             <ul>
-              <li>Update to the newest version. 0.9.37 fixes shaders reading the wrong buffers, which caused stretched geometry and flicker, especially on older AMD cards (RX 400/500) and on NVIDIA.</li>
+              <li>Update to the newest version: many flicker and texture bugs are fixed in newer versions.</li>
+              <li>Lamp fog popping in and out, or sunlight fog flickering to another colour: fixed in 0.9.39 beta 31 <span class="bt">Beta</span>. <span class="k">Graphics</span> has <b>Steady lamp fog</b> and <b>Steady sunlight color</b> to compare.</li>
+              <li>On 0.9.39 beta 31 and newer, something drawn wrong that the version before drew right: turn off <span class="k">Engine switches › Native renderer: draws</span> once, and say in your report whether it helped.</li>
               <li>If it happens in every save (missing skin or hair), clear the shader cache once: <span class="k">Settings › Shader cache › Clear</span>.</li>
               <li>Try with mods off, and with frame generation off.</li>
               <li>Still there? Post a short video and your log.</li>
@@ -973,7 +1088,7 @@ Loading: begins
         <details>
           <summary>The game is stuck at 30 FPS</summary>
           <div class="answer">
-            <p>The game runs slower while its window is in the background, to save power. Click into the game window. FPS staying low after you switch back, or after lantern travel, is fixed in 0.9.37.</p>
+            <p>The game runs slower while its window is in the background, to save power. Click into the game window.</p>
           </div>
         </details>
         <details>
@@ -985,7 +1100,7 @@ Loading: begins
         <details>
           <summary>Mods don't load ("cannot link … dvdroot_ps4")</summary>
           <div class="answer">
-            <p>This happened on exFAT and FAT32 drives before 0.9.37, which reads mod files in place there: update. Also check that each mod's folder holds <code>dvdroot_ps4</code> (see <a href="#questions">How do I install mods?</a>). The start's log says how many game files each mod replaced.</p>
+            <p>On exFAT and FAT32 drives, update: versions before 0.9.37 could not link mod files there. Also check that each mod's folder holds <code>dvdroot_ps4</code> (see <a href="#questions">How do I install mods?</a>). The start's log says how many game files each mod replaced.</p>
           </div>
         </details>
         <details>
@@ -1011,14 +1126,24 @@ Loading: begins
         <span class="st tip">Answered</span>
       </div>
       <div class="band rv" data-find>
-        <div class="q"><q>After I updated to the newest beta, I cannot launch the game</q><span class="who">It opens, black screen, closes. RX 9070 XT.</span></div>
-        <div class="answer"><p>An engine bug that hit AMD cards at every start of 0.9.37 beta 6.</p></div>
-        <span class="st fixed">Fixed in 0.9.37</span>
+        <div class="q"><q>Lamp fog pops in and out when I move the camera</q><span class="who">Forbidden Woods bridge, lots of lamps.</span></div>
+        <div class="answer"><p>The game only lists lamps it sees, so the fog dropped lamps as the camera turned. Lamps are now remembered and fade in and out. <span class="k">Graphics › Steady lamp fog</span> switches it.</p></div>
+        <span class="st fixed">Fixed in 0.9.39 beta 31</span>
       </div>
       <div class="band rv" data-find>
-        <div class="q"><q>Game crash after 10 min, sometimes 1h later</q><span class="who">The graphics driver stopped responding. RTX 2070, RTX 3070 Ti, GTX 1660 Super.</span></div>
-        <div class="answer"><p>0.9.37 fixes the likely cause. See <a href="#fix">"The graphics driver stopped responding"</a>, and tell us if it still happens.</p></div>
-        <span class="st fixed">Likely fixed in 0.9.37</span>
+        <div class="q"><q>Sunlight fog flickers between white and blue</q></div>
+        <div class="answer"><p>The fog took its colour from a default light that came and went. It now follows the area's own light and changes smoothly, so some places look bluer than before. <span class="k">Graphics › Steady sunlight color</span> switches it.</p></div>
+        <span class="st fixed">Fixed in 0.9.39 beta 31</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>As a guest in seamless co-op I get no items from chests or enemies</q></div>
+        <div class="answer"><p>Guests now get the map's items, chests and their own enemy drops. Please tell us in #issues if a guest still misses items. See <a href="#coop">Items, loot and progress</a>.</p></div>
+        <span class="st tip">Try 0.9.39 beta 31</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Game crash after 10 min, sometimes 1h later</q><span class="who">The graphics driver stopped responding.</span></div>
+        <div class="answer"><p>Update to the newest version and your GPU driver. See <a href="#fix">"The graphics driver stopped responding"</a>, and post your log if it still happens.</p></div>
+        <span class="st tip">Answered</span>
       </div>
       <div class="band rv" data-find>
         <div class="q"><q>Uncapped seems locked at 60</q></div>
@@ -1031,24 +1156,14 @@ Loading: begins
         <span class="st tip">Answered</span>
       </div>
       <div class="band rv" data-find>
-        <div class="q"><q>It uses the D-pad when I press WASD after a menu</q></div>
-        <div class="answer"><p>W/A/S/D no longer acts as the d-pad after a message or a menu.</p></div>
-        <span class="st fixed">Fixed in 0.9.37</span>
-      </div>
-      <div class="band rv" data-find>
         <div class="q"><q>Can I bind more than one key, or Shift+key?</q></div>
         <div class="answer"><p>Yes: the <b>+</b> next to an action in Controls adds up to five keys, mouse buttons or combinations. Mouse sensitivity goes from -10 to 20.</p></div>
-        <span class="st fixed">Added in 0.9.37</span>
+        <span class="st tip">Answered</span>
       </div>
       <div class="band rv" data-find>
         <div class="q"><q>Debug Menu won't start even with the patch</q></div>
         <div class="answer"><p>The fonts have to be the packed files in <code>dvdroot_ps4\font</code> of the game folder or an enabled mod. See <a href="#questions">The Debug Menu won't start</a>.</p></div>
         <span class="st tip">Answered</span>
-      </div>
-      <div class="band rv" data-find>
-        <div class="q"><q>Flickering and missing textures with the BB PC Remaster mod</q></div>
-        <div class="answer"><p>Update to 0.9.37 first: it fixes a shader bug behind flicker on NVIDIA. If it stays, try with frame generation off and post a short video.</p></div>
-        <span class="st tip">Try 0.9.37</span>
       </div>
     </div>
   </section>
@@ -1093,21 +1208,21 @@ Loading: begins
           <div data-ui class="upd" id="upd-ui">
             <p class="upd-label">Updates</p>
             <div class="upd-card">
-              <div class="upd-row"><div>Launcher updates<small>You have v0.9.37, the latest (v0.9.37)</small></div>
+              <div class="upd-row"><div>Launcher updates<small>You have v0.9.39 beta 31, the latest (v0.9.39 beta 31)</small></div>
                 <span class="upd-ctl"><span class="ui-btn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1M13.5 2.5v3h-3"/></svg>Check now</span></span></div>
               <div class="upd-row col"><div>Update channel</div>
-                <div class="upd-seg" data-on="stable" role="group" aria-label="Update channel"><button type="button" data-ch="stable" aria-pressed="true">Stable</button><button type="button" data-ch="beta" aria-pressed="false">Beta</button></div></div>
+                <div class="upd-seg" data-on="beta" role="group" aria-label="Update channel"><button type="button" data-ch="stable" aria-pressed="false">Stable</button><button type="button" data-ch="beta" aria-pressed="true">Beta</button></div></div>
               <div class="upd-row"><div>Check for updates at start</div><button type="button" class="ui-tog" aria-pressed="true" aria-label="Check for updates at start"></button></div>
-              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.37. 100 versions to choose from</small></div>
+              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.39 beta 31. 130 versions to choose from</small></div>
                 <span class="upd-ctl">
-                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.37 · stable (installed)</span><span aria-hidden="true">⌄</span></button>
+                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.39 beta 31 (installed)</span><span aria-hidden="true">⌄</span></button>
                   <button type="button" class="ui-btn" id="upd-install" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5M3 14h10"/></svg>Install</button>
                   <div class="upd-list" id="upd-list" role="listbox" aria-label="Version">
-                    <button type="button" role="option" aria-selected="true" data-v="v0.9.37 · stable (installed)">v0.9.37 · stable (installed)</button>
-                    <button type="button" role="option" aria-selected="false" data-v="v0.9.37 beta 9">v0.9.37 beta 9</button>
-                    <button type="button" role="option" aria-selected="false" data-v="v0.9.37 beta 8">v0.9.37 beta 8</button>
-                    <button type="button" role="option" aria-selected="false" data-v="v0.9.37 beta 7">v0.9.37 beta 7</button>
-                    <button type="button" role="option" aria-selected="false" data-v="v0.9.36 · stable">v0.9.36 · stable</button>
+                    <button type="button" role="option" aria-selected="true" data-v="v0.9.39 beta 31 (installed)">v0.9.39 beta 31 (installed)</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 30">v0.9.39 beta 30</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 29">v0.9.39 beta 29</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.38 · stable">v0.9.38 · stable</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.37 · stable">v0.9.37 · stable</button>
                   </div>
                 </span></div>
             </div>
@@ -1164,7 +1279,7 @@ Loading: begins
   </section>
 
   <section id="beta-current">
-    <div class="sec-head"><h2>No beta right now</h2><p class="lead">The newest version is the stable <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.37</a>; on the beta channel the launcher installs it too.</p></div>
+    <div class="sec-head"><h2>Current beta</h2><p class="lead">The newest beta is <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.39 beta 31</a>; the newest stable is 0.9.38.</p></div>
     <div class="qa" id="beta-qa" hidden>
       <div class="qa-list" id="beta-notes"></div>
       <div class="pane" aria-live="polite"></div>
@@ -1214,7 +1329,7 @@ Loading: begins
       </div>
       <div class="tile t-ver">
         <span>Newest version</span>
-        <b id="newest">0.9.37</b>
+        <b id="newest">0.9.38</b>
         <a href="https://github.com/Awakenchan/LanternEngine/releases" id="newest-link">Release notes</a>
       </div>
       <div class="tile t-word">
@@ -1532,7 +1647,7 @@ Loading: begins
       var v = o.getAttribute('data-v');
       document.getElementById('upd-val').textContent = v;
       install.disabled = /installed/.test(v);
-      updSay.textContent = install.disabled ? 'You have v0.9.37. 100 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.37.';
+      updSay.textContent = install.disabled ? 'You have v0.9.39 beta 31. 130 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.39 beta 31.';
       openList(false);
     });
   });
@@ -1564,7 +1679,7 @@ Loading: begins
       .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
       .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2">$2</a>');
   }
-  function version(r) { return (r.name || r.tag_name || '').replace(/^v/, ''); }
+  function version(r) { return (r.name || r.tag_name || '').replace(/^Lantern Engine\s+/, '').replace(/^v/, ''); }
   function render(body) {
     var blocks = [], block = null;
     body.replace(/\r/g, '').split('\n').forEach(function (line) {
@@ -1584,7 +1699,7 @@ Loading: begins
         '</div></details>';
     }).join('');
   }
-  fetch('https://api.github.com/repos/Awakenchan/LanternEngine/releases?per_page=10', {
+  fetch('https://api.github.com/repos/Awakenchan/LanternEngine/releases?per_page=60', {
     headers: { Accept: 'application/vnd.github+json' }
   }).then(function (r) { return r.ok ? r.json() : null; }).then(function (releases) {
     if (!releases || !releases.length) return;
