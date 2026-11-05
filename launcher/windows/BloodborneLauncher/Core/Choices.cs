@@ -161,6 +161,13 @@
             new(L.T("High"), "1"),
         };
 
+        /// <summary>graphics_ao_quality: the GTAO replacement's quality (effect_gtao).</summary>
+        public static readonly Choice[] AoQualities =
+        {
+            new(L.T("Regular GTAO"), "0"),
+            new(L.T("High (full-res bitmask GTAO, denoised, experimental)"), "1"),
+        };
+
         public static readonly Choice[] CameraTuning =
         {
             new(L.T("Original (the game's camera)"), "original", L.T("As the game has it, at any frame rate")),

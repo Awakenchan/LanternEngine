@@ -64,6 +64,7 @@ namespace BloodborneLauncher.Core
             Level("graphics_shadow_resolution", 2),
             Level("graphics_local_shadow_resolution", 2),
             Level("graphics_motion_blur_quality", 1),
+            Level("graphics_ao_quality", 1),
         };
 
         private static readonly Dictionary<string, Knob> ByKey = Knobs.ToDictionary(k => k.Key, StringComparer.Ordinal);

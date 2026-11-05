@@ -312,6 +312,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_local_shadow_resolution=std::clamp(i,0,2);
     } else if (key == "graphics_motion_blur_quality") {
         v.graphics_motion_blur_quality=std::clamp(i,0,1);
+    } else if (key == "graphics_ao_quality") {
+        if (value != "0" && value != "1") {
+            std::printf("Settings: unknown graphics_ao_quality '%s' (expected 0 or 1); regular GTAO\n",
+                        value.c_str());
+        }
+        v.graphics_ao_quality = value == "1" ? 1 : 0;
     } else if (key == "graphics_shadow_scale") {
         v.graphics_shadow_scale=Clamp(std::isfinite(f)?f:1.0f,0.25f,8.0f);
     } else if (key == "graphics_bloom") {
@@ -550,6 +556,7 @@ void Load() {
     v.startup_frame_gen = v.frame_gen;
     v.startup_upscaler = v.upscaler;
     v.startup_motion_blur_quality = v.graphics_motion_blur_quality;
+    v.startup_ao_quality = v.graphics_ao_quality;
     v.startup_shadow_resolution = v.graphics_shadow_resolution;
     v.startup_local_shadow_resolution = v.graphics_local_shadow_resolution;
     v.startup_object_motion = v.object_motion;
@@ -721,6 +728,7 @@ void Save() {
     put("graphics_shadow_resolution",std::to_string(std::clamp(v.graphics_shadow_resolution.load(),0,2)));
     put("graphics_local_shadow_resolution",std::to_string(std::clamp(v.graphics_local_shadow_resolution.load(),0,2)));
     put("graphics_motion_blur_quality",std::to_string(std::clamp(v.graphics_motion_blur_quality.load(),0,1)));
+    put("graphics_ao_quality",std::to_string(std::clamp(v.graphics_ao_quality.load(),0,1)));
     put("graphics_shadow_scale",fixed(v.graphics_shadow_scale,2));
     put("graphics_bloom",fixed(v.graphics_bloom,2));
     put("graphics_saturation",fixed(v.graphics_saturation,2));

@@ -56,6 +56,7 @@ constexpr Knob kKnobs[] = {
     {"graphics_shadow_resolution", "0"},
     {"graphics_local_shadow_resolution", "0"},
     {"graphics_motion_blur_quality", "0"},
+    {"graphics_ao_quality", "0"},
 };
 
 struct Value {
@@ -196,6 +197,7 @@ bool NeedsRestart() {
         }
     }
     return s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+           s.graphics_ao_quality != s.startup_ao_quality ||
            s.graphics_shadow_resolution != s.startup_shadow_resolution ||
            s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution;
 }
