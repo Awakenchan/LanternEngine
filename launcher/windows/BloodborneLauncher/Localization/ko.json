@@ -1644,6 +1644,7 @@
   "Reflection strength": "반사 강도",
   "Volumetric sunlight strength": "볼류메트릭 햇빛 강도",
   "Lamp fog strength": "램프 안개 강도",
+  "Lamp fog glow size": "램프 안개 빛 크기",
   "The saved settings are damaged.": "저장된 설정이 손상되었습니다.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060, 1080p에서 거의 모두 켜고 47~51 FPS 측정.",
   " (experimental)": " (실험적)",

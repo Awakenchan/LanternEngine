@@ -1644,6 +1644,7 @@
   "Reflection strength": "Yansıma gücü",
   "Volumetric sunlight strength": "Hacimsel ışık gücü",
   "Lamp fog strength": "Lamba sisi gücü",
+  "Lamp fog glow size": "Lamba sisi parıltı boyutu",
   "The saved settings are damaged.": "Kayıtlı ayarlar bozuk.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060'ta 1080p ve neredeyse her şey açıkken 47-51 FPS ölçüldü.",
   " (experimental)": " (deneysel)",

@@ -89,17 +89,22 @@ int main() {
     assert(s.camera_distance_scale == 0.80f && s.camera_height_scale == 1.10f);
     s.change_appearance=true;s.rebirth=true;s.graphics_controls=true;
     s.graphics_bloom=0.7f;s.graphics_shadow_scale=1.4f;
+    assert(s.graphics_point_fog_glow_size == 0.08f);
+    s.graphics_point_fog_glow_size = 0.15f;
     BbSettings::Save();
-    s.rebirth=false;s.graphics_bloom=1.0f;
+    assert(Read(path).find("graphics_point_fog_glow_size=0.150\n") != std::string::npos);
+    s.rebirth=false;s.graphics_bloom=1.0f;s.graphics_point_fog_glow_size=0.08f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
+    assert(s.graphics_point_fog_glow_size == 0.15f);
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(!BbSettings::Effects[e].default_on);
     }
-    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\ngraphics_volumetric_intensity=nan\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
+    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\n    graphics_volumetric_intensity=nan\ngraphics_point_fog_glow_size=9\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
     BbSettings::Load();
     assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_ssr_intensity == 0.0f);
     assert(s.graphics_volumetric_intensity == 1.0f && s.graphics_shadow_resolution == 2);
+        assert(s.graphics_point_fog_glow_size == 0.20f);
     assert(s.startup_motion_blur_quality == 1 && s.startup_effects[BbSettings::EffectGi]);
     BbSettings::Save();
     BbSettings::Load();

@@ -1644,6 +1644,7 @@
   "Reflection strength": "Intensité des reflets",
   "Volumetric sunlight strength": "Intensité de la lumière volumétrique",
   "Lamp fog strength": "Intensité du brouillard des lampes",
+  "Lamp fog glow size": "Taille du halo du brouillard des lampes",
   "The saved settings are damaged.": "Les réglages enregistrés sont endommagés.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " 47 à 51 FPS mesurés sur une RTX 5060 en 1080p avec presque tout activé.",
   " (experimental)": " (expérimental)",

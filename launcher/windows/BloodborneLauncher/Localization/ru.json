@@ -1644,6 +1644,7 @@
   "Reflection strength": "Сила отражений",
   "Volumetric sunlight strength": "Сила объёмного света",
   "Lamp fog strength": "Сила тумана от ламп",
+  "Lamp fog glow size": "Размер свечения тумана от ламп",
   "The saved settings are damaged.": "Сохранённые настройки повреждены.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " Измерено 47-51 FPS на RTX 5060 в 1080p почти со всеми эффектами.",
   " (experimental)": " (эксперимент)",

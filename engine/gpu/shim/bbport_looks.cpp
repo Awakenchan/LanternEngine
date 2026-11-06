@@ -53,6 +53,7 @@ constexpr Knob kKnobs[] = {
     {"graphics_ssr_intensity", "1"},
     {"graphics_volumetric_intensity", "1"},
     {"graphics_point_fog_intensity", "1"},
+    {"graphics_point_fog_glow_size", "0.08"},
     {"graphics_shadow_resolution", "0"},
     {"graphics_local_shadow_resolution", "0"},
     {"graphics_motion_blur_quality", "0"},

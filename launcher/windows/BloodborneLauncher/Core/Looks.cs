@@ -61,6 +61,7 @@ namespace BloodborneLauncher.Core
             Amount("graphics_ssr_intensity", 0, 3, 1),
             Amount("graphics_volumetric_intensity", 0, 3, 1),
             Amount("graphics_point_fog_intensity", 0, 3, 1),
+            Amount("graphics_point_fog_glow_size", 0.03, 0.2, 0.08),
             Level("graphics_shadow_resolution", 2),
             Level("graphics_local_shadow_resolution", 2),
             Level("graphics_motion_blur_quality", 1),
