@@ -10,23 +10,35 @@ layout(binding = 3, rgba16f) uniform image2D fog_out;
 layout(push_constant) uniform Params {
     uint count;
     float intensity;
+    float glow_size;
 };
 
-const float GAUSS_X[3] = float[3](0.1127016654, 0.5, 0.8872983346);
-const float GAUSS_W[3] = float[3](0.2777777778, 0.4444444444, 0.2777777778);
+// Inverse-square falloff core^2 / (d^2 + core^2), core = glow_size * radius, so the peak is 1 at
+// the centre; the window saturate(1 - (d / r)^4)^2 takes it smoothly to zero at the radius.
+// ENERGY puts the peak at 2.5x the earlier (1 - d / r)^2 profile's; glow size changes the shape,
+// not the peak. The 1/d^2 term is integrated exactly per segment (atan), so the bright core
+// cannot fall between fixed samples and flicker as the camera moves.
+const float ENERGY = 2.5;
+const uint SEGMENTS = 6u;
 
 float c(uint i) { return uintBitsToFloat(cb.d[i]); }
 vec4 row(uint i) { return vec4(c(i), c(i + 1u), c(i + 2u), c(i + 3u)); }
 bool finite3(vec3 v) { return !any(isnan(v)) && !any(isinf(v)); }
 
-float inscatter(vec3 ray, vec3 centre, float radius, float begin, float end) {
+float inscatter(vec3 ray, vec3 centre, float radius, float along, float q, float begin, float end) {
+    float ds = (end - begin) / float(SEGMENTS);
     float energy = 0.0;
-    for (int i = 0; i < 3; ++i) {
-        float t = mix(begin, end, GAUSS_X[i]);
-        float falloff = max(0.0, 1.0 - length(ray * t - centre) / radius);
-        energy += GAUSS_W[i] * falloff * falloff * exp(-0.025 * t);
+    float previous = atan((begin - along) / q);
+    for (uint i = 0u; i < SEGMENTS; ++i) {
+        float t0 = begin + float(i) * ds;
+        float angle = atan((t0 + ds - along) / q);
+        float t = t0 + 0.5 * ds;
+        float x = length(ray * t - centre) / radius;
+        float window = clamp(1.0 - x * x * x * x, 0.0, 1.0);
+        energy += (angle - previous) * window * window * exp(-0.025 * t);
+        previous = angle;
     }
-    return energy * 0.025 * (end - begin);
+    return energy * 0.025;
 }
 
 void main() {
@@ -70,9 +82,12 @@ void main() {
         rgb = mix(vec3(luminance), rgb, 0.75);
 
         float radius = inversesqrt(inverse_radius_squared);
+        float core = max(clamp(glow_size, 0.03, 0.2) * radius, 0.05);
+        float q = sqrt(dot(perpendicular, perpendicular) + core * core);
         float nearest = clamp(along, begin, end);
-        scattering += rgb * (inscatter(ray, centre, radius, begin, nearest) +
-                             inscatter(ray, centre, radius, nearest, end));
+        scattering += rgb * (ENERGY * core * core / q) *
+            (inscatter(ray, centre, radius, along, q, begin, nearest) +
+             inscatter(ray, centre, radius, along, q, nearest, end));
     }
     vec4 previous = imageLoad(fog_out, px);
     imageStore(fog_out, px, vec4(previous.rgb + scattering * (0.35 * intensity), 0.0));

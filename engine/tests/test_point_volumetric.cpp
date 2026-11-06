@@ -17,8 +17,9 @@ constexpr unsigned W = 19, H = 11;
 struct Push {
     unsigned count = 2;
     float intensity = 1.0f;
+    float glow_size = 0.08f;
 };
-static_assert(sizeof(Push) == 8);
+static_assert(sizeof(Push) == 12);
 struct Buffer { VkBuffer buffer{}; VkDeviceMemory memory{}; void* data{}; unsigned size{}; };
 struct Image { VkImage image{}; VkDeviceMemory memory{}; VkImageView view{}; };
 struct Test {
@@ -256,13 +257,17 @@ int main() {
             const double luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
             const double colour = luminance + (rgb[channel] - luminance) * 0.75;
             const double radius = 1 / std::sqrt(double(r[3]));
+            const double core = std::max(double(push.glow_size) * radius, 0.05);
             constexpr unsigned Steps = 20000;
             double energy = 0;
             for (unsigned i = 0; i < Steps; ++i) {
                 const double t = (i + 0.5) / Steps * limit;
                 const double dx = ray[0] * t - r[0], dy = ray[1] * t - r[1], dz = ray[2] * t - r[2];
-                const double falloff = std::max(0.0, 1 - std::sqrt(dx * dx + dy * dy + dz * dz) / radius);
-                energy += falloff * falloff * std::exp(-0.025 * t) * 0.025 * limit / Steps;
+                const double d2 = dx * dx + dy * dy + dz * dz;
+                const double x2 = d2 / (radius * radius);
+                const double window = std::clamp(1 - x2 * x2, 0.0, 1.0);
+                const double falloff = 2.5 * core * core / (d2 + core * core) * window * window;
+                energy += falloff * std::exp(-0.025 * t) * 0.025 * limit / Steps;
             }
             total += colour * energy;
         }
@@ -270,20 +275,27 @@ int main() {
     };
     double worst = 0;
     unsigned checked = 0;
-    for (const float scene_depth : {0.5f, 0.9f, 1.0f}) {
-        const auto out = run(scene_depth);
-        for (unsigned y = 0; y < H; ++y) {
-            for (unsigned x = 0; x < W; ++x) {
-                for (unsigned c = 0; c < 3; ++c) {
-                    const double want = reference(x, y, scene_depth, c);
-                    const double got = half_to_float(out[(y * W + x) * 4 + c]);
-                    assert(want > 0);
-                    worst = std::max(worst, std::abs(got - want) / want);
-                    ++checked;
+    std::vector<uint16_t> default_glow;
+    for (const float glow : {0.08f, 0.03f, 0.2f}) {
+        push.glow_size = glow;
+        for (const float scene_depth : {0.5f, 0.9f, 1.0f}) {
+            const auto out = run(scene_depth);
+            if (glow == 0.08f && scene_depth == 0.5f) default_glow = out;
+            if (glow != 0.08f && scene_depth == 0.5f) assert(out != default_glow);
+            for (unsigned y = 0; y < H; ++y) {
+                for (unsigned x = 0; x < W; ++x) {
+                    for (unsigned c = 0; c < 3; ++c) {
+                        const double want = reference(x, y, scene_depth, c);
+                        const double got = half_to_float(out[(y * W + x) * 4 + c]);
+                        assert(want > 0);
+                        worst = std::max(worst, std::abs(got - want) / want);
+                        ++checked;
+                    }
                 }
             }
         }
     }
+    push.glow_size = 0.08f;
     std::printf("Lamp fog: largest error against a 20000-step reference %.3f%% over %u values\n",
                 worst * 100, checked);
     assert(worst < 0.02);
@@ -295,6 +307,6 @@ int main() {
     push.intensity = 0;
     const auto off = run(0.5f);
     assert(std::ranges::all_of(off, [](auto v) { return v == 0; }));
-    std::puts("Lamp fog: PASS (reference match with two lights, surfaces and sky, lights the ray "
-              "misses, zero intensity)");
+    std::puts("Lamp fog: PASS (inverse-square reference match at three glow sizes with two lights, "
+              "surfaces and sky, lights the ray misses, zero intensity)");
 }

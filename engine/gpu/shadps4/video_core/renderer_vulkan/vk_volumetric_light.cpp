@@ -102,7 +102,7 @@ bool VolumetricLight::Ready() {
                       VOLUMETRIC_LIGHT_COMPOSITE_COMP, sizeof(u32), "Volumetric composite") &&
            CreatePass(point,
                       {eStorageBuffer, eStorageBuffer, eCombinedImageSampler, eStorageImage},
-                      POINT_VOLUMETRIC_COMP, 2 * sizeof(u32), "Point volumetric");
+                      POINT_VOLUMETRIC_COMP, 3 * sizeof(u32), "Point volumetric");
     if (!made) {
         failed = true;
         std::printf("Volumetric lighting: off - this GPU cannot run the passes\n");
@@ -412,11 +412,12 @@ void VolumetricLight::AddPointLights(const u32* constants, const u32* lights, u3
 }
 
 void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights, u32 w, u32 h) {
-    const float intensity = BbSettings::Get().graphics_point_fog_intensity.load(
-        std::memory_order_relaxed);
+    const auto& settings = BbSettings::Get();
+    const float intensity = settings.graphics_point_fog_intensity.load(std::memory_order_relaxed);
     if (lights.empty() || !(intensity > 0.0f) || !std::isfinite(intensity)) {
         return;
     }
+    const float glow = settings.graphics_point_fog_glow_size.load(std::memory_order_relaxed);
     std::vector<u32> data(FogLightsAt / sizeof(u32) + lights.size() * 16);
     std::copy(fog_matrix.begin(), fog_matrix.end(), data.begin());
     for (u32 i = 0; i < lights.size(); ++i) {
@@ -425,8 +426,10 @@ void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights,
     struct PointParams {
         u32 count;
         float intensity;
+        float glow_size; // Inverse-square core as a fraction of the light's radius.
     };
-    const PointParams params{u32(lights.size()), std::clamp(intensity, 0.0f, 3.0f)};
+    const PointParams params{u32(lights.size()), std::clamp(intensity, 0.0f, 3.0f),
+                             std::isfinite(glow) ? std::clamp(glow, 0.03f, 0.20f) : 0.08f};
     const vk::Buffer buffer = fog_data->Handle();
     const vk::DescriptorBufferInfo constants{buffer, 0, 64};
     const vk::DescriptorBufferInfo records{buffer, FogLightsAt, lights.size() * 64};

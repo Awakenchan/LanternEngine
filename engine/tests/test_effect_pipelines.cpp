@@ -160,7 +160,7 @@ int main() {
         {"point volumetric",
          POINT_VOLUMETRIC_COMP,
          {eStorageBuffer, eStorageBuffer, eCombinedImageSampler, eStorageImage},
-         8},
+         12},
     };
     u32 built = 0;
     for (const Pass& pass : passes) {

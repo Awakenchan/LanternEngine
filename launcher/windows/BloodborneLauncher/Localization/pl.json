@@ -1644,6 +1644,7 @@
   "Reflection strength": "Siła odbić",
   "Volumetric sunlight strength": "Siła światła wolumetrycznego",
   "Lamp fog strength": "Siła mgły lamp",
+  "Lamp fog glow size": "Rozmiar poświaty mgły lamp",
   "The saved settings are damaged.": "Zapisane ustawienia są uszkodzone.",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " 47-51 FPS zmierzone na RTX 5060 w 1080p przy prawie wszystkim włączonym.",
   " (experimental)": " (eksperymentalne)",

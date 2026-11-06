@@ -1644,6 +1644,7 @@
   "Reflection strength": "反射の強さ",
   "Volumetric sunlight strength": "ボリューメトリック日光の強さ",
   "Lamp fog strength": "ランプの霧の強さ",
+  "Lamp fog glow size": "ランプの霧の光の大きさ",
   "The saved settings are damaged.": "保存された設定が壊れています。",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060・1080p、ほぼ全オンで 47〜51 FPS を測定。",
   " (experimental)": "（実験的）",

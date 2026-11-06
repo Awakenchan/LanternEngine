@@ -227,6 +227,7 @@ namespace BloodborneLauncher.Views
             IniSlider(SymbolRegular.Lightbulb24, L.T("Reflection strength"), 0, 3, "graphics_ssr_intensity");
             IniSlider(SymbolRegular.Lightbulb24, L.T("Volumetric sunlight strength"), 0, 3, "graphics_volumetric_intensity");
             IniSlider(SymbolRegular.Lightbulb24, L.T("Lamp fog strength"), 0, 3, "graphics_point_fog_intensity");
+            IniSlider(SymbolRegular.Lightbulb24, L.T("Lamp fog glow size"), 0.03, 0.2, "graphics_point_fog_glow_size", step: 0.01, fallback: 0.08);
 
             Ws.PortChanged += UpdateUpscaler;
         }

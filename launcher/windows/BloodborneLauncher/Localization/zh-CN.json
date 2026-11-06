@@ -1831,6 +1831,7 @@
   "Reflection strength": "反射强度",
   "Volumetric sunlight strength": "体积阳光强度",
   "Lamp fog strength": "灯光雾强度",
+  "Lamp fog glow size": "灯光雾光晕大小",
   "The saved settings are damaged.": "已保存的设置已损坏。",
   " Measured: 47 to 51 FPS on an RTX 5060 at 1080p with nearly everything on.": " RTX 5060 在 1080p 几乎全开时测得 47 至 51 FPS。",
   " (experimental)": "（实验性）",
