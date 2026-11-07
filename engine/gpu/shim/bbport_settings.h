@@ -179,6 +179,7 @@ struct Values {
     std::atomic<int> pad_icons{PadIconsAuto};
     std::atomic<bool> change_appearance{false}, rebirth{false};
     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
+    std::atomic<bool> graphics_gi_probes{false};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
     std::atomic<int> graphics_shadow_resolution{0},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{0};

@@ -93,6 +93,15 @@ int main() {
     s.rebirth=false;s.graphics_bloom=1.0f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
+    assert(!s.graphics_gi_probes);
+    s.graphics_gi_probes = true;
+    BbSettings::Save();
+    assert(Read(path).find("graphics_gi_probes=1\n") != std::string::npos);
+    s.graphics_gi_probes = false;
+    BbSettings::Load();
+    assert(s.graphics_gi_probes);
+    s.graphics_gi_probes = false;
+    BbSettings::Save();
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(!BbSettings::Effects[e].default_on);
     }

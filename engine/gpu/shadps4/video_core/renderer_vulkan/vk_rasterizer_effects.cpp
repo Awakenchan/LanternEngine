@@ -116,7 +116,8 @@ void Rasterizer::EffectsAfterTargets(const GraphicsPipeline* pipeline) {
     const auto& key = pipeline->GetGraphicsKey();
     if (std::popcount(key.mrt_mask) >= 5 && db_desc.first) {
         volumetric_light->Reset();
-        ssgi->OnGBufferDraw(db_desc.first, cb_descs[2].first, cb_descs[0].first);
+        ssgi->OnGBufferDraw(db_desc.first, cb_descs[2].first, cb_descs[0].first,
+                            cb_descs[1].first, cb_descs[3].first);
     }
     if (cb_descs[0].first && EffectShaders::GtaoActive() &&
         FragmentHash(pipeline) == EffectShaders::SsaoHash) {

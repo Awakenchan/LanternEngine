@@ -570,6 +570,17 @@ void HdrSection() {
 void PictureSection() {
     auto& s = BbSettings::Get();
     Section("Picture", "Изображение");
+    if (const char* label = Item("Screen probe indirect light (experimental)",
+                                 "Непрямой свет экранных зондов (экспериментальный)")) {
+        Checkbox(label, s.graphics_gi_probes);
+        Hint(BbSettings::MenuText(
+            "Live, off by default. Needs Indirect lighting. Replaces the screen-space indirect light "
+            "with radiance probes (one per 16x16 pixels) that add diffuse bounce and rough "
+            "specular reflections. Overrides ray traced bounce light while on.",
+            "Работает сразу, по умолчанию выкл. Нужно непрямое освещение. Заменяет экранный "
+            "непрямой свет зондами (один на 16x16 пикселей): рассеянный отражённый свет и "
+            "размытые отражения. Пока включено, заменяет трассированный отражённый свет."));
+    }
     const bool live = BbEngine::Graphics::Enabled();
     if (!live && WholeSection() && Shown("Picture", "Изображение")) {
         ImGui::TextDisabled("%s", BbSettings::MenuText("Unavailable: the game's code differs from version 1.09.",

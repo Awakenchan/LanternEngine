@@ -306,6 +306,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_point_fog_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_ssr_intensity") {
         v.graphics_ssr_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+    } else if (key == "graphics_gi_probes") {
+        v.graphics_gi_probes=i!=0;
     } else if (key == "graphics_shadow_resolution") {
         v.graphics_shadow_resolution=std::clamp(i,0,2);
     } else if (key == "graphics_local_shadow_resolution") {
@@ -718,6 +720,7 @@ void Save() {
     put("graphics_volumetric_intensity",fixed(v.graphics_volumetric_intensity,2));
     put("graphics_point_fog_intensity",fixed(v.graphics_point_fog_intensity,2));
     put("graphics_ssr_intensity",fixed(v.graphics_ssr_intensity,2));
+    put("graphics_gi_probes",flag(v.graphics_gi_probes));
     put("graphics_shadow_resolution",std::to_string(std::clamp(v.graphics_shadow_resolution.load(),0,2)));
     put("graphics_local_shadow_resolution",std::to_string(std::clamp(v.graphics_local_shadow_resolution.load(),0,2)));
     put("graphics_motion_blur_quality",std::to_string(std::clamp(v.graphics_motion_blur_quality.load(),0,1)));
