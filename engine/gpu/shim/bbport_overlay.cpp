@@ -581,6 +581,31 @@ void PictureSection() {
             "непрямой свет зондами (один на 16x16 пикселей): рассеянный отражённый свет и "
             "размытые отражения. Пока включено, заменяет трассированный отражённый свет."));
     }
+    if (const char* label = Item("Tonemapper", "Тонмаппер")) {
+        const char* names[] = {BbSettings::MenuText("Original (game)", "Оригинальный (игра)"),
+                               BbSettings::MenuText("GT7 (Gran Turismo 7)", "GT7 (Gran Turismo 7)")};
+        int mode = std::clamp(s.graphics_tonemapper.load(), 0, BbSettings::TonemapperCount - 1);
+        const bool changed = ImGui::Combo(label, &mode, names, BbSettings::TonemapperCount);
+        Store(s.graphics_tonemapper, mode, changed);
+        Hint(BbSettings::MenuText(
+            "Live. Original: the game's own tone curve. GT7: Polyphony Digital's Gran Turismo 7 tone "
+            "mapper (MIT), matched to the game's midtones; it rolls highlights off more gently and keeps "
+            "bright colours from shifting hue. Not used while the HDR scene curve (BB_HDR_SCENE_CURVE) is on.",
+            "Работает сразу. Оригинальный: собственная тоновая кривая игры. GT7: тонмаппер Gran Turismo 7 "
+            "от Polyphony Digital (MIT), подогнанный к средним тонам игры; мягче сжимает светлые места и "
+            "не искажает оттенок ярких цветов. Не работает при включённой HDR-кривой сцены "
+            "(BB_HDR_SCENE_CURVE)."));
+    }
+    if (s.graphics_tonemapper == BbSettings::TonemapperGt7 || Searching()) {
+        if (const char* label = Item("GT7 exposure", "Экспозиция GT7")) {
+            Slider(label, s.graphics_gt7_exposure, BbSettings::Gt7ExposureMin, BbSettings::Gt7ExposureMax,
+                   "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+            Hint(BbSettings::MenuText("Live. Scene brightness fed into the GT7 tone mapper; 1.00 matches the "
+                                      "game's midtones.",
+                                      "Работает сразу. Яркость сцены на входе тонмаппера GT7; 1.00 — средние "
+                                      "тона как в игре."));
+        }
+    }
     const bool live = BbEngine::Graphics::Enabled();
     if (!live && WholeSection() && Shown("Picture", "Изображение")) {
         ImGui::TextDisabled("%s", BbSettings::MenuText("Unavailable: the game's code differs from version 1.09.",

@@ -18,6 +18,7 @@
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/native/gt7_tonemap.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_effect_shaders.h"
@@ -429,6 +430,11 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     if (!LoadShaderMeta(ar, program->info, fetch, spec, perm_idx, expected_hash)) {
         return false;
     }
+    // bbport: a composite cached before the GT7 pass compiles again in play (native/gt7_tonemap.h).
+    if (!program->info.gt7_checked && !Shader::Native::ToneCurveEnabled() &&
+        Shader::Native::IsKnownComposite(program->info.pgm_hash)) {
+        return false;
+    }
 
     std::vector<u32> spv;
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
@@ -810,6 +816,8 @@ namespace Shader {
 
 // "TCX1": the module uses the tone curve extension's push data.
 static constexpr u32 ToneCurveTag = 0x31584354;
+// "GT71": a composite compiled with the GT7 tone map pass (applied or not).
+static constexpr u32 Gt7CheckedTag = 0x31375447;
 
 void Info::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer info{ar};
@@ -822,6 +830,10 @@ void Info::Serialize(Serialization::Archive& ar) const {
     if (uses_tone_curve) {
         Serialization::Writer tail{ar};
         tail.Write(ToneCurveTag);
+    }
+    if (gt7_checked) {
+        Serialization::Writer tail{ar};
+        tail.Write(Gt7CheckedTag);
     }
 }
 
@@ -838,6 +850,7 @@ bool Info::Deserialize(Serialization::Archive& ar) {
     // parts: the table plan, the tone curve extension (native/tone_curve.h).
     table_plan = {};
     uses_tone_curve = false;
+    gt7_checked = false;
     while (!ar.IsEoS()) {
         // bbport: zero bytes to the end are room the writer left after a vertex shader's fetch
         // shader data (up to 0.9.37 beta 5): not a part. Taken for one, they left every such shader
@@ -854,6 +867,9 @@ bool Info::Deserialize(Serialization::Archive& ar) {
         if (tag == ToneCurveTag) {
             ar.Advance(sizeof(tag));
             uses_tone_curve = true;
+        } else if (tag == Gt7CheckedTag) {
+            ar.Advance(sizeof(tag));
+            gt7_checked = true;
         } else if (!table_plan.Deserialize(ar)) {
             return false;
         }

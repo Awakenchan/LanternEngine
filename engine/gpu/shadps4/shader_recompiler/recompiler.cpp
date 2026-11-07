@@ -10,6 +10,7 @@
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/native/gt7_tonemap.h"
 #include "shader_recompiler/native/table_plan.h"
 #include "shader_recompiler/native/tone_curve.h"
 #include "shader_recompiler/profile.h"
@@ -174,6 +175,9 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     // bbport: the composite's tone curve for HDR (native/tone_curve.h), off by default.
     if (Native::ToneCurveEnabled()) {
         Native::ExtendToneCurve(program);
+    } else {
+        // bbport: GT7 beside the game's curve, chosen per draw (native/gt7_tonemap.h).
+        Native::ApplyGt7ToneMap(program, runtime_info);
     }
     Shader::Optimization::CollectShaderInfoPass(program, profile);
     Shader::IR::DumpProgram(program, info);

@@ -99,6 +99,10 @@ enum HdrOutput : int { HdrOutputOff = 0, HdrOutputHdr10 = 1, HdrOutputScRgb = 2 
 enum HdrMode : int { HdrModeNative = 0, HdrModeExpand = 1, HdrModeCount };
 inline constexpr const char* HdrModeNames[] = {"native", "expand"};
 static_assert(sizeof(HdrModeNames) / sizeof(HdrModeNames[0]) == HdrModeCount);
+enum Tonemapper : int { TonemapperOriginal = 0, TonemapperGt7 = 1, TonemapperCount };
+inline constexpr const char* TonemapperNames[] = {"original", "gt7"};
+static_assert(sizeof(TonemapperNames) / sizeof(TonemapperNames[0]) == TonemapperCount);
+inline constexpr float Gt7ExposureMin = 0.25f, Gt7ExposureMax = 4.0f;
 
 inline constexpr int DlssPresetDefault = 0, DlssPresetK = 11, DlssPresetMax = 26;
 inline constexpr int DlssPresetAuto = -1, DlssPresetL = 12, DlssPresetM = 13;
@@ -182,6 +186,8 @@ struct Values {
     std::atomic<bool> graphics_gi_probes{false};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
+    std::atomic<int> graphics_tonemapper{TonemapperOriginal};
+    std::atomic<float> graphics_gt7_exposure{1.0f};
     std::atomic<int> graphics_shadow_resolution{0},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{0};
     std::atomic<int> look_choice{0};
     std::atomic<float> graphics_fog{1},graphics_brightness{1},graphics_contrast{1},graphics_hue{0};

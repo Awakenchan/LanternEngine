@@ -147,6 +147,9 @@ struct Info : InfoPersistent {
     /// bbport: the composite's tone curve is extended (native/tone_curve.h): the module reads
     /// ToneCurvePush after the push data. Kept in the cache record's tail.
     bool uses_tone_curve{};
+    /// bbport: a composite compiled by an engine with the GT7 tone map pass (native/gt7_tonemap.h),
+    /// applied or not. Kept in the cache record's tail; records without it compile again.
+    bool gt7_checked{};
     bool uses_shader_clock{};
     bool uses_group_quad{};
     bool uses_group_shuffle{};
