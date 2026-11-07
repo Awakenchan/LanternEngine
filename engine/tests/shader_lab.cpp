@@ -28,6 +28,7 @@
 #include "shader_recompiler/ir/abstract_syntax_list.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/native/capture.h"
+#include "shader_recompiler/native/gt7_tonemap.h"
 #include "shader_recompiler/native/table_plan.h"
 #include "shader_recompiler/native/tone_curve.h"
 #include "shader_recompiler/ir/ir_emitter.h"
@@ -2075,7 +2076,8 @@ constexpr float RampLow = -10.0f, RampStops = 24.0f;
 constexpr u32 RampWidth = 4096;
 
 std::vector<u32> CompileComposite(const fs::path& file, bool extend, bool ramp,
-                                  std::vector<Native::ToneCurveMatch>& matches, std::string& note) {
+                                  std::vector<Native::ToneCurveMatch>& matches, std::string& note,
+                                  bool gt7 = false, bool* gt7_applied = nullptr) {
     Profile profile = CaptureProfile(file);
     LoadedCapture cap;
     if (const char* error = cap.Load(file)) {
@@ -2087,10 +2089,15 @@ std::vector<u32> CompileComposite(const fs::path& file, bool extend, bool ramp,
     Pools pools;
     std::vector<IR::Inst*> channels;
     Native::tone_curve_lab_override = extend ? 1 : 0;
+    Native::gt7_lab_override = gt7 ? 1 : 0;
     Native::tone_curve_lab_channels = &channels;
     auto program = TranslateProgram(cap.code, pools, info, cap.Runtime(), profile);
     Native::tone_curve_lab_override = -1;
+    Native::gt7_lab_override = -1;
     Native::tone_curve_lab_channels = nullptr;
+    if (gt7_applied) {
+        *gt7_applied = info.uses_tone_curve;
+    }
     matches = Native::FindToneCurves(program);
     if (ramp) {
         if (!Native::IsComposite(matches)) {
@@ -2160,11 +2167,14 @@ int CurvesOne(const fs::path& file) {
                          : matches[0].family == Native::ToneCurveMatch::Family::Exponential
                              ? "exponential"
                              : "reinhard";
-    std::printf("CURVES|channels=%zu;composite=%u;family=%s;words=%u/%u;changed=%u;varies=%u\n",
+    bool gt7 = false;
+    const auto gt7_spirv = CompileComposite(file, false, false, unused, note, true, &gt7);
+    std::printf("CURVES|channels=%zu;composite=%u;family=%s;words=%u/%u;changed=%u;varies=%u;gt7=%u;"
+                "gt7_changed=%u\n",
                 matches.size(), composite ? 1u : 0u, family,
                 matches.empty() ? 0u : matches[0].k_word,
                 matches.empty() ? 0u : matches[0].shoulder_word, game != extended ? 1u : 0u,
-                varies ? 1u : 0u);
+                varies ? 1u : 0u, gt7 ? 1u : 0u, gt7_spirv != game ? 1u : 0u);
     return 0;
 }
 

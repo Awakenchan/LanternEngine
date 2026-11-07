@@ -31,7 +31,8 @@ public:
                        std::array<float, 2> jitter);
 
     void OnGBufferDraw(VideoCore::ImageId depth, VideoCore::ImageId albedo,
-                       VideoCore::ImageId normal);
+                       VideoCore::ImageId normal, VideoCore::ImageId material,
+                       VideoCore::ImageId specular);
 
     void OnAoDraw(VideoCore::ImageId ao);
 
@@ -73,10 +74,16 @@ private:
     RtShadow& rt_shadow;
     CameraMotion& camera_motion;
 
-    Pass prep, gather, gather_ray, denoise, composite;
+    Pass prep, gather, gather_ray, denoise, composite, probe_trace, probe_composite;
     OwnImage geo;
     std::array<OwnImage, 2> light;
     std::array<OwnImage, 2> filtered;
+    std::array<OwnImage, 2> probe_geo;
+    std::array<OwnImage, 2> probe_light;
+    std::array<std::array<OwnImage, 3>, 2> probe_sh;
+    std::array<OwnImage, 2> probe_diffuse;
+    std::array<OwnImage, 2> probe_specular;
+    bool probe_history_valid = false;
     std::array<float, 12> prev_view{};
     std::array<float, 2> prev_proj{};
     std::array<float, 2> prev_jitter{};
@@ -87,8 +94,9 @@ private:
     bool failed = false;
     bool tried = false;
     VideoCore::ImageId gbuffer_depth, gbuffer_albedo, gbuffer_normal;
+    VideoCore::ImageId gbuffer_material, gbuffer_specular;
     VideoCore::ImageId ao_image;
-    std::array<ViewEntry, 4> view_cache{};
+    std::array<ViewEntry, 8> view_cache{};
     u64 view_uses = 0;
 };
 

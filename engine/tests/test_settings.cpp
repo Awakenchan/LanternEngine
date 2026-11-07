@@ -93,6 +93,15 @@ int main() {
     s.rebirth=false;s.graphics_bloom=1.0f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
+    assert(!s.graphics_gi_probes);
+    s.graphics_gi_probes = true;
+    BbSettings::Save();
+    assert(Read(path).find("graphics_gi_probes=1\n") != std::string::npos);
+    s.graphics_gi_probes = false;
+    BbSettings::Load();
+    assert(s.graphics_gi_probes);
+    s.graphics_gi_probes = false;
+    BbSettings::Save();
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(!BbSettings::Effects[e].default_on);
     }
@@ -190,6 +199,23 @@ int main() {
     { std::ofstream file(path); file << "hdr_mode=native\n"; }
     BbSettings::Load();
     assert(s.hdr_mode == BbSettings::HdrModeNative);
+    assert(s.graphics_tonemapper == BbSettings::TonemapperOriginal && s.graphics_gt7_exposure == 1.0f);
+    BbSettings::Save();
+    assert(Read(path).find("graphics_tonemapper=original\n") != std::string::npos);
+    { std::ofstream file(path); file << "graphics_tonemapper=gt7\ngraphics_gt7_exposure=1.5\n"; }
+    BbSettings::Load();
+    assert(s.graphics_tonemapper == BbSettings::TonemapperGt7 && s.graphics_gt7_exposure == 1.5f);
+    BbSettings::Save();
+    assert(Read(path).find("graphics_tonemapper=gt7\n") != std::string::npos);
+    assert(Read(path).find("graphics_gt7_exposure=1.50\n") != std::string::npos);
+    { std::ofstream file(path); file << "graphics_tonemapper=aces\ngraphics_gt7_exposure=99\n"; }
+    BbSettings::Load();
+    assert(s.graphics_tonemapper == BbSettings::TonemapperOriginal &&
+           s.graphics_gt7_exposure == BbSettings::Gt7ExposureMax);
+    { std::ofstream file(path); file << "graphics_gt7_exposure=nan\n"; }
+    BbSettings::Load();
+    assert(s.graphics_gt7_exposure == 1.0f);
+    { std::ofstream file(path); file << "hdr_mode=native\n"; }
 #ifdef _WIN32
     _putenv_s("BB_HDR", "1");
     _putenv_s("BB_HDR_PEAK", "600");

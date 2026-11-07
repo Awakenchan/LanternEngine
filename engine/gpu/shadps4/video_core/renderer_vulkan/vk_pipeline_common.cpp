@@ -13,6 +13,7 @@
 #include <boost/container/static_vector.hpp>
 
 #include "bbport_settings.h"
+#include "shader_recompiler/native/gt7_tonemap.h"
 #include "shader_recompiler/native/tone_curve.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/pipeline_compile_queue.h"
@@ -158,7 +159,21 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
     scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
         cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
     });
-    if (uses_tone_curve) {
+    if (uses_tone_curve && !Shader::Native::ToneCurveEnabled()) {
+        const auto& settings = BbSettings::Get();
+        const Shader::Native::Gt7Push gt7{
+            .enabled = settings.graphics_tonemapper.load(std::memory_order_relaxed) ==
+                               BbSettings::TonemapperGt7
+                           ? 1.0f
+                           : 0.0f,
+            .exposure = settings.graphics_gt7_exposure.load(std::memory_order_relaxed),
+            .unused = {},
+        };
+        scheduler.Record([layout, stage_flags, gt7](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pushConstants(layout, stage_flags, Shader::Native::ToneCurvePushOffset,
+                                 sizeof(gt7), &gt7);
+        });
+    } else if (uses_tone_curve) {
         const Shader::Native::ToneCurvePush tone = ToneCurveParams();
         scheduler.Record([layout, stage_flags, tone](vk::CommandBuffer cmdbuf) {
             cmdbuf.pushConstants(layout, stage_flags, Shader::Native::ToneCurvePushOffset,

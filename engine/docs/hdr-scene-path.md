@@ -203,3 +203,28 @@ and 0. Knees 0.6, 0.75 and 0.85, peaks 2.5, 5 and 10, strengths 0.5 and 1:
 All checks pass for the five player composites and the two of the development install.
 
 Steps 3-5 (16-bit chain, colour table and encode, settings) are not started.
+
+## GT7 tonemapper (selectable, SDR)
+
+`shader_recompiler/native/gt7_tonemap.{h,cpp}` (`ApplyGt7ToneMap`) ports the Gran Turismo 7
+tonemapper (aletschfirn/gt7tonemapper, MIT) into the same composites, found by `FindToneCurves`:
+`15fa3515` (seen since in the skin captures), `5c02eaf8`, `5e67d866`, `925d5712`, `cbe2dd84`,
+`ccb08339`. It runs whenever `BB_HDR_SCENE_CURVE` is not set.
+
+- Input: each channel's scene value in the curve's units (`k x`), times a gain that makes GT7 meet
+  the game's curve at 0.3 (from the game's own constants), times the exposure setting.
+- GT7 (SDR target 2.5, SDR correction 0.4): Rec.709 to Rec.2020, the curve per channel, the ICtCp
+  chroma fade and blend, back to Rec.709, clamped 0-1. It uses the curve's ICtCp intensity for the
+  scaled colour, where the ReShade port uses the input's.
+- Channels: Rec.709/2020 and ICtCp are not symmetric in R, G and B, so each clamp needs its colour.
+  It is the output component the clamp alone reaches. Where the composite mixes them before export
+  (`5c02eaf8`: glow screen blend, then a 3x3 colour matrix), it is the clamps' order in the block
+  (the shader's x, y, z) through the colour buffer's export swizzle, which gives the same answer
+  for the composites that do not mix.
+- Each clamp's uses become `select(enabled, gt7, game)`. `enabled` and exposure come from push
+  data (`Gt7Push`, after the 128 bytes, as `ToneCurvePush`), set at each draw from
+  `graphics_tonemapper` (`original`, `gt7`) and `graphics_gt7_exposure` (0.25-4), so the
+  overlay's Tonemapper drop-down and GT7 exposure slider switch live. With Original the game's
+  instruction is taken bit for bit.
+- Cache: a module that went through the pass carries a tag; a cached known composite without it is
+  compiled again once.

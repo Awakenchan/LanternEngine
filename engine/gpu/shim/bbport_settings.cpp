@@ -300,12 +300,26 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_ao_strength=Clamp(std::isfinite(f)?f:1.0f,0.0f,5.0f);
     } else if (key == "graphics_gi_strength") {
         v.graphics_gi_strength=Clamp(std::isfinite(f)?f:6.0f,0.0f,12.0f);
+    } else if (key == "graphics_gt7_exposure") {
+        v.graphics_gt7_exposure=Clamp(std::isfinite(f)?f:1.0f,Gt7ExposureMin,Gt7ExposureMax);
+    } else if (key == "graphics_tonemapper") {
+        int mode=-1;
+        for (int m=0;m<TonemapperCount;++m) {
+            if (value==TonemapperNames[m]) mode=m;
+        }
+        if (mode<0) {
+            std::printf("Settings: unknown graphics_tonemapper '%s' (expected original or gt7); original\n",
+                        value.c_str());
+        }
+        v.graphics_tonemapper=mode<0?TonemapperOriginal:mode;
     } else if (key == "graphics_volumetric_intensity") {
         v.graphics_volumetric_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_point_fog_intensity") {
         v.graphics_point_fog_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_ssr_intensity") {
         v.graphics_ssr_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+    } else if (key == "graphics_gi_probes") {
+        v.graphics_gi_probes=i!=0;
     } else if (key == "graphics_shadow_resolution") {
         v.graphics_shadow_resolution=std::clamp(i,0,2);
     } else if (key == "graphics_local_shadow_resolution") {
@@ -715,9 +729,12 @@ void Save() {
     put("graphics_vignette",flag(v.graphics_vignette));
     put("graphics_ao_strength",fixed(v.graphics_ao_strength,2));
     put("graphics_gi_strength",fixed(v.graphics_gi_strength,2));
+    put("graphics_tonemapper",TonemapperNames[std::clamp(v.graphics_tonemapper.load(),0,TonemapperCount-1)]);
+    put("graphics_gt7_exposure",fixed(v.graphics_gt7_exposure,2));
     put("graphics_volumetric_intensity",fixed(v.graphics_volumetric_intensity,2));
     put("graphics_point_fog_intensity",fixed(v.graphics_point_fog_intensity,2));
     put("graphics_ssr_intensity",fixed(v.graphics_ssr_intensity,2));
+    put("graphics_gi_probes",flag(v.graphics_gi_probes));
     put("graphics_shadow_resolution",std::to_string(std::clamp(v.graphics_shadow_resolution.load(),0,2)));
     put("graphics_local_shadow_resolution",std::to_string(std::clamp(v.graphics_local_shadow_resolution.load(),0,2)));
     put("graphics_motion_blur_quality",std::to_string(std::clamp(v.graphics_motion_blur_quality.load(),0,1)));

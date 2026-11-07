@@ -1,0 +1,565 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// Screen-space radiance probes: one probe per 16x16 tile stores 8x8 octahedral radiance (view
+// space), accumulated over frames. Diffuse and rough specular both read its L1 SH; the resolved
+// per-pixel lighting is then accumulated over frames as well.
+
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(push_constant) uniform Constants {
+    vec4 proj;
+    vec4 reproject[3];
+    vec2 size;
+    vec2 jitter;
+    vec2 prev_jitter;
+    vec2 prev_proj;
+    uint frame;
+    uint history;
+    float diffuse_scale;
+    float specular_scale;
+    float feedback;
+    float ao_amount;
+    float albedo_on;
+    float material_on;
+};
+
+const int TILE = 16;
+const int OCT = 8;
+const float PI = 3.14159265358979;
+const float ALBEDO = 0.5;
+
+ivec2 tileCount() {
+    return (ivec2(size) + TILE - 1) / TILE;
+}
+
+float viewZ(float depth) {
+    return proj.w / min(depth - proj.z, -1e-8);
+}
+
+vec3 viewPos(vec2 pixel, float z) {
+    const vec2 ndc = (pixel - jitter) / size * 2.0 - 1.0;
+    return vec3(ndc.x * z / proj.x, ndc.y * z / proj.y, z);
+}
+
+vec3 prevViewPos(vec2 pixel, float z) {
+    const vec2 ndc = (pixel - prev_jitter) / size * 2.0 - 1.0;
+    return vec3(ndc.x * z / prev_proj.x, ndc.y * z / prev_proj.y, z);
+}
+
+vec2 projectPixel(vec3 p) {
+    return (p.xy * proj.xy / p.z * 0.5 + 0.5) * size + jitter;
+}
+
+vec3 toPrevious(vec3 p) {
+    const vec4 v = vec4(p, 1.0);
+    return vec3(dot(reproject[0], v), dot(reproject[1], v), dot(reproject[2], v));
+}
+
+vec3 rotateToPrevious(vec3 d) {
+    return vec3(dot(reproject[0].xyz, d), dot(reproject[1].xyz, d), dot(reproject[2].xyz, d));
+}
+
+vec2 prevPixel(vec3 p) {
+    return (p.xy * prev_proj / p.z * 0.5 + 0.5) * size + prev_jitter;
+}
+
+vec2 signNotZero(vec2 v) {
+    return vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+}
+
+// The camera-facing hemisphere (-z) maps to the centre of the octahedron.
+vec2 octEncode(vec3 d) {
+    d = vec3(d.x, d.y, -d.z) / (abs(d.x) + abs(d.y) + abs(d.z));
+    const vec2 p = d.z >= 0.0 ? d.xy : (1.0 - abs(d.yx)) * signNotZero(d.xy);
+    return p * 0.5 + 0.5;
+}
+
+vec3 octDecode(vec2 uv) {
+    const vec2 p = uv * 2.0 - 1.0;
+    vec3 d = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+    d.xy -= max(-d.z, 0.0) * signNotZero(d.xy);
+    d = normalize(d);
+    return vec3(d.x, d.y, -d.z);
+}
+
+vec4 shBasis(vec3 d) {
+    return vec4(0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x);
+}
+
+vec3 shIrradiance(vec4 r, vec4 g, vec4 b, vec3 n) {
+    const vec4 k = vec4(PI, 2.0 * PI / 3.0, 2.0 * PI / 3.0, 2.0 * PI / 3.0) * shBasis(n);
+    return max(vec3(dot(r, k), dot(g, k), dot(b, k)), vec3(0.0));
+}
+
+vec3 shRadiance(vec4 r, vec4 g, vec4 b, vec3 d) {
+    const vec4 k = shBasis(d);
+    return max(vec3(dot(r, k), dot(g, k), dot(b, k)), vec3(0.0));
+}
+
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float rand(uint seed) {
+    return float(hash(seed) >> 8) * (1.0 / 16777216.0);
+}
+
+// probe texel: x = pixel offset in the tile (x + 16y), y = view z (0 = no probe), zw = normal.
+vec3 probePixel(ivec2 tile, vec4 probe) {
+    const float o = probe.x;
+    return vec3(vec2(tile * TILE) + vec2(mod(o, 16.0), floor(o / 16.0)) + 0.5, probe.y);
+}
+
+#if defined(TRACE)
+
+layout(binding = 0) uniform texture2D depth_tex;
+layout(binding = 1) uniform texture2D geo_tex;
+layout(binding = 2) uniform texture2D color_tex;
+layout(binding = 3) uniform texture2D albedo_tex;
+layout(binding = 4) uniform texture2D prev_probe_tex;
+layout(binding = 5) uniform texture2D prev_light_tex;
+layout(binding = 6) uniform texture2D prev_sh_r;
+layout(binding = 7) uniform texture2D prev_sh_g;
+layout(binding = 8) uniform texture2D prev_sh_b;
+layout(binding = 9, rgba32f) uniform writeonly image2D probe_img;
+layout(binding = 10, rgba16f) uniform writeonly image2D light_img;
+layout(binding = 11, rgba16f) uniform writeonly image2D sh_r_img;
+layout(binding = 12, rgba16f) uniform writeonly image2D sh_g_img;
+layout(binding = 13, rgba16f) uniform writeonly image2D sh_b_img;
+
+const int STEPS = 16;
+const float MAX_DISTANCE = 12.0;
+const float RADIANCE_CLAMP = 10.0;
+const float MAX_HISTORY = 24.0;
+
+shared uint chosen;
+shared ivec2 history_tile;
+shared vec3 sh_acc[4][64];
+
+// Probes sit on the valid candidate nearest the tile centre, so they stay on the same surface
+// from frame to frame instead of jumping around (which breaks history and flickers).
+ivec2 cellOf(uint index) {
+    return ivec2(index & 7u, index >> 3) * 2 + 1;
+}
+
+uint cellPriority(uint index) {
+    const ivec2 d = ivec2(index & 7u, index >> 3) * 2 - 7;
+    return (uint(d.x * d.x + d.y * d.y) << 6) | index;
+}
+
+bool previousProbe(ivec2 pt, out vec3 pos, out vec3 normal) {
+    const ivec2 tiles = tileCount();
+    if (any(lessThan(pt, ivec2(0))) || any(greaterThanEqual(pt, tiles))) {
+        return false;
+    }
+    const vec4 probe = texelFetch(prev_probe_tex, pt, 0);
+    if (probe.y <= 0.0) {
+        return false;
+    }
+    const vec3 pixel = probePixel(pt, probe);
+    pos = prevViewPos(pixel.xy, pixel.z);
+    normal = octDecode(probe.zw);
+    return true;
+}
+
+vec3 feedbackLight(vec3 hit, vec3 hit_normal, ivec2 q) {
+    const vec3 p = toPrevious(hit);
+    if (p.z < 1e-3) {
+        return vec3(0.0);
+    }
+    const ivec2 pt = ivec2(floor(prevPixel(p) / float(TILE)));
+    vec3 pos, normal;
+    if (!previousProbe(pt, pos, normal) || abs(dot(normal, p - pos)) > 0.1 + 0.02 * p.z) {
+        return vec3(0.0);
+    }
+    const vec3 e = shIrradiance(texelFetch(prev_sh_r, pt, 0), texelFetch(prev_sh_g, pt, 0),
+                                texelFetch(prev_sh_b, pt, 0), rotateToPrevious(hit_normal));
+    const vec3 albedo = albedo_on > 0.5 ? texelFetch(albedo_tex, q, 0).rgb : vec3(ALBEDO);
+    // Capped below 1 so light bouncing between walls cannot grow without bound.
+    return e * (1.0 / PI) * albedo * (feedback * min(diffuse_scale, 1.0));
+}
+
+vec3 trace(vec3 pos, vec3 normal, vec3 dir, float noise) {
+    const vec3 origin = pos + normal * (0.03 + 0.003 * pos.z);
+    float reach = MAX_DISTANCE;
+    if (dir.z < 0.0) {
+        reach = min(reach, (origin.z - 0.05) / -dir.z);
+    }
+    if (reach <= 0.02) {
+        return vec3(0.0);
+    }
+    const vec3 end = origin + dir * reach;
+    const vec2 s0 = projectPixel(origin);
+    const vec2 delta = projectPixel(end) - s0;
+    float u_max = 1.0;
+    for (int a = 0; a < 2; ++a) {
+        const float e = s0[a] + delta[a];
+        if (e < 0.0) {
+            u_max = min(u_max, -s0[a] / delta[a]);
+        } else if (e > size[a]) {
+            u_max = min(u_max, (size[a] - s0[a]) / delta[a]);
+        }
+    }
+    const float full = length(delta);
+    if (full * u_max < 2.0) {
+        return vec3(0.0);
+    }
+    const float u_min = 1.5 / full;
+    const float inv0 = 1.0 / origin.z, inv1 = 1.0 / end.z;
+    float last_z = origin.z;
+    const ivec2 isize = ivec2(size);
+    for (int i = 0; i < STEPS; ++i) {
+        const float f = (float(i) + noise) / float(STEPS);
+        const float u = mix(u_min, u_max, f * f);
+        const ivec2 q = clamp(ivec2(s0 + delta * u), ivec2(0), isize - 1);
+        const float ray_z = 1.0 / mix(inv0, inv1, u);
+        const float thickness = max(0.3 + 0.03 * ray_z, abs(ray_z - last_z));
+        last_z = ray_z;
+        const float depth = texelFetch(depth_tex, q, 0).r;
+        if (depth >= 1.0) {
+            continue;
+        }
+        const float diff = ray_z - viewZ(depth);
+        if (diff > 0.0 && diff < thickness) {
+            const vec4 g = texelFetch(geo_tex, q, 0);
+            if (g.w <= 0.0 || dot(g.xyz, dir) > 0.1) {
+                return vec3(0.0);
+            }
+            vec3 c = texelFetch(color_tex, q, 0).rgb;
+            if ((history & 1u) != 0u && feedback > 0.0) {
+                c += feedbackLight(viewPos(vec2(q) + 0.5, g.w), g.xyz, q);
+            }
+            return min(c, vec3(RADIANCE_CLAMP));
+        }
+    }
+    return vec3(0.0);
+}
+
+void main() {
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const uint lid = gl_LocalInvocationIndex;
+    const ivec2 texel = ivec2(lid & 7u, lid >> 3);
+    const ivec2 isize = ivec2(size);
+    const uint seed = hash(uint(tile.x) * 73856093u ^ uint(tile.y) * 19349663u ^
+                           (frame & 1023u) * 83492791u);
+    if (lid == 0u) {
+        chosen = 0xFFFFFFFFu;
+        history_tile = ivec2(-1);
+    }
+    barrier();
+
+    {
+        const ivec2 cand = tile * TILE + cellOf(lid);
+        if (all(lessThan(cand, isize)) && texelFetch(geo_tex, cand, 0).w > 0.0) {
+            atomicMin(chosen, cellPriority(lid));
+        }
+    }
+    barrier();
+
+    const ivec2 out_texel = tile * OCT + texel;
+    if (chosen == 0xFFFFFFFFu) {
+        imageStore(light_img, out_texel, vec4(0.0));
+        if (lid == 0u) {
+            imageStore(probe_img, tile, vec4(0.0));
+            imageStore(sh_r_img, tile, vec4(0.0));
+            imageStore(sh_g_img, tile, vec4(0.0));
+            imageStore(sh_b_img, tile, vec4(0.0));
+        }
+        return;
+    }
+    const ivec2 offset = cellOf(chosen & 63u);
+    const ivec2 pixel = tile * TILE + offset;
+    const vec4 geo = texelFetch(geo_tex, pixel, 0);
+    const vec3 normal = geo.xyz;
+    const vec3 pos = viewPos(vec2(pixel) + 0.5, geo.w);
+
+    if (lid == 0u && (history & 1u) != 0u) {
+        const vec3 p = toPrevious(pos);
+        if (p.z > 1e-3) {
+            const vec2 tf = prevPixel(p) / float(TILE) - 0.5;
+            const ivec2 base = ivec2(floor(tf));
+            const vec3 prev_normal = rotateToPrevious(normal);
+            float best = 1e30;
+            for (int i = 0; i < 4; ++i) {
+                const ivec2 pt = base + ivec2(i & 1, i >> 1);
+                vec3 ppos, pnormal;
+                if (!previousProbe(pt, ppos, pnormal) || dot(pnormal, prev_normal) < 0.5) {
+                    continue;
+                }
+                const float plane = abs(dot(pnormal, p - ppos));
+                if (plane > 0.1 + 0.03 * p.z) {
+                    continue;
+                }
+                const float score = plane + 0.05 * length(p - ppos);
+                if (score < best) {
+                    best = score;
+                    history_tile = pt;
+                }
+            }
+        }
+    }
+    barrier();
+
+    const vec3 centre_dir = octDecode((vec2(texel) + 0.5) / float(OCT));
+    const uint ray_seed = seed ^ (lid * 2654435761u);
+    const vec2 sub = vec2(rand(ray_seed), rand(ray_seed ^ 0x9e3779b9u));
+    const vec3 dir = octDecode((vec2(texel) + sub) / float(OCT));
+    vec3 radiance = vec3(0.0);
+    if (dot(dir, normal) > 0.0) {
+        radiance = trace(pos, normal, dir, rand(ray_seed ^ 0x85ebca6bu));
+    }
+
+    float count = 1.0;
+    if (history_tile.x >= 0) {
+        const vec2 uv = clamp(octEncode(rotateToPrevious(centre_dir)) * float(OCT) - 0.5, vec2(0.0),
+                              vec2(OCT - 1));
+        const ivec2 b = min(ivec2(floor(uv)), ivec2(OCT - 2));
+        const vec2 f = uv - vec2(b);
+        const ivec2 base = history_tile * OCT + b;
+        const vec4 h00 = texelFetch(prev_light_tex, base, 0);
+        const vec4 h10 = texelFetch(prev_light_tex, base + ivec2(1, 0), 0);
+        const vec4 h01 = texelFetch(prev_light_tex, base + ivec2(0, 1), 0);
+        const vec4 h11 = texelFetch(prev_light_tex, base + ivec2(1, 1), 0);
+        const vec4 hist = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+        count = min(hist.a + 1.0, MAX_HISTORY);
+        // Once history has settled, clamp one-ray outliers so a lucky hit on a lamp does not
+        // flash the whole probe.
+        if (hist.a >= 4.0) {
+            const float luma = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+            const float limit = 4.0 * dot(hist.rgb, vec3(0.2126, 0.7152, 0.0722)) + 0.05;
+            radiance *= luma > limit ? limit / luma : 1.0;
+        }
+        radiance = mix(hist.rgb, radiance, 1.0 / count);
+    }
+    imageStore(light_img, out_texel, vec4(radiance, count));
+
+    const vec4 basis = shBasis(centre_dir) * (4.0 * PI / float(OCT * OCT));
+    sh_acc[0][lid] = radiance * basis.x;
+    sh_acc[1][lid] = radiance * basis.y;
+    sh_acc[2][lid] = radiance * basis.z;
+    sh_acc[3][lid] = radiance * basis.w;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1) {
+        if (lid < stride) {
+            for (int k = 0; k < 4; ++k) {
+                sh_acc[k][lid] += sh_acc[k][lid + stride];
+            }
+        }
+        barrier();
+    }
+    if (lid == 0u) {
+        imageStore(probe_img, tile, vec4(float(offset.x + offset.y * TILE), geo.w,
+                                         octEncode(normal)));
+        imageStore(sh_r_img, tile, vec4(sh_acc[0][0].r, sh_acc[1][0].r, sh_acc[2][0].r,
+                                        sh_acc[3][0].r));
+        imageStore(sh_g_img, tile, vec4(sh_acc[0][0].g, sh_acc[1][0].g, sh_acc[2][0].g,
+                                        sh_acc[3][0].g));
+        imageStore(sh_b_img, tile, vec4(sh_acc[0][0].b, sh_acc[1][0].b, sh_acc[2][0].b,
+                                        sh_acc[3][0].b));
+    }
+}
+
+#elif defined(COMPOSITE)
+
+layout(binding = 0) uniform texture2D geo_tex;
+layout(binding = 1) uniform texture2D probe_tex;
+layout(binding = 2) uniform texture2D light_tex;
+layout(binding = 3) uniform texture2D sh_r;
+layout(binding = 4) uniform texture2D sh_g;
+layout(binding = 5) uniform texture2D sh_b;
+layout(binding = 6, rgba16f) uniform image2D color_img;
+layout(binding = 7) uniform texture2D albedo_tex;
+layout(binding = 8) uniform texture2D ao_tex;
+layout(binding = 9) uniform texture2D material_tex;
+layout(binding = 10) uniform texture2D specular_tex;
+layout(binding = 11) uniform texture2D prev_diffuse_tex;
+layout(binding = 12) uniform texture2D prev_specular_tex;
+layout(binding = 13, rgba16f) uniform writeonly image2D diffuse_img;
+layout(binding = 14, rgba16f) uniform writeonly image2D specular_img;
+
+const float MAX_RESOLVE_HISTORY = 16.0;
+const float RESOLVE_DEPTH_TOLERANCE = 0.05;
+
+// Per-pixel accumulation of the resolved probe lighting. Probes are re-placed every frame as the
+// camera moves, which alone gives a different interpolation each frame; reprojecting the
+// resolved result keeps it stable. diffuse.a = view z (validates the reprojection), specular.a =
+// accumulated frame count.
+bool resolveHistory(vec3 pos, out vec3 diffuse, out vec3 spec, out float count) {
+    diffuse = vec3(0.0);
+    spec = vec3(0.0);
+    count = 0.0;
+    const vec3 p = toPrevious(pos);
+    if (p.z < 1e-3) {
+        return false;
+    }
+    const vec2 hf = prevPixel(p) - 0.5;
+    const ivec2 b = ivec2(floor(hf));
+    const vec2 f = hf - vec2(b);
+    const ivec2 hi = ivec2(size) - 1;
+    float wsum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const ivec2 o = ivec2(i & 1, i >> 1);
+        const ivec2 t = b + o;
+        if (any(lessThan(t, ivec2(0))) || any(greaterThan(t, hi))) {
+            continue;
+        }
+        const vec4 d = texelFetch(prev_diffuse_tex, t, 0);
+        if (d.a <= 0.0 || abs(d.a - p.z) > RESOLVE_DEPTH_TOLERANCE * p.z) {
+            continue;
+        }
+        const vec4 s = texelFetch(prev_specular_tex, t, 0);
+        const float w = (o.x == 0 ? 1.0 - f.x : f.x) * (o.y == 0 ? 1.0 - f.y : f.y);
+        diffuse += d.rgb * w;
+        spec += s.rgb * w;
+        count += s.a * w;
+        wsum += w;
+    }
+    if (wsum < 0.25) {
+        return false;
+    }
+    diffuse /= wsum;
+    spec /= wsum;
+    count /= wsum;
+    return true;
+}
+
+float sampleAo(ivec2 pixel) {
+    const ivec2 ao_size = textureSize(ao_tex, 0);
+    const vec2 p = (vec2(pixel) + 0.5) / size * vec2(ao_size) - 0.5;
+    const ivec2 p0 = ivec2(floor(p));
+    const vec2 f = p - vec2(p0);
+    const ivec2 hi = ao_size - 1;
+    const float a = texelFetch(ao_tex, clamp(p0, ivec2(0), hi), 0).r;
+    const float b = texelFetch(ao_tex, clamp(p0 + ivec2(1, 0), ivec2(0), hi), 0).r;
+    const float c = texelFetch(ao_tex, clamp(p0 + ivec2(0, 1), ivec2(0), hi), 0).r;
+    const float d = texelFetch(ao_tex, clamp(p0 + ivec2(1, 1), ivec2(0), hi), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Karis' analytic fit of the split-sum environment BRDF.
+vec3 envBrdf(vec3 f0, float roughness, float n_dot_v) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    const vec4 r = roughness * c0 + c1;
+    const float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    const vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(size.x) || pixel.y >= int(size.y)) {
+        return;
+    }
+    const vec4 geo = texelFetch(geo_tex, pixel, 0);
+    if (geo.w <= 0.0) {
+        imageStore(diffuse_img, pixel, vec4(0.0));
+        imageStore(specular_img, pixel, vec4(0.0));
+        return;
+    }
+    const vec3 n = geo.xyz;
+    const float z = geo.w;
+    const vec3 pos = viewPos(vec2(pixel) + 0.5, z);
+    const vec3 v = -normalize(pos);
+
+    float roughness = 1.0;
+    vec3 f0 = vec3(0.0);
+    bool specular = material_on > 0.5 && specular_scale > 0.0;
+    if (specular) {
+        const float exponent = exp2(13.0 * texelFetch(material_tex, pixel, 0).r);
+        const float c2 = exp2(-2.0 / exponent);
+        const float a2 = clamp((1.0 - c2) / (1.41421356 * c2), 1e-6, 1.0);
+        roughness = sqrt(sqrt(a2));
+        const vec3 s = texelFetch(specular_tex, pixel, 0).rgb;
+        f0 = s * s;
+        // Only rough surfaces: the probes are too coarse for sharp reflections, which are left to
+        // screen-space reflections and the game's cubemaps.
+        specular = roughness > 0.4;
+    }
+    const vec3 r = reflect(-v, n);
+
+    const ivec2 tiles = tileCount();
+    const ivec2 centre = pixel / TILE;
+    vec3 irradiance = vec3(0.0), radiance = vec3(0.0);
+    float weight = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const ivec2 pt = centre + ivec2(x, y);
+            if (any(lessThan(pt, ivec2(0))) || any(greaterThanEqual(pt, tiles))) {
+                continue;
+            }
+            const vec4 probe = texelFetch(probe_tex, pt, 0);
+            if (probe.y <= 0.0) {
+                continue;
+            }
+            const vec3 pp = probePixel(pt, probe);
+            const vec3 ppos = viewPos(pp.xy, pp.z);
+            const vec3 pn = octDecode(probe.zw);
+            const float dist = length(vec2(pixel) + 0.5 - pp.xy) / float(TILE);
+            const float w = exp(-2.0 * dist * dist) *
+                            exp(-abs(dot(pn, pos - ppos)) / (0.02 + 0.02 * z)) *
+                            pow(max(dot(n, pn), 0.0), 4.0);
+            if (w < 1e-5) {
+                continue;
+            }
+            const vec4 cr = texelFetch(sh_r, pt, 0), cg = texelFetch(sh_g, pt, 0),
+                       cb = texelFetch(sh_b, pt, 0);
+            irradiance += shIrradiance(cr, cg, cb, n) * w;
+            if (specular) {
+                radiance += shRadiance(cr, cg, cb, r) * w;
+            }
+            weight += w;
+        }
+    }
+    if (weight > 1e-4) {
+        irradiance /= weight;
+        radiance /= weight;
+    }
+
+    vec3 hist_diffuse, hist_spec;
+    float count;
+    if ((history & 1u) != 0u && resolveHistory(pos, hist_diffuse, hist_spec, count)) {
+        count = min(count + 1.0, MAX_RESOLVE_HISTORY);
+        // Pixels with no usable probe this frame keep their history instead of going dark.
+        const float a = weight > 1e-4 ? 1.0 / count : 0.0;
+        irradiance = mix(hist_diffuse, irradiance, a);
+        radiance = mix(hist_spec, radiance, a);
+    } else if (weight > 1e-4) {
+        count = 1.0;
+    } else {
+        imageStore(diffuse_img, pixel, vec4(0.0, 0.0, 0.0, z));
+        imageStore(specular_img, pixel, vec4(0.0));
+        return;
+    }
+    imageStore(diffuse_img, pixel, vec4(irradiance, z));
+    imageStore(specular_img, pixel, vec4(radiance, count));
+
+    vec4 color = imageLoad(color_img, pixel);
+    vec3 albedo;
+    if (albedo_on > 0.5) {
+        albedo = texelFetch(albedo_tex, pixel, 0).rgb;
+    } else {
+        const float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        albedo = ALBEDO * mix(vec3(1.0), clamp(color.rgb / max(luma, 1e-3), 0.0, 2.5), 0.6);
+    }
+    vec3 add = albedo * irradiance * (diffuse_scale / PI);
+    if (specular) {
+        const float fade = smoothstep(0.4, 0.6, roughness);
+        add += radiance * envBrdf(f0, roughness, max(dot(n, v), 1e-3)) * (specular_scale * fade);
+    }
+    if (ao_amount > 0.0) {
+        add *= max(1.0 - ao_amount * (1.0 - clamp(sampleAo(pixel), 0.0, 1.0)), 0.0);
+    }
+    color.rgb += add;
+    imageStore(color_img, pixel, color);
+}
+
+#endif
