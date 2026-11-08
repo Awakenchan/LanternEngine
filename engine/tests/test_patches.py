@@ -639,7 +639,8 @@ class BuiltInSelectionTests(unittest.TestCase):
 
 
 COMMUNITY_NAMES = (
-    'Skip Intro', 'Performance Patch (perf increase)', 'Disable Motion Blur (perf increase)',
+    'Skip Intro', 'Lamp2Lamp (warp between lamps)', 'Lamp2Lamp: warp to bosses',
+    'Performance Patch (perf increase)', 'Disable Motion Blur (perf increase)',
     'Disable Dynamic Light Shadows (perf increase)', 'Disable Chromatic Aberration', 'Disable AA', 'Disable DoF',
     'Disable SSAO', 'Enable Screen Space Reflections (READ NOTE)', '50% Text scale', 'FMOD Crash Fix',
     'Model LOD 2 (Lowest)', 'Model LOD 1 (Lower)', 'Model LOD -2 (Highest)', 'Increased Graphics Heap Sizes',
@@ -648,6 +649,7 @@ COMMUNITY_NAMES = (
     'Restore Debug Menu (READ NOTES)', 'Disable Camera Auto Rotation via Movement', 'Increased camera distance',
     'No Rally Decay', 'Disable Rally (HP Regain)', 'Player No Dead (Read note)', 'Player Stealth (Read note)',
     'Player Silent (Read note)', 'Sensitive Analog Input (easier to run)', 'Unlock Game Region',
+    'Unlock All Languages (Works Online)',
     'Bookmark and Capture outputs', 'Enemy Control', 'Enable Extra Messenger Skins',
     '1280x800 Light Grid For SteamDeck (READ NOTES)',
     '1080p Light Grid (READ NOTES)', '1440p Light Grid (READ NOTES)', '4k Light Grid (READ NOTES)', 'Optimal 1080p',
@@ -663,7 +665,7 @@ COMMUNITY_NAMES = (
 class OwnPatchTests(unittest.TestCase):
     def test_every_community_name_is_built_in(self):
         names = [meta.get('Name') for meta in ET.parse(XML).getroot().iter('Metadata')]
-        self.assertEqual(len(COMMUNITY_NAMES), 62)
+        self.assertEqual(len(COMMUNITY_NAMES), 65)
         self.assertEqual(sorted(names), sorted(COMMUNITY_NAMES))
 
     def test_the_movement_steps_follow_the_frame_time(self):
