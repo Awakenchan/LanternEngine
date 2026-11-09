@@ -1098,6 +1098,16 @@
             <Line Type="bytes" Address="0x023b8730" Value="31c0c3"/>
         </PatchList>
     </Metadata>
+    <Metadata Title="Bloodborne" Name="Unlock All Languages (Works Online)" Note="The European text list becomes the full list, and the voice list the eight languages with their own recordings. The sell region stays the international one, so the EU/US server still matches. Leave Unlock Game Region off." Author="Lantern Engine" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
+        <PatchList>
+            <Line Type="bytes" Address="0x023b9713" Value="d9d17702"/>
+            <Line Type="bytes" Address="0x023b9724" Value="15"/>
+            <Line Type="bytes" Address="0x023b972b" Value="21d27702"/>
+            <Line Type="bytes" Address="0x023b9cc1" Value="8bae7702"/>
+            <Line Type="bytes" Address="0x023b9cd2" Value="08"/>
+            <Line Type="bytes" Address="0x023b9cd9" Value="c3ce7702"/>
+        </PatchList>
+    </Metadata>
     <Metadata Title="Bloodborne" Name="Bookmark and Capture outputs" Note="Screenshots and bookmarks the game writes go to /data/bloodborne/ instead of the PS4 capture folder." Author="Lantern Engine" PatchVer="1.0" AppVer="01.09" AppElf="eboot.bin" isEnabled="false">
         <PatchList>
             <Line Type="bytes" Address="0x04dba9be" Value="2f0064006100740061002f0062006c006f006f00640062006f0072006e0065002f000000"/>

@@ -219,6 +219,20 @@ def region(b):
     return p
 
 
+def all_languages(b):
+    p = Patch('Unlock All Languages (Works Online)',
+              'The European text list becomes the full list, and the voice list the eight languages with their '
+              'own recordings. The sell region stays the international one, so the EU/US server still matches. '
+              'Leave Unlock Game Region off.')
+    b.retarget(p, 0x23b9710, 7, 0x4b36780, 0x4b368f0)
+    b.site(p, 0x23b9724, h('0e'), h('15'))
+    b.retarget(p, 0x23b9728, 7, 0x4b367c0, 0x4b36950)
+    b.retarget(p, 0x23b9cbe, 7, 0x4b34980, 0x4b34b50)
+    b.site(p, 0x23b9cd2, h('05'), h('08'))
+    b.retarget(p, 0x23b9cd6, 7, 0x4b36a80, 0x4b36ba0)
+    return p
+
+
 def camera_auto_turn(b):
     p = Patch('Disable Camera Auto Rotation via Movement', 'The camera stops turning by itself as the character '
                                                            'moves or nears a wall. The stick and lock-on turn it as '
@@ -1086,7 +1100,7 @@ def build(eboot):
         graphics_heaps(b), intel_tonemap(b), sfx_ribbon(b), no_http(b)] + physics(b) + [
         thirty(b), no_delta_time(b), frame_rate(b, 60), frame_rate(b, 90), uncapped(b), debug_menu(b),
         camera_auto_turn(b), camera_distance(b), no_rally_decay(b), no_rally(b)] + debug_flags(b) + [
-        analog_run(b), region(b), capture_folder(b), enemy_control(b), messenger_skins(b)] + light_grids(b) + [
+        analog_run(b), region(b), all_languages(b), capture_folder(b), enemy_control(b), messenger_skins(b)] + light_grids(b) + [
         optimal_1080p(b), resolution(b)] + resolutions(b) + [free_camera(b), sprint(b), reflections(b)]
     seen = {}
     for patch in patches:
