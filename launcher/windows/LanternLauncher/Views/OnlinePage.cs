@@ -26,6 +26,7 @@ namespace BloodborneLauncher.Views
                 () => Ini.Get("online_enabled") == "1", v => Ini.Set("online_enabled", v ? "1" : "0"));
 
             Group(L.T("Seamless co-op"));
+            Body.Children.Add(Text(L.T("Seamless co-op is still being worked on: expect bugs, and report them in #issues on our Discord."), "Faint"));
             ToggleRow(SymbolRegular.PeopleTeam24, L.T("Seamless co-op"),
                 L.T("Play the campaign together in your own encrypted room: no Hunter's Dream, no ports to open"),
                 () => Ini.Get("seamless_enabled") == "1", v =>
@@ -117,6 +118,7 @@ namespace BloodborneLauncher.Views
             Add(Card(SymbolRegular.Pulse24, L.T("Test the connection"), L.T("Checks The Hunter's Dream: game server, co-op sessions and the relay summons use"), _test, out _));
             Body.Children.Add(_results);
             ShowServer();
+            Loaded += (_, _) => ShowServer();
         }
 
         private readonly List<Control> _hdOnly = new();
@@ -127,6 +129,9 @@ namespace BloodborneLauncher.Views
             var medo = SuperMedo.Selected(Ini);
             foreach (var element in _hdOnly) element.IsVisible = !medo;
             foreach (var element in _smOnly) element.IsVisible = medo;
+            foreach (var frame in Body.Children.OfType<Border>())
+                if (frame.Child is Panel box && box.Children.Count > 0)
+                    frame.IsVisible = box.Children.Any(c => c.IsVisible);
         }
 
         private readonly TextBlock _roomHint;

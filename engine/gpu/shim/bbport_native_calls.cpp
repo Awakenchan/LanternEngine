@@ -56,7 +56,7 @@ void Unlock(Slot& s) {
     s.lock.store(0, std::memory_order_release);
 }
 
-std::atomic<u64> written_records{0}, written_fallback{0};
+std::atomic<u64> written_records{0}, written_fallback{0}, tokens_carried{0}, tokens_written{0};
 u64 verified = 0, mismatches = 0, unrecorded = 0, trace_trailers = 0, decoded = 0;
 u64 window_draws = 0, packet_ticks = 0, draw_ticks = 0, timed_draws = 0;
 u64 window_tsc = 0;
@@ -162,6 +162,10 @@ void NoteWritten(bool as_record) {
     (as_record ? written_records : written_fallback).fetch_add(1, std::memory_order_relaxed);
 }
 
+void NoteToken(bool carried) {
+    (carried ? tokens_carried : tokens_written).fetch_add(1, std::memory_order_relaxed);
+}
+
 void NoteDecoded() {
     ++decoded;
 }
@@ -206,10 +210,13 @@ void MaybeReport() {
         std::printf("Native calls: %llu draws verified, %llu mismatches%s\n",
                     (unsigned long long)verified, (unsigned long long)mismatches, extra);
     } else if (mode == Mode::Native) {
-        std::printf("Native calls: %llu draws as records (%llu written, %llu kept as PM4)\n",
+        std::printf("Native calls: %llu draws as records (%llu written, %llu kept as PM4); draw tokens: "
+                    "%llu carry their base vertex and instances, %llu written as packets\n",
                     (unsigned long long)decoded,
                     (unsigned long long)written_records.exchange(0, std::memory_order_relaxed),
-                    (unsigned long long)written_fallback.exchange(0, std::memory_order_relaxed));
+                    (unsigned long long)written_fallback.exchange(0, std::memory_order_relaxed),
+                    (unsigned long long)tokens_carried.exchange(0, std::memory_order_relaxed),
+                    (unsigned long long)tokens_written.exchange(0, std::memory_order_relaxed));
     }
     if (timing && ticks_per_us > 0.0 && timed_draws) {
         std::printf("Native calls (%s) GPU command thread: %.0f draws/s, draw packets %.3f us/draw, "

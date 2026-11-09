@@ -37,8 +37,15 @@ namespace BloodborneLauncher.Views
             stack.Children.Add(LauncherPage.Text(title, "PageTitle"));
             if (!string.IsNullOrEmpty(message))
             {
-                var text = new SelectableTextBlock { Text = message, FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 4) };
-                text.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+                Control text;
+                if (MarkdownText.Looks(message))
+                    text = new Border { Child = MarkdownText.Build(message), Margin = new Thickness(0, 8, 0, 4), Padding = new Thickness(0, 0, 10, 0) };
+                else
+                {
+                    var plain = new SelectableTextBlock { Text = message, FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 4) };
+                    plain.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorSecondaryBrush");
+                    text = plain;
+                }
                 // A long message (an import's list of changes) scrolls instead of pushing the buttons
                 // out of a small window.
                 stack.Children.Add(new ScrollViewer
@@ -183,7 +190,7 @@ namespace BloodborneLauncher.Views
                     TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent },
                     Background = Brushes.Transparent,
                     CanResize = false,
-                    Topmost = true,
+                    Topmost = main == null,
                     Content = _card,
                 };
                 _window.SetResourceReference(Window.FontFamilyProperty, "UiFont");
@@ -195,7 +202,10 @@ namespace BloodborneLauncher.Views
                 };
                 _window.Closed += (_, _) => _frame.Continue = false;
                 _window.Opened += (_, _) => Shown(null);
-                _window.Show();
+                if (main != null)
+                    _window.Show(main);
+                else
+                    _window.Show();
                 Dispatcher.UIThread.PushFrame(_frame);
                 _window = null;
             }

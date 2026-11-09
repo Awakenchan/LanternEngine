@@ -95,6 +95,10 @@ namespace BloodborneLauncher.Views
             customRow.IsVisible = !Named(Ini.Get("output_res", "1920x1080"));
         }
 
+        private void IniSlider(SymbolRegular icon, string title, double min, double max, string key, Panel? into = null,
+            double step = 0.05, double fallback = 1.0) =>
+            SliderRow(icon, title, null, min, max, step, () => ParseDouble(Ini.Get(key, Fmt(fallback)), fallback), v => Ini.Set(key, Fmt(v)), into: into);
+
         public DisplayPage() : base(L.T("Display"), L.T("Resolution, window mode, frame rate and menu language. Applied when the game starts."))
         {
             ComboSearch.Attach(_monitor);
@@ -128,6 +132,43 @@ namespace BloodborneLauncher.Views
 
             Group(L.T("Frame rate"));
             SettingCombo(SymbolRegular.Gauge24, L.T("Frame rate"), L.T("Lantern Engine runs the game at the rate you pick and keeps its timing right there, also when a scene runs slower. 30 FPS is the game's own"), Choices.FpsModes, "fps_mode");
+
+            Group(L.T("FPS counter"));
+            IniToggle(SymbolRegular.DataUsage24, L.T("Show FPS"), L.T("Also in game: Insert or L3 + R3"), "show_fps");
+            IniToggle(SymbolRegular.Wrench24, L.T("Note while shaders build"),
+                L.T("\"Building shaders\" in a corner while the game builds shaders for a place it shows for the first time. Also in game: Insert or L3 + R3"),
+                "compile_note");
+            IniCombo(SymbolRegular.PositionToFront24, L.T("FPS counter position"), null, new Choice[]
+            {
+                new(L.T("Top right"), "0"), new(L.T("Top left"), "1"), new(L.T("Bottom right"), "2"), new(L.T("Bottom left"), "3"), new(L.T("Top centre"), "4"),
+            }, "fps_position");
+            IniSlider(SymbolRegular.TextFontSize24, L.T("FPS counter size"), 0.75, 2.0, "fps_scale");
+            IniCombo(SymbolRegular.Color24, L.T("FPS counter text colour"), L.T("Any colour in game: Insert or L3 + R3 › Other"), new Choice[]
+            {
+                new(L.T("White"), "#FFFFFF"), new(L.T("Yellow"), "#FFD54A"), new(L.T("Green"), "#7CFC8A"), new(L.T("Cyan"), "#6FE3FF"),
+                new(L.T("Red"), "#FF5A5A"), new(L.T("Orange"), "#FFA040"), new(L.T("Pink"), "#FF8AD8"), new(L.T("Black"), "#000000"),
+            }, "fps_text_color");
+            IniSlider(SymbolRegular.Eye24, L.T("FPS counter text opacity"), 0.1, 1.0, "fps_text_opacity", fallback: 1.0);
+            IniCombo(SymbolRegular.ColorBackground24, L.T("FPS counter background"), null, new Choice[]
+            {
+                new(L.T("Dark grey"), "#0F0F0F"), new(L.T("Black"), "#000000"), new(L.T("Dark red"), "#3A0A0A"), new(L.T("Dark blue"), "#0A1A3A"), new(L.T("White"), "#FFFFFF"),
+            }, "fps_bg_color");
+            IniSlider(SymbolRegular.Blur24, L.T("FPS counter background opacity"), 0.0, 1.0, "fps_bg_opacity", fallback: 0.5);
+            IniToggle(SymbolRegular.BorderAll24, L.T("FPS counter border"), null, "fps_border");
+            var fpsParts = Advanced(L.T("What the FPS counter shows"));
+            foreach (var (icon, key, title) in new[]
+                     {
+                         (SymbolRegular.TopSpeed24, "show_fps_rate", L.T("Frame rate")),
+                         (SymbolRegular.Timer24, "show_fps_frame_time", L.T("Frame time")),
+                         (SymbolRegular.ResizeLarge24, "show_fps_upscaler", L.T("Upscaler")),
+                         (SymbolRegular.DeveloperBoard24, "show_fps_cpu", L.T("CPU usage")),
+                         (SymbolRegular.Gauge24, "show_fps_gpu", L.T("GPU usage")),
+                     })
+            {
+                var fallback = key is "show_fps_cpu" or "show_fps_gpu" ? "0" : "1";
+                ToggleRow(icon, title, L.T("Shown in the FPS counter"), () => Ini.Get(key, fallback) == "1", v => Ini.Set(key, v ? "1" : "0"), fpsParts);
+                fpsParts.Children[^1].Margin = new Thickness(24, 0, 0, 0);
+            }
 
             Group("HDR");
             var hdrHint = !OperatingSystem.IsWindows()

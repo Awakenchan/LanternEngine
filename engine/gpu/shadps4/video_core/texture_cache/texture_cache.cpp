@@ -169,6 +169,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     critical_gc_memory = static_cast<u64>(
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
+    if (device_local_memory <= DEFAULT_CRITICAL_GC_MEMORY) {
+        pressure_gc_memory = static_cast<u64>(device_local_memory / 100 * 75);
+        critical_gc_memory = static_cast<u64>(device_local_memory / 100 * 88);
+    }
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
     static_pressure_gc_memory = pressure_gc_memory;
     static_critical_gc_memory = critical_gc_memory;
@@ -2097,13 +2101,14 @@ void TextureCache::GarbageCollectImages() {
             // bbport: discrete GPUs (see DiscretePressurePercent); the budget once a second.
             gc_budget_second = second;
             if (const u64 budget = instance.GetDeviceMemoryBudgetNow(); budget != 0) {
-                pressure_gc_memory = low_vram_gc
+                const bool small_budget = low_vram_gc || budget <= static_cast<u64>(DEFAULT_CRITICAL_GC_MEMORY);
+                pressure_gc_memory = small_budget
                                          ? budget / 100 * percent
                                          : std::max(static_pressure_gc_memory, budget / 100 * percent);
                 critical_gc_memory =
-                    low_vram_gc ? budget / 100 * (percent + 10)
-                                : std::max({static_critical_gc_memory, budget / 100 * (percent + 10),
-                                            pressure_gc_memory});
+                    small_budget ? budget / 100 * (percent + 10)
+                                 : std::max({static_critical_gc_memory, budget / 100 * (percent + 10),
+                                             pressure_gc_memory});
             }
         }
     }

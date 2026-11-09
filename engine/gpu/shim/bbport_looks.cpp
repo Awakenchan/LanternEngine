@@ -81,6 +81,12 @@ constexpr Value kRemastered[] = {{"effect_ssr", "1"},
                                  {"graphics_shadow_resolution", "1"},
                                  {"graphics_local_shadow_resolution", "1"}};
 
+constexpr Value kPs4[] = {{"effect_chromatic_aberration", "1"},
+                          {"effect_dof", "1"},
+                          {"effect_motion_blur", "1"},
+                          {"effect_game_aa", "1"},
+                          {"upscaler", "off"}};
+
 struct Preset {
     const char* name;
     const char* name_ru;
@@ -92,6 +98,7 @@ constexpr Preset kPresets[PresetCount] = {
     {"Performance", "Производительность", kPerformance, std::size(kPerformance)},
     {"Better shadows", "Лучшие тени", kBetterShadows, std::size(kBetterShadows)},
     {"BB Remastered", "BB Remastered", kRemastered, std::size(kRemastered)},
+    {"PS4 original", "Как на PS4", kPs4, std::size(kPs4)},
 };
 
 std::filesystem::path PreviousFile() {
@@ -114,7 +121,58 @@ void KeepPrevious() {
         out << (first ? "" : ",") << '"' << knob.key << "\":\"" << BbSettings::SavedValue(knob.key, knob.def) << '"';
         first = false;
     }
-    out << "}}\n";
+    out << ",\"upscaler\":\"" << BbSettings::SavedValue("upscaler", "") << "\"}}\n";
+}
+
+void SetPreviousUpscaler(const std::string& upscaler) {
+    std::ifstream in(PreviousFile(), std::ios::binary);
+    std::stringstream text;
+    text << in.rdbuf();
+    in.close();
+    std::string json = text.str();
+    const std::string name = "\"upscaler\":\"";
+    const auto at = json.find(name);
+    const auto end = json.rfind("}}");
+    if (end == std::string::npos) {
+        return;
+    }
+    if (at == std::string::npos) {
+        json.insert(end, ",\"upscaler\":\"" + upscaler + "\"");
+    } else {
+        const auto open = at + name.size();
+        const auto close = json.find('"', open);
+        if (close == std::string::npos) {
+            return;
+        }
+        json.replace(open, close - open, upscaler);
+    }
+    std::ofstream out(PreviousFile(), std::ios::binary | std::ios::trunc);
+    out << json;
+}
+
+std::string PreviousUpscaler() {
+    std::ifstream in(PreviousFile(), std::ios::binary);
+    std::stringstream text;
+    text << in.rdbuf();
+    const std::string json = text.str();
+    const std::string name = "\"upscaler\":\"";
+    const auto at = json.find(name);
+    if (at == std::string::npos) {
+        return {};
+    }
+    const auto open = at + name.size();
+    const auto close = json.find('"', open);
+    return close == std::string::npos || close - open > 32 ? std::string{} : json.substr(open, close - open);
+}
+
+void RestoreUpscaler() {
+    if (BbSettings::SavedValue("upscaler", "") != "off") {
+        return;
+    }
+    const std::string kept = PreviousUpscaler();
+    if (!kept.empty() && kept != "off") {
+        BbSettings::SetValue("upscaler", kept.c_str());
+    }
 }
 
 std::map<std::string, std::string> ReadPrevious() {
@@ -164,6 +222,21 @@ void Apply(int preset) {
         }
         BbSettings::SetValue(knob.key, value);
     }
+    const char* upscaler = nullptr;
+    for (std::size_t i = 0; i < look.count; ++i) {
+        if (!std::strcmp(look.values[i].key, "upscaler")) {
+            upscaler = look.values[i].value;
+        }
+    }
+    if (!upscaler) {
+        RestoreUpscaler();
+    } else {
+        const std::string current = BbSettings::SavedValue("upscaler", "");
+        if (current != upscaler) {
+            SetPreviousUpscaler(current);
+        }
+        BbSettings::SetValue("upscaler", upscaler);
+    }
     BbSettings::Save();
     std::printf("Looks: %s in use%s\n", look.name, NeedsRestart() ? "; some of it applies at the next start" : "");
 }
@@ -177,6 +250,7 @@ bool GoBack() {
         const auto it = values.find(knob.key);
         BbSettings::SetValue(knob.key, it != values.end() ? it->second : knob.def);
     }
+    RestoreUpscaler();
     BbSettings::Save();
     std::error_code error;
     std::filesystem::remove(PreviousFile(), error);
@@ -192,11 +266,11 @@ bool HasPrevious() {
 bool NeedsRestart() {
     const auto& s = BbSettings::Get();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
-        if (!BbSettings::EffectIsLive(e) && s.effects[e] != s.startup_effects[e]) {
+        if (BbSettings::EffectChangeNeedsRestart(e, s.effects[e], s.startup_effects[e])) {
             return true;
         }
     }
-    return s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+    return s.upscaler != s.startup_upscaler || s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
            s.graphics_ao_quality != s.startup_ao_quality ||
            s.graphics_shadow_resolution != s.startup_shadow_resolution ||
            s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution;

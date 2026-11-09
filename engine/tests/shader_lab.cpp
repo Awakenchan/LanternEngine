@@ -4,6 +4,11 @@
 #include "lifter/gcn.h"
 #include "lifter/lift.h"
 #include <algorithm>
+#include <atomic>
+#include <climits>
+#include <cstdint>
+#include <mutex>
+#include <thread>
 #include <array>
 #include <cstddef>
 #include <cstdio>
@@ -464,10 +469,10 @@ std::string RunSelf(const fs::path& self, const std::string& args, int& exit_cod
 
 #ifdef _WIN32
 std::string RunSelf(const fs::path& self, const std::wstring& args, DWORD& exit_code) {
-    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    static std::mutex spawn_mutex;
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, FALSE};
     HANDLE read = nullptr, write = nullptr;
     CreatePipe(&read, &write, &sa, 0);
-    SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOW si{sizeof si};
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = write;
@@ -477,8 +482,15 @@ std::string RunSelf(const fs::path& self, const std::wstring& args, DWORD& exit_
     PROCESS_INFORMATION pi{};
     std::string out;
     exit_code = ~0u;
-    if (CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                       nullptr, &si, &pi)) {
+    BOOL started = FALSE;
+    {
+        std::scoped_lock lock{spawn_mutex};
+        SetHandleInformation(write, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        started = CreateProcessW(nullptr, line.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                 nullptr, &si, &pi);
+        SetHandleInformation(write, HANDLE_FLAG_INHERIT, 0);
+    }
+    if (started) {
         CloseHandle(write);
         write = nullptr;
         char buffer[4096];
@@ -746,7 +758,7 @@ void Leave(const fs::path& dir, const std::string& name, u64 pgm, size_t perm) {
     fs::remove(MetaPath(dir, pgm, perm), error);
 }
 
-int RecompileBatch(const fs::path& dir, size_t start, const fs::path& only) {
+int RecompileBatch(const fs::path& dir, size_t start, size_t end, const fs::path& only) {
     const auto profile_bytes = ReadAll(dir / "profile.bin");
     Profile profile{};
     if (profile_bytes.size() != sizeof(Profile)) {
@@ -756,7 +768,8 @@ int RecompileBatch(const fs::path& dir, size_t start, const fs::path& only) {
     std::memcpy(&profile, profile_bytes.data(), sizeof(Profile));
     const auto names = BatchNames(dir, only);
     Pools pools;
-    for (size_t i = start; i < names.size(); ++i) {
+    end = std::min(end, names.size());
+    for (size_t i = start; i < end; ++i) {
         const auto& name = names[i];
         unsigned long long pgm = 0;
         size_t perm = 0;
@@ -996,68 +1009,120 @@ int FixKeys(const fs::path& dir) {
 
 int RecompileCache(const fs::path& self, const fs::path& dir, const fs::path& only = {}) {
     const auto names = BatchNames(dir, only);
-    size_t next = 0, kept = 0, left = 0, crashed = 0;
-    std::vector<size_t> leave;
     const char* verbose_env = std::getenv("BB_LAB_VERBOSE");
     const bool verbose = verbose_env && verbose_env[0] == '1';
-    std::map<std::string, u32> reasons;
-    while (next < names.size()) {
+    struct Slice {
+        size_t begin = 0, end = 0, kept = 0, left = 0, crashed = 0;
+        std::vector<size_t> leave;
+        std::map<std::string, u32> reasons;
+        bool profile = false;
+    };
+    const u32 cores = std::thread::hardware_concurrency();
+    u32 threads = std::clamp<u32>(cores > 1 ? cores - 1 : 1, 1, 8);
+    if (const char* env = std::getenv("BB_RECOMPILE_THREADS"); env && env[0]) {
+        threads = u32(std::clamp(std::atoi(env), 1, 32));
+    }
+    const size_t chunk = std::max<size_t>(32, (names.size() + threads * 4 - 1) / (threads * 4));
+    std::vector<Slice> slices;
+    for (size_t begin = 0; begin < names.size(); begin += chunk) {
+        Slice slice;
+        slice.begin = begin;
+        slice.end = std::min(names.size(), begin + chunk);
+        slices.push_back(std::move(slice));
+    }
+    const auto run = [&](Slice& slice) {
+        size_t next = slice.begin;
+        while (next < slice.end) {
 #ifdef _WIN32
-        DWORD code = 0;
-        const std::string output =
-            RunSelf(self, L"--recompile-batch \"" + dir.wstring() + L"\" " + std::to_wstring(next) +
-                              (only.empty() ? std::wstring{} : L" \"" + only.wstring() + L"\""),
-                    code);
+            DWORD code = 0;
+            const std::string output =
+                RunSelf(self, L"--recompile-batch \"" + dir.wstring() + L"\" " + std::to_wstring(next) + L" " +
+                                  std::to_wstring(slice.end) +
+                                  (only.empty() ? std::wstring{} : L" \"" + only.wstring() + L"\""),
+                        code);
 #else
-        int code = 0;
-        const std::string output =
-            RunSelf(self, "--recompile-batch " + ShellQuote(dir.string()) + " " + std::to_string(next) +
-                              (only.empty() ? std::string{} : " " + ShellQuote(only.string())),
-                    code);
+            int code = 0;
+            const std::string output =
+                RunSelf(self, "--recompile-batch " + ShellQuote(dir.string()) + " " + std::to_string(next) + " " +
+                                  std::to_string(slice.end) +
+                                  (only.empty() ? std::string{} : " " + ShellQuote(only.string())),
+                        code);
 #endif
-        if (output.find("@PROFILE") != std::string::npos) {
+            if (output.find("@PROFILE") != std::string::npos) {
+                slice.profile = true;
+                return;
+            }
+            long long last = -1;
+            std::string at_stage;
+            bool ended = false;
+            size_t at = 0;
+            while (at < output.size()) {
+                const size_t row_end = output.find('\n', at);
+                const std::string row =
+                    output.substr(at, row_end == std::string::npos ? std::string::npos : row_end - at);
+                size_t index = 0;
+                if (std::sscanf(row.c_str(), "@OK %zu", &index) == 1) {
+                    ++slice.kept;
+                    last = (long long)index;
+                } else if (std::sscanf(row.c_str(), "@OUT %zu", &index) == 1) {
+                    ++slice.left;
+                    slice.leave.push_back(index);
+                    last = (long long)index;
+                    const auto why = row.find(' ', 5);
+                    ++slice.reasons[why == std::string::npos ? "?" : row.substr(why + 1)];
+                } else if (row.rfind("@AT ", 0) == 0) {
+                    at_stage = row.substr(4);
+                } else if (row.rfind("@END", 0) == 0) {
+                    ended = true;
+                }
+                if (row_end == std::string::npos) {
+                    break;
+                }
+                at = row_end + 1;
+            }
+            if (ended) {
+                break;
+            }
+            const size_t failed = last < 0 ? next : size_t(last) + 1;
+            if (failed >= slice.end) {
+                break;
+            }
+            slice.leave.push_back(failed);
+            ++slice.crashed;
+            ++slice.reasons["compiler refused, hw/sw stage " + at_stage.substr(at_stage.find(' ') + 1)];
+            next = failed + 1;
+            (void)code;
+        }
+    };
+    std::atomic<size_t> next_slice{0};
+    const auto worker = [&] {
+        for (size_t i; (i = next_slice.fetch_add(1)) < slices.size();) {
+            run(slices[i]);
+        }
+    };
+    std::vector<std::thread> pool;
+    for (size_t t = 1; t < std::min<size_t>(threads, slices.size()); ++t) {
+        pool.emplace_back(worker);
+    }
+    worker();
+    for (auto& thread : pool) {
+        thread.join();
+    }
+    size_t kept = 0, left = 0, crashed = 0;
+    std::vector<size_t> leave;
+    std::map<std::string, u32> reasons;
+    for (const auto& slice : slices) {
+        if (slice.profile) {
             std::printf("Shader cache: written by an engine with another profile; started again\n");
             return 3;
         }
-        long long last = -1;
-        std::string at_stage;
-        bool ended = false;
-        size_t at = 0;
-        while (at < output.size()) {
-            const size_t end = output.find('\n', at);
-            const std::string row = output.substr(at, end == std::string::npos ? std::string::npos : end - at);
-            size_t index = 0;
-            if (std::sscanf(row.c_str(), "@OK %zu", &index) == 1) {
-                ++kept;
-                last = (long long)index;
-            } else if (std::sscanf(row.c_str(), "@OUT %zu", &index) == 1) {
-                ++left;
-                leave.push_back(index);
-                last = (long long)index;
-                const auto why = row.find(' ', 5);
-                ++reasons[why == std::string::npos ? "?" : row.substr(why + 1)];
-            } else if (row.rfind("@AT ", 0) == 0) {
-                at_stage = row.substr(4);
-            } else if (row.rfind("@END", 0) == 0) {
-                ended = true;
-            }
-            if (end == std::string::npos) {
-                break;
-            }
-            at = end + 1;
+        kept += slice.kept;
+        left += slice.left;
+        crashed += slice.crashed;
+        leave.insert(leave.end(), slice.leave.begin(), slice.leave.end());
+        for (const auto& [why, n] : slice.reasons) {
+            reasons[why] += n;
         }
-        if (ended) {
-            break;
-        }
-        const size_t failed = last < 0 ? next : size_t(last) + 1;
-        if (failed >= names.size()) {
-            break;
-        }
-        leave.push_back(failed);
-        ++crashed;
-        ++reasons["compiler refused, hw/sw stage " + at_stage.substr(at_stage.find(' ') + 1)];
-        next = failed + 1;
-        (void)code;
     }
     for (const size_t index : leave) {
         unsigned long long pgm = 0;
@@ -2972,7 +3037,9 @@ int main(int argc, char** argv) {
 #endif
     }
     if (argc >= 4 && std::strcmp(argv[1], "--recompile-batch") == 0) {
-        return RecompileBatch(argv[2], std::strtoull(argv[3], nullptr, 10), argc >= 5 ? fs::path(argv[4]) : fs::path{});
+        return RecompileBatch(argv[2], std::strtoull(argv[3], nullptr, 10),
+                              argc >= 5 ? size_t(std::strtoull(argv[4], nullptr, 10)) : SIZE_MAX,
+                              argc >= 6 ? fs::path(argv[5]) : fs::path{});
     }
     if (argc >= 3 && std::strcmp(argv[1], "--bench") == 0) {
 #ifdef _WIN32

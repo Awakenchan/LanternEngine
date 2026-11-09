@@ -594,8 +594,12 @@ void OnFlip() {
             }
             if (const u64 submits = Vulkan::Scheduler::recorded_submissions.exchange(0)) {
                 const u64 segments = Vulkan::Scheduler::recorded_segments.exchange(0);
-                std::printf("Recording: %.1f submissions/frame, %.2f command buffers each\n",
-                            frames ? double(submits) / frames : 0.0, double(segments) / submits);
+                std::printf("Recording: %.1f submissions/frame, %.2f command buffers each; "
+                            "recording threads woken %.1f/frame by stage B, %.1f/frame by the "
+                            "thread before them\n",
+                            frames ? double(submits) / frames : 0.0, double(segments) / submits,
+                            frames ? double(Vulkan::Scheduler::producer_wakes.exchange(0)) / frames : 0.0,
+                            frames ? double(Vulkan::Scheduler::peer_wakes_done.exchange(0)) / frames : 0.0);
             }
             BbWaitTrace::Report(window);
             if (intervals.size() > 2) {

@@ -13,7 +13,7 @@ namespace BloodborneLauncher.Core
     public sealed record Hardware(string Gpu, string Vendor, long VramBytes, string Cpu, int Threads, long RamBytes,
         int ScreenWidth, int ScreenHeight, int RefreshHz)
     {
-        public enum Tier { Low, Mid, High }
+        public enum Tier { Weak, Low, Mid, High }
 
         /// <summary>One setting the recommendation would change.</summary>
         public sealed record Change(string Label, string From, string To, Action Apply);
@@ -22,14 +22,82 @@ namespace BloodborneLauncher.Core
         public bool Rtx => Vendor == "NVIDIA" && Gpu.Contains("RTX", StringComparison.OrdinalIgnoreCase);
         /// <summary>Radeon RX 9000 (RDNA 4): FSR 4 runs natively.</summary>
         public bool Rdna4 => Vendor == "AMD" && System.Text.RegularExpressions.Regex.IsMatch(Gpu, @"RX\s*9\d{3}");
-        /// <summary>Integrated graphics: little dedicated memory, or a known integrated name.</summary>
-        public bool Integrated => VramBytes < 2L << 30 || Gpu.Contains("UHD", StringComparison.OrdinalIgnoreCase) ||
-                                  Gpu.Contains("Iris", StringComparison.OrdinalIgnoreCase) ||
-                                  Gpu.Contains("Custom GPU", StringComparison.OrdinalIgnoreCase) ||
-                                  Gpu.EndsWith("Radeon(TM) Graphics", StringComparison.OrdinalIgnoreCase);
+        public bool Integrated =>
+            (VramBytes > 0 && VramBytes < 1L << 30) ||
+            Gpu.Contains("UHD", StringComparison.OrdinalIgnoreCase) ||
+            Gpu.Contains("Iris", StringComparison.OrdinalIgnoreCase) ||
+            Gpu.Contains("Custom GPU", StringComparison.OrdinalIgnoreCase) ||
+            (Vendor == "Intel" && !Gpu.Contains("Arc", StringComparison.OrdinalIgnoreCase)) ||
+            (Vendor == "AMD" && !Has(@"\bRX\b|\bR9\b|\bR7\b|\bPro\b|\bVega (56|64)\b|FirePro") &&
+             Gpu.Contains("Graphics", StringComparison.OrdinalIgnoreCase));
 
-        /// <summary>By memory in whole GB (an "8 GB" card reports a little under 8 GiB).</summary>
-        public Tier GpuTier => Integrated ? Tier.Low : VramGb >= 12 ? Tier.High : VramGb >= 8 ? Tier.Mid : Tier.Low;
+        private bool Has(string pattern) =>
+            System.Text.RegularExpressions.Regex.IsMatch(Gpu, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        private int? Number(string pattern) =>
+            System.Text.RegularExpressions.Regex.Match(Gpu, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase) is { Success: true } m
+                ? int.Parse(m.Groups[1].Value) : null;
+
+        public Tier VramTier => VramGb >= 12 ? Tier.High : VramGb >= 8 ? Tier.Mid : VramGb >= 4 ? Tier.Low : Tier.Weak;
+
+        public Tier? ModelTier
+        {
+            get
+            {
+                Tier? tier = null;
+                if (Vendor == "NVIDIA")
+                {
+                    if (Number(@"RTX\s*(\d{4})") is int rtx)
+                    {
+                        int gen = rtx / 100, model = rtx % 100;
+                        tier = gen >= 40 ? model >= 70 ? Tier.High : model >= 60 ? Tier.Mid : Tier.Low
+                             : gen == 30 ? model >= 80 ? Tier.High : model >= 60 ? Tier.Mid : Tier.Low
+                             : model >= 70 ? Tier.Mid : Tier.Low;
+                    }
+                    else if (Number(@"GTX\s*(\d{3,4})") is int gtx)
+                        tier = gtx >= 1600 ? Tier.Low : gtx == 1080 && Has(@"\bTi\b") ? Tier.Mid
+                             : gtx >= 1060 && gtx < 1100 ? Tier.Low : Tier.Weak;
+                    else if (Has(@"\bGT\s*\d|\bMX\s*\d|Quadro K|GeForce \d{3}"))
+                        tier = Tier.Weak;
+                }
+                else if (Vendor == "AMD")
+                {
+                    if (Number(@"RX\s*(\d{4})") is int rx)
+                    {
+                        int series = rx / 1000, model = rx / 10 % 100;
+                        tier = series >= 9 ? rx / 10 % 10 >= 7 ? Tier.High : Tier.Mid
+                             : series >= 6 ? model >= 80 ? Tier.High : model >= 60 ? Tier.Mid : Tier.Low
+                             : series == 5 ? model >= 70 ? Tier.Mid : model >= 60 ? Tier.Low : Tier.Weak
+                             : Tier.Low;
+                    }
+                    else if (Number(@"RX\s*(\d{3})\b") is int polaris)
+                        tier = polaris >= 470 && VramGb >= 8 ? Tier.Low : Tier.Weak;
+                    else if (Has(@"Vega (56|64)|Radeon VII"))
+                        tier = Tier.Low;
+                    else if (Has(@"\bR9\b|\bR7\b|\bHD\s*\d"))
+                        tier = Tier.Weak;
+                }
+                else if (Vendor == "Intel" && Has(@"\bArc\b"))
+                    tier = Has(@"\b(A7\d\d|B5\d\d|B7\d\d)\b") ? Tier.Mid : Has(@"\bA5\d\d\b") ? Tier.Low : Tier.Weak;
+
+                if (tier is { } t && t > Tier.Weak && Has(@"Laptop|Mobile|Max-Q|\b\d{4}M\b"))
+                    tier = t - 1;
+                return tier;
+            }
+        }
+
+        public Tier GpuTier
+        {
+            get
+            {
+                if (Integrated) return Tier.Weak;
+                var memory = VramBytes > 0 ? VramTier : Tier.Low;
+                return ModelTier is { } model ? (Tier)Math.Min((int)model, (int)memory) : memory;
+            }
+        }
+
+        public bool RayTracingCapable =>
+            Rtx || (Vendor == "AMD" && Number(@"RX\s*(\d{4})") is >= 6000) || (Vendor == "Intel" && Has(@"\bArc\b"));
 
         /// <summary>One line for the UI: "NVIDIA GeForce RTX 5060 (8 GB) · AMD Ryzen 5 5600 (12 threads) · 2560 × 1440 at 165 Hz".</summary>
         public string Summary =>
@@ -101,15 +169,10 @@ namespace BloodborneLauncher.Core
             return best;
         }
 
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        private delegate int EnumAdapters1Fn(IntPtr self, uint index, out IntPtr adapter);
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        private delegate int GetDesc1Fn(IntPtr self, out AdapterDesc1 desc);
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct AdapterDesc1
+        [StructLayout(LayoutKind.Sequential)]
+        private unsafe struct AdapterDesc1
         {
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+            public fixed char Description[128];
             public uint VendorId, DeviceId, SubSysId, Revision;
             public UIntPtr DedicatedVideoMemory, DedicatedSystemMemory, SharedSystemMemory;
             public uint LuidLow;
@@ -120,27 +183,29 @@ namespace BloodborneLauncher.Core
         [DllImport("dxgi.dll")]
         private static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr factory);
 
-        private static T Method<T>(IntPtr com, int slot) where T : Delegate =>
-            Marshal.GetDelegateForFunctionPointer<T>(Marshal.ReadIntPtr(Marshal.ReadIntPtr(com), slot * IntPtr.Size));
+        private static IntPtr Method(IntPtr com, int slot) => Marshal.ReadIntPtr(Marshal.ReadIntPtr(com), slot * IntPtr.Size);
 
-        private static (string Name, string Vendor, long Vram)? DetectGpuDxgi()
+        private static unsafe (string Name, string Vendor, long Vram)? DetectGpuDxgi()
         {
             var factory = IntPtr.Zero;
             try
             {
                 var iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
                 if (CreateDXGIFactory1(ref iid, out factory) < 0 || factory == IntPtr.Zero) return null;
-                var enumAdapters = Method<EnumAdapters1Fn>(factory, 12);
+                var enumAdapters = (delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, int>)Method(factory, 12);
                 (string, string, long)? best = null;
-                for (uint i = 0; enumAdapters(factory, i, out var adapter) >= 0 && adapter != IntPtr.Zero; i++)
+                IntPtr adapter;
+                for (uint i = 0; enumAdapters(factory, i, &adapter) >= 0 && adapter != IntPtr.Zero; i++)
                 {
                     try
                     {
-                        if (Method<GetDesc1Fn>(adapter, 10)(adapter, out var desc) < 0 || (desc.Flags & 2) != 0) continue;
+                        AdapterDesc1 desc;
+                        var getDesc = (delegate* unmanaged[Stdcall]<IntPtr, AdapterDesc1*, int>)Method(adapter, 10);
+                        if (getDesc(adapter, &desc) < 0 || (desc.Flags & 2) != 0) continue;
                         if (desc.VendorId == 0x1414) continue;
                         var vendor = desc.VendorId switch { 0x10DE => "NVIDIA", 0x1002 => "AMD", 0x8086 => "Intel", _ => "" };
                         var memory = (long)desc.DedicatedVideoMemory.ToUInt64();
-                        if (best == null || memory > best.Value.Item3) best = (desc.Description.Trim(), vendor, memory);
+                        if (best == null || memory > best.Value.Item3) best = (new string(desc.Description).Trim(), vendor, memory);
                     }
                     finally { Marshal.Release(adapter); }
                 }
@@ -292,7 +357,9 @@ namespace BloodborneLauncher.Core
 
             // The output: the display's own size, by name where it is one of the choices, else
             // "Display (auto)"; 1920 x 1080 when the display is unknown.
-            var output = ScreenWidth == 0 ? "1920x1080"
+            var output = SteamDeck.Detected ? "1280x720"
+                : ScreenWidth == 0 ? "1920x1080"
+                : tier == Tier.Weak && ScreenHeight > 1080 ? "1920x1080"
                 : Choices.OutputResolutions.Select(c => c.Value).FirstOrDefault(v => v == $"{ScreenWidth}x{ScreenHeight}") ?? "auto";
             Ini(L.T("Output resolution"), "output_res", output, Choices.OutputResolutions, "1920x1080");
 
@@ -300,6 +367,9 @@ namespace BloodborneLauncher.Core
             var height = Choices.OutputSize(output).H;
             var preset = (height, tier) switch
             {
+                (<= 720, Tier.Weak) => 2,
+                (<= 1080, Tier.Weak) => 3,
+                (_, Tier.Weak) => 4,
                 (<= 720, Tier.Low) => 1,
                 (<= 720, _) => 0,
                 (<= 1080, Tier.High) => 0,
@@ -323,14 +393,16 @@ namespace BloodborneLauncher.Core
 
             // 120 needs a fast display, a mid or better GPU and a CPU with 12+ threads (the game's
             // render thread is the limit); 60 otherwise.
-            var fps = RefreshHz >= 119 && tier != Tier.Low && Threads >= 12 ? "120" : "60";
+            var fps = tier == Tier.Weak || Threads < 6 ? "30"
+                : RefreshHz >= 119 && tier >= Tier.Mid && Threads >= 12 ? "120" : "60";
             // Best picture stays at 60; Smoother takes 90 where 120 is out of reach; Maximum FPS goes
             // up to the display's own rate (the render thread may hold it lower on small CPUs).
             fps = style switch
             {
-                StyleQuality => "60",
-                StyleSmooth => fps == "120" ? "120" : RefreshHz >= 89 && Threads >= 8 ? "90" : "60",
-                StyleFps => RefreshHz >= 143 ? "144" : RefreshHz >= 119 ? "120" : RefreshHz >= 89 ? "90" : "60",
+                StyleQuality => fps == "30" ? "30" : "60",
+                StyleSmooth => fps == "120" ? "120" : tier == Tier.Weak ? "60" : RefreshHz >= 89 && Threads >= 8 ? "90" : "60",
+                StyleFps => tier == Tier.Weak ? "60"
+                    : RefreshHz >= 143 && tier >= Tier.Mid ? "144" : RefreshHz >= 119 ? "120" : RefreshHz >= 89 ? "90" : "60",
                 _ => fps,
             };
             Setting(L.T("Frame rate"), "fps_mode", fps, Choices.FpsModes);
@@ -339,13 +411,24 @@ namespace BloodborneLauncher.Core
             if (style == StyleQuality) Ini(L.T("Object motion vectors"), "object_motion", "1", OnOff, "1");
             else if (style == StyleFps) Ini(L.T("Object motion vectors"), "object_motion", "0", OnOff, "1");
             else if (tier == Tier.High) Ini(L.T("Object motion vectors"), "object_motion", "1", OnOff, "1");
-            else if (tier == Tier.Low || style == StyleSmooth) Ini(L.T("Object motion vectors"), "object_motion", "0", OnOff, "1");
+            else if (tier <= Tier.Low || style == StyleSmooth) Ini(L.T("Object motion vectors"), "object_motion", "0", OnOff, "1");
 
-            // Model detail only with a style: Highest on strong GPUs for Best picture, Lower for
-            // Maximum FPS, the game's own otherwise.
-            if (style != null)
-                Ini(L.T("Model detail"), "model_lod", style == StyleQuality && tier == Tier.High ? "-2" : style == StyleFps ? "1" : "0",
+            if (style != null || tier == Tier.Weak)
+                Ini(L.T("Model detail"), "model_lod",
+                    style == StyleQuality && tier == Tier.High ? "-2"
+                    : tier == Tier.Weak ? style == StyleFps ? "2" : "1"
+                    : style == StyleFps ? "1" : "0",
                     Choices.ModelLod, "0");
+
+            var heavy = new[] { "effect_gi", "effect_volumetric_light", "effect_point_fog", "effect_point_shadows",
+                                "effect_pcss", "effect_contact_shadows", "effect_gtao", "effect_modern_ssr", "effect_ssr" };
+            foreach (var effect in Choices.Effects)
+            {
+                var off = (tier <= Tier.Low || style == StyleFps) && heavy.Contains(effect.Key)
+                       || effect.Key == "effect_ray_tracing" && (!RayTracingCapable || tier < Tier.High)
+                       || tier == Tier.Weak && effect.Key is "effect_ssao" or "effect_dynamic_shadows";
+                if (off) Ini(effect.Title, effect.Key, "0", OnOff, effect.Default ? "1" : "0");
+            }
             return changes;
         }
 

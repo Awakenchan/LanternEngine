@@ -304,6 +304,14 @@ def main():
         prebuilt = os.environ.get('BB_PREBUILT') == '1'
         if not prebuilt:
             build()
+        scanner = out / 'bb-isa-scan.exe'
+        if not scanner.is_file():
+            sys.exit(f'ISA scanner not found: {scanner}. Rebuild the engine or reinstall its updated package.')
+        scan_env = dict(os.environ)
+        scan_env['PATH'] = os.pathsep.join([str(msys_root() / 'clang64/bin'), scan_env.get('PATH', '')])
+        scan_output = run([scanner, out / 'boot-linked.bin', out], capture=True, env=scan_env)
+        if scan_output:
+            print(scan_output, flush=True)
         for key in ('BB_DREAM_MIRROR_ASSET', 'BB_ENGINE_IMAGE_SHA256', 'BB_PC_MENU_ASSETS', 'BB_REBIRTH_ASSET'):
             os.environ.pop(key, None)
         try:

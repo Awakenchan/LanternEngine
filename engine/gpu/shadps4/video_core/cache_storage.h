@@ -10,7 +10,10 @@
 #include <functional>
 #include <span>
 #include <atomic>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace Storage {
@@ -55,11 +58,17 @@ public:
     }
     bool SaveNow(BlobType type, const std::string& name, std::span<const u8> data);
     void Remove(BlobType type, const std::string& name);
+    void ReadAhead();
 
 private:
+    bool TakeAhead(BlobType type, const std::string& name, std::vector<u8>& data);
+    void Forget(BlobType type, const std::string& name);
+
     std::jthread io_worker{};
     std::filesystem::path cache_path{};
     std::atomic<bool> opened{};
+    std::mutex ahead_mutex;
+    std::unordered_map<std::string, std::vector<u8>> ahead;
 };
 
 } // namespace Storage

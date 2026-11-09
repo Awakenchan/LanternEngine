@@ -27,14 +27,17 @@
 namespace Vulkan {
 namespace {
 constexpr u32 MaxParams = 8192;
+static_assert(1 + 4 * MaxParams == Shader::MotionVectors::CaptureParamsCapacity);
 constexpr u32 MaxPositions = 8u << 20;
 constexpr u32 MaxInstances = 8192;
 constexpr u32 MaxInstancesPerDraw = 64;
 constexpr u32 MaxTrianglesPerBlas = 2u << 20;
-constexpr u32 NewTrianglesPerFrame = 500000;
-constexpr u32 RebuiltTrianglesPerFrame = 1000000;
+constexpr u32 NewTrianglesPerFrame = 200000;
+constexpr u32 RebuiltTrianglesPerFrame = 300000;
 constexpr u32 RebuildEveryFrames = 120;
-constexpr u64 UnusedFrames = 600;
+constexpr u32 RebuildSpread = 32;
+constexpr u64 UnusedFrames = 240;
+constexpr u64 KeptFrames = 2;
 constexpr vk::DeviceSize ScratchBytes = 192ull << 20;
 constexpr VkBufferUsageFlags InputUsage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 constexpr u8 ShadowMask = 1, CameraMask = 2;
@@ -167,6 +170,9 @@ RtShadow::RtShadow(const Instance& instance_, Scheduler& scheduler_, CameraMotio
         std::printf("Ray tracing: off - the camera is not tracked (BB_UPSCALER=none)\n");
         return;
     }
+    if (const char* env = std::getenv("LANTERN_RT_SCENE_MB"); env && env[0]) {
+        blas_limit = u64(std::clamp(std::strtoul(env, nullptr, 10), 64ul, 4096ul)) << 20;
+    }
     if (const char* env = std::getenv("LANTERN_RT_SHADOW_RAYS"); env && env[0]) {
         rays = std::clamp(u32(std::strtoul(env, nullptr, 10)), 1u, 16u);
     }
@@ -238,6 +244,7 @@ void RtShadow::Free(Buffer& buffer) {
 }
 
 void RtShadow::Destroy(Entry& entry) {
+    blas_bytes -= std::min(blas_bytes, entry.bytes);
     const auto device = instance.GetDevice();
     const auto allocator = instance.GetAllocator();
     scheduler.DeferOperation([device, allocator, handle = entry.handle, storage = entry.storage,
@@ -322,7 +329,7 @@ bool RtShadow::Setup(const ObjectMotion& object_motion) {
     };
     const vk::AccelerationStructureBuildGeometryInfoKHR info{
         .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+        .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
         .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
         .geometryCount = 1,
         .pGeometries = &geometry,
@@ -343,6 +350,12 @@ bool RtShadow::Setup(const ObjectMotion& object_motion) {
         return false;
     }
     tlas = handle;
+    scratch_align = std::max<u64>(
+        1, instance.GetPhysicalDevice()
+               .getProperties2<vk::PhysicalDeviceProperties2,
+                               vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
+               .get<vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
+               .minAccelerationStructureScratchOffsetAlignment);
     return true;
 }
 
@@ -352,7 +365,7 @@ bool RtShadow::Wanted() const {
 }
 
 bool RtShadow::Complete() const {
-    return Wanted() && !frame_entries.empty() && missed * 4 <= u32(frame_entries.size()) &&
+    return Wanted() && !frame_entries.empty() &&
            camera_motion.PassMatrices().valid;
 }
 
@@ -455,7 +468,8 @@ std::unique_ptr<RtShadow::Entry> RtShadow::MakeEntry(const Draw& draw, u8 mask) 
     entry->palette = draw.palette;
     entry->dynamic = draw.skinned;
     entry->mask = mask;
-    if (!EffectPass::HasRoom(instance, vk::DeviceSize(entry->triangles) * 96) ||
+    if (blas_bytes + vk::DeviceSize(entry->triangles) * 64 > blas_limit ||
+        !EffectPass::HasRoom(instance, vk::DeviceSize(entry->triangles) * 96) ||
         !Make(entry->indices, list.size() * sizeof(u32), true, InputUsage)) {
         ++stats.over_budget;
         ++missed;
@@ -484,6 +498,7 @@ std::unique_ptr<RtShadow::Entry> RtShadow::MakeEntry(const Draw& draw, u8 mask) 
         vk::AccelerationStructureBuildTypeKHR::eDevice, info, entry->triangles);
     entry->scratch = sizes.buildScratchSize;
     entry->update_scratch = sizes.updateScratchSize;
+    entry->bytes = sizes.accelerationStructureSize + list.size() * sizeof(u32);
     if (!Make(entry->storage, sizes.accelerationStructureSize, false,
               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR)) {
         Free(entry->indices);
@@ -504,6 +519,7 @@ std::unique_ptr<RtShadow::Entry> RtShadow::MakeEntry(const Draw& draw, u8 mask) 
     }
     entry->handle = handle;
     entry->address = device.getAccelerationStructureAddressKHR({.accelerationStructure = handle});
+    blas_bytes += entry->bytes;
     return entry;
 }
 
@@ -515,7 +531,9 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     if (!draw.solid) {
         return 0;
     }
-    if (draw.alpha) {
+    if (draw.alpha && (draw.skinned || draw.palette != 0)) {
+        ++stats.cut_characters;
+    } else if (draw.alpha) {
         ++stats.alpha;
         if (draw.shadow_pass) {
             ++alpha_casters;
@@ -537,11 +555,20 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         return 0;
     }
     stats.strips += draw.strip ? 1 : 0;
-    u64 key = draw.geometry ^ (draw.shader * 0x9e3779b97f4a7c15ull);
-    key = XXH3_64bits_withSeed(&draw.indices, sizeof(draw.indices), key);
-    const std::array<u32, 4> parts{draw.index_count, draw.first_vertex, draw.instances,
-                                   draw.camera_pass ? 1u : 0u};
-    key = XXH3_64bits_withSeed(parts.data(), sizeof(parts), key);
+    const u8 mask = draw.camera_pass ? CameraMask : ShadowMask;
+    u64 key;
+    if (draw.positions) {
+        const std::array<u64, 4> mesh{draw.positions, draw.indices,
+                                      (u64(draw.index_count) << 32) | draw.first_vertex,
+                                      draw.instances};
+        key = XXH3_64bits(mesh.data(), sizeof(mesh));
+    } else {
+        key = draw.geometry ^ (draw.shader * 0x9e3779b97f4a7c15ull);
+        key = XXH3_64bits_withSeed(&draw.indices, sizeof(draw.indices), key);
+        const std::array<u32, 4> parts{draw.index_count, draw.first_vertex, draw.instances,
+                                       draw.camera_pass ? 1u : 0u};
+        key = XXH3_64bits_withSeed(parts.data(), sizeof(parts), key);
+    }
 
     u32 camera_index = 0;
     for (; camera_index < frame_cameras.size(); ++camera_index) {
@@ -573,17 +600,24 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
             entries.erase(entry_key);
             return 0;
         }
-        slot = MakeEntry(draw, draw.camera_pass ? CameraMask : ShadowMask);
+        slot = MakeEntry(draw, mask);
         if (!slot) {
             entries.erase(entry_key);
             return 0;
         }
         slot->rebuilt = shared;
+        slot->rebuild_every = RebuildEveryFrames + u32(entry_key % RebuildSpread);
     }
     Entry& entry = *slot;
     if (entry.seen_frame == frame) {
+        if ((entry.mask & mask) == 0) {
+            entry.mask |= mask;
+            tlas_count = 0;
+            ++stats.merged;
+        }
         return 0;
     }
+    entry.mask = mask;
     entry.rebuilt = entry.rebuilt || shared;
     if (entry.palette != draw.palette) {
         entry.palette = draw.palette;
@@ -592,12 +626,11 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
     const bool needs_data = !entry.built || entry.dynamic || entry.rebuilt;
     u32 param = 0;
     if (needs_data) {
-        const bool update =
-            entry.built && !entry.rebuilt && frame - entry.built_frame < RebuildEveryFrames;
+        const bool update = entry.built && frame - entry.built_frame < entry.rebuild_every;
         const u64 stored = u64(entry.vertices) * entry.instances;
         const u64 needed = (update ? entry.update_scratch : entry.scratch) + 256;
-        const bool over = entry.rebuilt ? rebuilt_triangles >= RebuiltTrianglesPerFrame
-                                        : !update && new_triangles >= NewTrianglesPerFrame;
+        const bool over = !update && (entry.rebuilt ? rebuilt_triangles >= RebuiltTrianglesPerFrame
+                                                    : new_triangles >= NewTrianglesPerFrame);
         if (positions_used + stored > MaxPositions || scratch_used + needed > ScratchBytes || over) {
             ++stats.over_budget;
             ++missed;
@@ -612,11 +645,14 @@ u32 RtShadow::PrepareDraw(const Draw& draw) {
         builds.push_back({&entry, positions_used, update, to_world});
         positions_used += u32(stored);
         scratch_used += needed;
-        if (entry.rebuilt) {
-            rebuilt_triangles += entry.triangles;
-            ++stats.shared_builds;
-        } else if (!update) {
-            new_triangles += entry.triangles;
+        if (!update) {
+            if (entry.rebuilt) {
+                rebuilt_triangles += entry.triangles;
+                ++stats.shared_builds;
+            } else {
+                new_triangles += entry.triangles;
+                stats.built_triangles += entry.triangles;
+            }
         }
         if (!update) {
             entry.built_frame = frame;
@@ -644,12 +680,6 @@ void RtShadow::RecordBuilds() {
     job->ranges.reserve(builds.size());
     job->unproject.reserve(builds.size());
     u64 scratch_at = 0;
-    const u64 scratch_align =
-        instance.GetPhysicalDevice()
-            .getProperties2<vk::PhysicalDeviceProperties2,
-                            vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
-            .get<vk::PhysicalDeviceAccelerationStructurePropertiesKHR>()
-            .minAccelerationStructureScratchOffsetAlignment;
     const auto align = [&](u64 v) { return (v + scratch_align - 1) / scratch_align * scratch_align; };
     for (const Build& build : builds) {
         Entry& e = *build.entry;
@@ -770,7 +800,7 @@ bool RtShadow::PrepareScene() {
             };
             const vk::AccelerationStructureBuildGeometryInfoKHR info{
                 .type = vk::AccelerationStructureTypeKHR::eTopLevel,
-                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastBuild,
+                .flags = vk::BuildAccelerationStructureFlagBitsKHR::ePreferFastTrace,
                 .mode = vk::BuildAccelerationStructureModeKHR::eBuild,
                 .dstAccelerationStructure = tlas,
                 .geometryCount = 1,
@@ -948,22 +978,43 @@ void RtShadow::OnFrameEnd() {
         std::printf("Ray tracing: %.0f shadow + %.0f camera draws, %.0f instances, %.0f triangles a "
                     "frame; %zu BLAS; alpha %.1f, not ortho %.1f, no camera %.1f, unsupported %.1f, "
                     "many instances %.1f, over budget %.1f, moving %.1f, copies rebuilt %.1f, strips "
-                    "%.1f a frame\n",
+                    "%.1f, in both passes %.1f, cut-out characters %.1f, new triangles built %.0f, evicted %.1f a "
+                    "frame; scene %.0f MB of %.0f\n",
                     double(stats.draws) / f, double(stats.camera_draws) / f,
                     double(stats.instances) / f, double(stats.triangles) / f, entries.size(),
                     double(stats.alpha) / f, double(stats.not_ortho) / f, double(stats.no_camera) / f,
                     double(stats.unsupported) / f, double(stats.instanced) / f,
                     double(stats.over_budget) / f, double(stats.dynamic_draws) / f,
-                    double(stats.shared_builds) / f, double(stats.strips) / f);
+                    double(stats.shared_builds) / f, double(stats.strips) / f,
+                    double(stats.merged) / f, double(stats.cut_characters) / f,
+                    double(stats.built_triangles) / f, double(stats.evicted) / f,
+                    double(blas_bytes) / 1048576.0, double(blas_limit) / 1048576.0);
         stats = {};
     }
     ++frame;
-    if (frame % 64 == 0) {
+    if (frame % 64 == 0 || blas_bytes > blas_limit - blas_limit / 8) {
+        u64 keep_from = frame > UnusedFrames ? frame - UnusedFrames : 0;
+        if (blas_bytes > blas_limit - blas_limit / 8) {
+            u64 bytes = blas_bytes;
+            const u64 target = blas_limit - blas_limit / 4;
+            std::size_t at = 0;
+            std::vector<std::pair<u64, u64>> aged;
+            aged.reserve(entries.size());
+            for (const auto& [key, entry] : entries) {
+                aged.emplace_back(entry->seen_frame, entry->bytes);
+            }
+            std::ranges::sort(aged);
+            for (; at < aged.size() && bytes > target && aged[at].first + KeptFrames < frame; ++at) {
+                bytes -= std::min(bytes, aged[at].second);
+                keep_from = std::max(keep_from, aged[at].first + 1);
+            }
+        }
         std::erase_if(entries, [&](auto& item) {
-            if (frame - item.second->seen_frame <= UnusedFrames) {
+            if (item.second->seen_frame >= keep_from) {
                 return false;
             }
             Destroy(*item.second);
+            ++stats.evicted;
             return true;
         });
     }

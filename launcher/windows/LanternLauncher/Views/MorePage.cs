@@ -68,7 +68,7 @@ namespace BloodborneLauncher.Views
         private LauncherPage PageOf(Type type)
         {
             if (!_pages.TryGetValue(type, out var page))
-                _pages[type] = page = (LauncherPage)Activator.CreateInstance(type)!;
+                _pages[type] = page = Pages.Create(type);
             return page;
         }
 

@@ -2,20 +2,25 @@ using System.IO;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
+using Avalonia.Media;
 using BloodborneLauncher.Core;
 
 namespace BloodborneLauncher.Views
 {
     public sealed class SavesPage : LauncherPage
     {
+        private readonly WrapPanel _hunters = new() { Margin = new Thickness(0, 2, 0, 4) };
         private readonly StackPanel _profiles = new();
         private readonly StackPanel _backups = new();
         private readonly TextBlock _backupHint, _userHint;
         private readonly AppButton _resetUser;
-        private int _profileReads, _backupReads;
+        private int _profileReads, _backupReads, _hunterReads;
 
         public SavesPage() : base(L.T("Saves"), L.T("Who is playing, their backups, and where saves are kept."))
         {
+            Group(L.T("Hunters"));
+            Body.Children.Add(_hunters);
+
             Group(L.T("Who is playing"));
             Body.Children.Add(_profiles);
             Add(Card(SymbolRegular.PersonAdd24, L.T("New profile"),
@@ -62,8 +67,123 @@ namespace BloodborneLauncher.Views
             var root = GameEnvironment.SavesRoot(S);
             SetHint(_userHint, custom ? root : L.F($"Default: {root}"));
             _resetUser.IsEnabled = custom;
+            RefreshHunters();
             RefreshProfiles();
             RefreshBackups();
+        }
+
+        private async void RefreshHunters()
+        {
+            var read = ++_hunterReads;
+            var places = SaveEditorSession.Places(S);
+            List<SaveCharacter> hunters;
+            try { hunters = await Task.Run(() => places.SelectMany(SaveStore.Characters).OrderByDescending(c => c.Saved).ToList()); }
+            catch { hunters = new(); }
+            if (read != _hunterReads) return;
+            _hunters.Children.Clear();
+            if (hunters.Count == 0)
+            {
+                _hunters.Children.Add(Text(L.T("No hunters yet: they show up here once the game has saved"), "Faint"));
+                return;
+            }
+            var current = PlayerProfiles.Current(S);
+            var profiles = hunters.Select(h => h.Profile).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            foreach (var hunter in hunters)
+                _hunters.Children.Add(HunterTile(hunter, hunter.Profile.Equals(current, StringComparison.OrdinalIgnoreCase), profiles > 1));
+        }
+
+        private static readonly Color[] TileTones =
+        {
+            Color.FromRgb(0x67, 0x3A, 0xB7), Color.FromRgb(0x3F, 0x51, 0xB5), Color.FromRgb(0x21, 0x96, 0xF3),
+            Color.FromRgb(0x5E, 0x35, 0xB1), Color.FromRgb(0x30, 0x4F, 0xFE), Color.FromRgb(0x00, 0x83, 0x8F),
+        };
+
+        private static int Tone(string text)
+        {
+            var hash = 17u;
+            foreach (var c in text) hash = hash * 31u + c;
+            return (int)(hash % (uint)TileTones.Length);
+        }
+
+        private Control HunterTile(SaveCharacter hunter, bool playing, bool showProfile)
+        {
+            var accent = LauncherTheme.Brush("AccentTextFillColorPrimaryBrush") is ISolidColorBrush { Color: var a } ? a : Colors.SteelBlue;
+            var tone = LauncherTheme.Mix(TileTones[Tone(hunter.Profile + "/" + hunter.Slot + "/" + hunter.Name)], accent, 0.25);
+            var label = hunter.Name.Length > 0 ? hunter.Name : "?";
+            var art = new Border
+            {
+                Height = 128,
+                CornerRadius = new CornerRadius(8),
+                Background = new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                    EndPoint = new RelativePoint(0.57, 0.82, RelativeUnit.Relative),
+                    GradientStops =
+                    {
+                        new GradientStop(LauncherTheme.Mix(tone, Colors.White, 0.12), 0),
+                        new GradientStop(LauncherTheme.Mix(tone, Colors.Black, 0.35), 1),
+                    },
+                },
+                Child = new TextBlock
+                {
+                    Text = label.Substring(0, 1).ToUpperInvariant(),
+                    FontSize = 56,
+                    FontWeight = FontWeight.SemiBold,
+                    Foreground = new SolidColorBrush(Color.FromArgb(0xE6, 0xFF, 0xFF, 0xFF)),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                },
+            };
+            var name = new TextBlock
+            {
+                Text = label,
+                FontSize = 15,
+                FontWeight = FontWeight.Bold,
+                Margin = new Thickness(2, 10, 2, 2),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            name.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorPrimaryBrush");
+            var stack = new StackPanel();
+            stack.Children.Add(art);
+            stack.Children.Add(name);
+            void Line(string text)
+            {
+                var line = Text(text, "Muted");
+                line.FontSize = 11.5;
+                line.Margin = new Thickness(2, 1, 2, 0);
+                line.TextTrimming = TextTrimming.CharacterEllipsis;
+                stack.Children.Add(line);
+            }
+            Line(L.F($"Level {hunter.Level}  ·  {hunter.BossesDefeated} bosses"));
+            Line(L.F($"{SessionStats.Duration(TimeSpan.FromHours(hunter.PlayHours))} played") + "  ·  " + FriendlyTime(hunter.Saved));
+            if (showProfile) Line(hunter.Profile);
+            Control action;
+            if (playing)
+            {
+                var tag = Text(L.T("Playing"), "Muted");
+                tag.FontSize = 11.5;
+                action = tag;
+            }
+            else
+            {
+                var profile = hunter.Profile;
+                action = SmallButton(L.T("Switch"), SymbolRegular.Person24, (_, _) => SwitchProfile(profile));
+            }
+            action.Margin = new Thickness(2, 10, 2, 0);
+            action.HorizontalAlignment = HorizontalAlignment.Left;
+            stack.Children.Add(action);
+            var tile = new Border
+            {
+                Width = 196,
+                Margin = new Thickness(0, 0, 12, 12),
+                Padding = new Thickness(10),
+                CornerRadius = new CornerRadius(12),
+                BorderThickness = new Thickness(1),
+                Child = stack,
+            };
+            tile.SetResourceReference(Border.BackgroundProperty, "CardBackgroundFillColorDefaultBrush");
+            tile.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
+            return tile;
         }
 
         private async void RefreshProfiles()

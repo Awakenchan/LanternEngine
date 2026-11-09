@@ -659,12 +659,15 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const char* on = std::getenv("LANTERN_GX_OBJECTS");
     const char* owned = std::getenv("LANTERN_GX_TEXTURES");
     const bool checked = owned && owned[0] == '2';
-    const bool textures = !owned || owned[0] == '1' || checked;
+    const bool textures = owned && (owned[0] == '1' || checked);
     const char* buffers_env = std::getenv("LANTERN_GX_BUFFERS");
-    const bool buffers = !buffers_env || buffers_env[0] == '1';
+    const bool buffers = buffers_env && buffers_env[0] == '1';
     const char* records = std::getenv("LANTERN_GX_RECORDS");
-    const bool want_records = !records || records[0] == '1' || records[0] == '2' || records[0] == '3';
-    if (!textures && !buffers && !want_records && (!on || on[0] != '1')) return false;
+    const bool want_records = records && (records[0] == '1' || records[0] == '2' || records[0] == '3');
+    if (!textures && !buffers && !want_records && (!on || on[0] != '1')) {
+        host_log("GX objects: off (LANTERN_GX_TEXTURES, LANTERN_GX_BUFFERS or LANTERN_GX_RECORDS=1 turns them on)");
+        return false;
+    }
     for (const Vtable& v : kVtables) {
         if (v.offset + 16 > size || Peek<u64>(reinterpret_cast<u64>(image) + v.offset) != reinterpret_cast<u64>(image) + v.complete ||
             Peek<u64>(reinterpret_cast<u64>(image) + v.offset + 8) != reinterpret_cast<u64>(image) + v.deleting) {

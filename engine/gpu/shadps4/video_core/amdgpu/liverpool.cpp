@@ -1071,6 +1071,15 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
         if (!BbNativeCalls::ReadRecord(reinterpret_cast<const u32*>(header), record)) {
             return;
         }
+        if (record.flags) {
+            u32 registers[BbNativeCalls::SetIndexOffsetDwords + BbNativeCalls::SetNumInstancesDwords];
+            const u32 written = BbNativeCalls::EncodeRegisterPackets(record, registers);
+            for (u32 at = 0; at < written;) {
+                const auto* packet = reinterpret_cast<const PM4Header*>(registers + at);
+                ApplyGraphicsRegisterPacket(regs, packet, checksum, dirty);
+                at += packet->type3.NumWords() + 1;
+            }
+        }
         u32 words[8];
         BbNativeCalls::EncodeDrawPacket(record, words);
         ApplyGraphicsRegisterPacket(regs, reinterpret_cast<const PM4Header*>(words), checksum,
@@ -1377,7 +1386,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             const PM4ItOpcode opcode = header->type3.opcode;
             // bbport BB_NATIVE_CALLS: a draw call's record NOP (mode 1), the checksum before the
             // packet (verify), the packet's start (BB_FRAME_STATS).
-            const u64 packet_start = native_timing ? BbNativeCalls::Ticks() : 0;
+            const bool timed_packet = native_timing && BbNativeCalls::SamplePacket();
+            const u64 packet_start = timed_packet ? BbNativeCalls::Ticks() : 0;
             const u64 checksum_before = gfx_reg_checksum;
             BbNativeCalls::DrawRecord native_record;
             const bool native_draw =
@@ -2098,7 +2108,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // own packets), per draw; the "Native calls" lines every 5 s.
                 const bool is_draw = native_draw || IsDrawOpcode(opcode);
                 if (native_timing && opcode != PM4ItOpcode::IndirectBuffer) {
-                    BbNativeCalls::AddPacketTicks(BbNativeCalls::Ticks() - packet_start, is_draw);
+                    BbNativeCalls::AddPacketTicks(
+                        timed_packet ? (BbNativeCalls::Ticks() - packet_start) * BbNativeCalls::PacketSampling
+                                     : 0,
+                        is_draw);
                 }
                 if (is_draw) {
                     BbNativeCalls::MaybeReport();

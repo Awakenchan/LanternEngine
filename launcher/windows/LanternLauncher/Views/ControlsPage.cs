@@ -30,6 +30,7 @@ namespace BloodborneLauncher.Views
         private readonly WrapPanel _padChoices;
         private readonly DispatcherTimer _padTimer;
         private string? _padInput;
+        public static bool Capturing { get; private set; }
         private ControlDef? _padControl;
         private HashSet<string> _padHeld = new();
         private string? _padState;
@@ -230,7 +231,6 @@ namespace BloodborneLauncher.Views
 
             var status = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
             status.Tick += (_, _) => { if (IsShown) UpdatePadStatus(); };
-            status.Start();
             // A receiver stays connected while its pad is off: only input changing shows the pad is on.
             var activity = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             activity.Tick += (_, _) =>
@@ -245,7 +245,8 @@ namespace BloodborneLauncher.Views
                 }
                 _padState = state;
             };
-            activity.Start();
+            AttachedToVisualTree += (_, _) => { status.Start(); activity.Start(); };
+            DetachedFromVisualTree += (_, _) => { status.Stop(); activity.Stop(); };
             Ws.PortChanged += () => { Rebuild(); FillProfiles(); };
             Rebuild();
             FillProfiles();
@@ -570,13 +571,13 @@ namespace BloodborneLauncher.Views
             _captureBoxText.Text = L.T("Click or scroll here");
             _padChoices.IsVisible = false;
             _captureFeedback.Text = "";
-            _overlay.IsVisible = true;
+            _overlay.IsVisible = Capturing = true;
             _overlay.Focus();
         }
 
         private void EndCapture()
         {
-            _overlay.IsVisible = false;
+            _overlay.IsVisible = Capturing = false;
             _target = null;
             _addMode = false;
             _pendingModifier = null;
@@ -599,7 +600,7 @@ namespace BloodborneLauncher.Views
             _captureBoxText.Text = live ? L.T("Waiting for a button…") : L.T("Controller input is not available right now");
             _padChoices.IsVisible = true;
             _captureFeedback.Text = "";
-            _overlay.IsVisible = true;
+            _overlay.IsVisible = Capturing = true;
             _overlay.Focus();
             if (live)
             {

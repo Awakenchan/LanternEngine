@@ -249,9 +249,8 @@ namespace BloodborneLauncher.Views
                 if (earned) symbol.Foreground = GradeBrush(trophy.Grade);
                 else symbol.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorTertiaryBrush");
                 row.Opacity = earned ? 1 : 0.62;
-                // The trophy's own picture from the game dump (dimmed with the row until earned).
                 if (TrophyIcons.For(S, trophy.Id) is { } picture)
-                    row.SetPicture(picture, 36);
+                    row.SetPicture(picture, 36, grey: !earned);
                 row.SetTip(L.F($"{Trophy.GradeName(trophy.Grade)} · {trophy.Points} points"));
                 _list.Children.Add(row);
             }

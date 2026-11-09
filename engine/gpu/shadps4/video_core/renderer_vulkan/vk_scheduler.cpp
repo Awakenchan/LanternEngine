@@ -203,6 +203,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     EndRendering();
     is_rendering = true;
     render_state = new_state;
+    ++passes_begun;
 
     std::array<vk::RenderingAttachmentInfo, 8> color_attachments;
     for (u32 i = 0; i < render_state.num_color_attachments; ++i) {
@@ -615,6 +616,20 @@ void Scheduler::MaybeSplit() {
     batch->segments[current_segment] = vk::CommandBuffer{};
     segment_bytes = 0;
     active_worker.store(current_segment % workers.size(), std::memory_order_relaxed);
+    static const bool peer_wake = [] {
+        const char* env = std::getenv("LANTERN_PEER_WAKE");
+        return !(env && env[0] == '0');
+    }();
+    if (peer_wake) {
+        const u32 next_index = current_segment % workers.size();
+        Worker& done = *workers[(current_segment - 1) % workers.size()];
+        Worker& next = *workers[next_index];
+        std::scoped_lock lk{recorder_mutex};
+        if (next.sleeping && !next.peer_wakes && !done.queue.empty() && done.wake_next == NoPeer) {
+            done.wake_next = next_index;
+            next.peer_wakes = true;
+        }
+    }
     // The next command buffer starts without dynamic state: the next draw sets all of it.
     // Everything else (pipeline, vertex and index buffers, descriptors, push constants) every
     // draw and dispatch records itself.
@@ -671,7 +686,7 @@ void Scheduler::HandOver() {
                 ++batch->handed[current_segment];
             }
             worker.queued.store(worker.queue.size(), std::memory_order_release);
-            wake = worker.sleeping;
+            wake = worker.sleeping && !worker.peer_wakes;
         }
         if (ordered) {
             // They run after the commands handed over with them (recorded before or among them).
@@ -694,7 +709,7 @@ void Scheduler::HandOver() {
             // a few percent of the frame rate on 4 cores / 8 threads. A thread that is awake
             // picks them up by itself.
             if (!ordered_running) {
-                wake |= worker.sleeping;
+                wake |= worker.sleeping && !worker.peer_wakes;
             }
         }
     }
@@ -702,6 +717,7 @@ void Scheduler::HandOver() {
     ordered_full.clear();
     // A busy thread picks the new chunks up by itself: waking it is a syscall per draw.
     if (wake) {
+        producer_wakes.fetch_add(1, std::memory_order_relaxed);
         worker.cv.notify_one();
     }
     if (!record_chunk) {
@@ -845,16 +861,22 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
             }
         }
         std::unique_ptr<RecordChunk> chunk;
+        u32 wake_peer = NoPeer;
         {
             std::unique_lock lk{recorder_mutex};
             if (!has_work()) {
                 worker.sleeping = true;
-                worker.cv.wait(lk, stoken, has_work);
+                worker.cv.wait(lk, stoken, [&] { return has_work() || worker.peer_wakes; });
                 worker.sleeping = false;
+                worker.peer_wakes = false;
                 if (!has_work()) {
-                    return; // stop requested
+                    if (stoken.stop_requested()) {
+                        return;
+                    }
+                    continue;
                 }
             }
+            wake_peer = std::exchange(worker.wake_next, NoPeer);
             if (OrderedReady()) {
                 // Every chunk whose commands are recorded, in order.
                 do {
@@ -869,6 +891,10 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
                 worker.queued.store(worker.queue.size(), std::memory_order_release);
                 worker.busy = true;
             }
+        }
+        if (wake_peer != NoPeer) {
+            peer_wakes_done.fetch_add(1, std::memory_order_relaxed);
+            workers[wake_peer]->cv.notify_one();
         }
         if (!ordered.empty()) {
             for (auto& task : ordered) {

@@ -8,6 +8,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <memory>
+#include <thread>
 #include "video_core/renderer_vulkan/motion_history.h"
 
 #include "common/types.h"
@@ -35,25 +38,26 @@ public:
         return address_table;
     }
 
-    using DrawInfo = Motion::Draw;
-    u32 PrepareDraw(const DrawInfo& draw);
-    /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
-    bool Moving(const Motion::History::GateKey& key, u64 palette) {
-        return history.Moving(key, palette);
-    }
-    /// Index range and topology hash of an indexed draw, reused across frames.
-    template <class Scan>
-    Motion::IndexRangeCache::Result IndexRange(const Motion::IndexRangeCache::Key& key,
-                                               Scan&& scan) {
-        return index_ranges.Get(key, frame, scan);
-    }
+    struct DrawJob {
+        Motion::Draw draw;
+        Motion::History::GateKey gate;
+        u64 palette = 0;
+        u64 index_address = 0;
+        s32 base_vertex = 0;
+        u32 index_size = 0;
+        bool gated = false;
+        bool restart = false;
+        bool indices_valid = false;
+    };
+    u32 Draw(const DrawJob& job);
+    void Sync();
 
     /// Rendering of a motion pipeline: the motion attachment (render-target size).
     void Attach(RenderState& state, u32 width, u32 height);
 
     /// Start of a frame (display pass).
     void OnFrameStart();
-    void InvalidateHistory() { history.NextFrame(); history.NextFrame(); }
+    void InvalidateHistory();
 
     /// The motion image for the compose pass (layout General after this call) and whether it
     /// holds this frame's vectors at `width` x `height`.
@@ -94,6 +98,21 @@ private:
     /// destroyed once the GPU is done with it, without waiting).
     Target& GetTarget(u32 width, u32 height);
 
+    enum class JobKind : u8 { Draw, FrameStart, Invalidate };
+    struct Job {
+        JobKind kind = JobKind::Draw;
+        u32 param = 0;
+        DrawJob draw;
+    };
+    static constexpr u32 JobCapacity = 4096;
+    Motion::History::Allocation Evaluate(const DrawJob& job);
+    void WriteParam(u32 index, const Motion::History::Allocation& allocation);
+    void AdvanceHistory();
+    void Run(const Job& job);
+    void Post(const Job& job);
+    void WorkerLoop(std::stop_token stop);
+    void StopWorker();
+
     const Instance& instance;
     Scheduler& scheduler;
     bool enabled = false;
@@ -102,6 +121,7 @@ private:
     // element 0 all zero (motion off).
     static constexpr u32 FrameSlots = 4;
     static constexpr u32 ParamsPerFrame = 8192;
+    static_assert(1 + FrameSlots * ParamsPerFrame == Shader::MotionVectors::ParamsCapacity);
     // Positions (device local): two halves (current/previous frame) of vec4; element 0 is reserved.
     static constexpr u32 PositionsPerFrame = 4u << 20;
     Motion::History history{PositionsPerFrame};
@@ -120,9 +140,18 @@ private:
     vk::DescriptorSet address_set;
 
     u64 frame = 0;
+    u64 history_frame = 0;
     u32 params_used = 0;
     std::array<Target, MaxTargets> targets;
     const Target* read_target = nullptr; ///< of the last PrepareRead
+
+    bool async = false;
+    std::unique_ptr<Job[]> jobs;
+    alignas(64) std::atomic<u64> posted{0};
+    alignas(64) std::atomic<u64> done{0};
+    alignas(64) std::atomic<bool> worker_sleeping{false};
+    std::atomic<u32> worker_wake{0};
+    std::jthread worker;
 };
 
 } // namespace Vulkan

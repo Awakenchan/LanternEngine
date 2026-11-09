@@ -11,6 +11,9 @@
 
 namespace Lifter {
 
+static_assert(MotionParamsCapacity == Shader::MotionVectors::ParamsCapacity);
+static_assert(CaptureParamsCapacity == Shader::MotionVectors::CaptureParamsCapacity);
+
 namespace {
 
 template <class T>

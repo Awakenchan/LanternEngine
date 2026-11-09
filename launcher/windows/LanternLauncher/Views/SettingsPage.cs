@@ -107,7 +107,9 @@ namespace BloodborneLauncher.Views
 
             SettingCombo(SymbolRegular.ImageEdit24, L.T("Background"),
                 SettingRow.Classic ? L.T("Shown in the Modern layout (Classic's panes are solid)") : L.T("The picture behind the glass panes"),
-                new[] { new Choice(L.T("Purple lantern"), "lantern"), new Choice(L.T("Orange lantern"), "lantern-orange"), new Choice(L.T("Game artwork"), "game"), new Choice(L.T("Your picture"), "custom"), new Choice(L.T("None"), "none") },
+                new[] { new Choice(L.T("Purple lantern"), "lantern"), new Choice(L.T("Orange lantern"), "lantern-orange"), new Choice(L.T("Game artwork"), "game"), new Choice(L.T("Your picture"), "custom") }
+                    .Concat(OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ? new[] { new Choice(L.T("Windows Mica"), "mica") } : Array.Empty<Choice>())
+                    .Append(new Choice(L.T("None"), "none")).ToArray(),
                 "ui_background", changed: () =>
                 {
                     ShowAppearance();
@@ -149,6 +151,9 @@ namespace BloodborneLauncher.Views
                 })), out _portHint));
 
             Group(L.T("Launch"));
+            SettingCombo(SymbolRegular.XboxController24, L.T("Controller navigation"),
+                L.T("Move through the launcher with a controller: D-pad or left stick to move, A to choose, B to go back, LB and RB for the tabs, Start to play"),
+                PadNavigation.Modes, "pad_navigation", changed: () => { PadNavigation.Apply(); Ws.SaveSoon(); });
             SettingCombo(SymbolRegular.Rocket24, L.T("Start the game with"), null, Choices.LaunchMethods, "launch_method", changed: () => { ShowMethod(); Ws.SaveSoon(); });
 
             TextRow(SymbolRegular.Code24, L.T("Command"), L.T("A program to run instead of Bloodborne.exe --run, with the settings as environment variables"),

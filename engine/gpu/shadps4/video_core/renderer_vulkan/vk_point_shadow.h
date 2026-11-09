@@ -39,6 +39,14 @@ public:
     void OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId color1, const Inputs& inputs);
 
     void Flush(bool animate_noise);
+    [[nodiscard]] bool Pending() const noexcept {
+        return !tiles.empty();
+    }
+    void Ended(u64 hash);
+    [[nodiscard]] std::array<VAddr, 2> PendingAddresses() const;
+    void Kept() noexcept {
+        ++kept_draws;
+    }
 
     void OnFrameEnd();
 
@@ -52,7 +60,7 @@ private:
         vk::UniqueImageView view;
         u32 width = 0, height = 0;
     };
-    bool EnsureImage(OwnImage& own, u32 width, u32 height);
+    bool EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format format, const char* name);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -84,6 +92,20 @@ private:
     u32 batches = 0;
     u32 frame_tiles = 0;
     bool one_tile_batches = false;
+    bool merged = false;
+    u32 kept_draws = 0;
+    u32 lamp_pick = 1;
+    bool lamp_reuse = true;
+    OwnImage history[2];
+    std::array<bool, 2> history_laid_out{};
+    u32 history_index = 0;
+    bool history_written = false;
+    bool history_fresh = false;
+    std::array<float, 12> last_view{}, pending_view{};
+    std::array<float, 16> last_proj{}, pending_proj{};
+    bool last_valid = false, pending_valid = false;
+    u32 ended_by_draws = 0;
+    std::array<u64, 4> ending_hashes{};
     bool reported = false;
     float length_m = 2.5f;
     float thickness_m = 0.6f;

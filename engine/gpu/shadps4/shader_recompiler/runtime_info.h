@@ -89,6 +89,8 @@ struct MotionVectors {
     // resources; the extra set does not change their bindings or the 128-byte push ABI.
     static constexpr u32 DescriptorSet = 1;
     static constexpr u32 AddressBinding = 0;
+    static constexpr u32 ParamsCapacity = 1 + 4 * 8192;
+    static constexpr u32 CaptureParamsCapacity = 1 + 4 * 8192;
     struct Addresses {
         u64 params;
         u64 positions;

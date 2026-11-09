@@ -128,9 +128,9 @@ namespace BloodborneLauncher.Views
         }
 
         /// <summary>A picture in the icon's place (a trophy's own), <paramref name="size"/> pixels square.</summary>
-        public void SetPicture(string file, double size)
+        public void SetPicture(string file, double size, bool grey = false)
         {
-            if (Icon.Parent is not Grid grid || Picture(file, (int)(size * 2)) is not { } source) return;
+            if (Icon.Parent is not Grid grid || Picture(file, (int)(size * 2), grey) is not { } source) return;
             grid.Children.Add(new Image
             {
                 Source = source, Width = size, Height = size, Margin = Icon.Margin, VerticalAlignment = VerticalAlignment.Center,
@@ -139,17 +139,37 @@ namespace BloodborneLauncher.Views
         }
 
         /// <summary>A picture file decoded at <paramref name="pixels"/> wide; null if it cannot be read.</summary>
-        public static Avalonia.Media.Imaging.Bitmap? Picture(string file, int pixels)
+        public static Avalonia.Media.Imaging.Bitmap? Picture(string file, int pixels, bool grey = false)
         {
             try
             {
                 using var stream = System.IO.File.OpenRead(file);
-                return Avalonia.Media.Imaging.Bitmap.DecodeToWidth(stream, pixels);
+                var bitmap = Avalonia.Media.Imaging.Bitmap.DecodeToWidth(stream, pixels);
+                if (!grey) return bitmap;
+                using (bitmap) return Grey(bitmap);
             }
             catch (Exception)
             {
                 return null;
             }
+        }
+
+        private static unsafe Avalonia.Media.Imaging.Bitmap Grey(Avalonia.Media.Imaging.Bitmap source)
+        {
+            var size = source.PixelSize;
+            var target = new Avalonia.Media.Imaging.WriteableBitmap(size, source.Dpi, Avalonia.Platform.PixelFormat.Bgra8888, Avalonia.Platform.AlphaFormat.Premul);
+            using var frame = target.Lock();
+            source.CopyPixels(new PixelRect(size), frame.Address, frame.RowBytes * size.Height, frame.RowBytes);
+            for (var y = 0; y < size.Height; y++)
+            {
+                var pixel = (byte*)frame.Address + y * frame.RowBytes;
+                for (var x = 0; x < size.Width; x++, pixel += 4)
+                {
+                    var luma = (byte)((pixel[2] * 299 + pixel[1] * 587 + pixel[0] * 114) / 1000);
+                    pixel[0] = pixel[1] = pixel[2] = luma;
+                }
+            }
+            return target;
         }
 
         /// <summary>A long tooltip as a wrapped block, not one line across the screen.</summary>

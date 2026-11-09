@@ -1777,6 +1777,14 @@ void BufferCache::NoteResidencyUnused() {
     BbStats::residency_chunk_count.store(residency_chunks.size(), std::memory_order_relaxed);
 }
 
+static bool IdleDemoteAlways() {
+    static const bool always = [] {
+        const char* env = std::getenv("BB_VRAM_IDLE_ALWAYS");
+        return env && env[0] == '1';
+    }();
+    return always;
+}
+
 u32 BufferCache::VramIdleSeconds() {
     static const u32 seconds = [] {
         const char* env = std::getenv("BB_VRAM_IDLE_SECONDS");
@@ -1880,7 +1888,11 @@ void BufferCache::ProcessIdleBlocks() {
     // Blocks in VRAM whose 2 MiB were not bound for the idle time go back in place
     // (ProcessDemotions: only blocks of the game's direct memory without GPU-written data).
     const u64 tick = scheduler.CurrentTick();
+    const bool vram_room = level == 0 && instance.CanReportMemoryUsage() && !IdleDemoteAlways();
     for (const auto& range : resident_ranges) {
+        if (vram_room) {
+            break;
+        }
         if (!residency_chunks.contains(static_cast<VkDeviceMemory>(range.memory))) {
             continue; // in place
         }

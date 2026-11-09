@@ -134,6 +134,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
+        object_motion->Sync();
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
     });
@@ -170,9 +171,10 @@ void Rasterizer::PublishSignals() {
     bool was_empty;
     {
         std::scoped_lock lk{gpu_signals_mutex};
-        if (!gpu_signal_thread.joinable()) {
+        if (!gpu_signal_started) {
             gpu_signal_thread =
                 std::jthread([this](std::stop_token token) { GpuSignalLoop(token); });
+            gpu_signal_started = true;
         }
         was_empty = gpu_signals.empty();
         for (auto& pending : local_signals) {
@@ -200,9 +202,10 @@ void Rasterizer::SignalAfterGpu(std::function<void()> signal, VAddr label, u64 v
     bool was_empty;
     {
         std::scoped_lock lk{gpu_signals_mutex};
-        if (!gpu_signal_thread.joinable()) {
+        if (!gpu_signal_started) {
             gpu_signal_thread =
                 std::jthread([this](std::stop_token token) { GpuSignalLoop(token); });
+            gpu_signal_started = true;
         }
         was_empty = gpu_signals.empty();
         gpu_signals.push_back({scheduler.CurrentTick(), std::move(signal), label, value});
@@ -438,7 +441,7 @@ void Rasterizer::GpuWatchdog(u64 tick) {
     std::fflush(stdout);
 }
 
-inline const AmdGpu::Regs& Rasterizer::Regs() const {
+const AmdGpu::Regs& Rasterizer::Regs() const {
     return stage_regs ? *stage_regs : liverpool->regs;
 }
 
@@ -1460,8 +1463,12 @@ bool Rasterizer::NextPacketIsTask(OrderedTask task) const {
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     BB_SECTION(Packet);
     auto& self = *static_cast<Rasterizer*>(context);
+    const bool census_on = CensusWanted();
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         BB_SECTION(Task);
+        if (census_on) {
+            self.CensusEndRun(RunCensus::CutTask);
+        }
         self.buffer_cache.NewPacket();
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
         if (BbSections::Enabled()) {
@@ -1604,6 +1611,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     stage_regs = &regs;
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
+    if (census_on && (packet.kind == PacketKind::Special || cs || indirect)) {
+        self.CensusEndRun(cs ? RunCensus::CutDispatch : RunCensus::CutPacket);
+    }
     if (packet.kind == PacketKind::Special) {
         // A draw FilterDraw handles (fast clear elimination, resolve, depth copy, skip).
         FrameCapture::Poll();
@@ -1623,8 +1633,15 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                                 packet.is_indexed, *indirect);
     } else {
         SwapGxRegisters(regs, gx_swapped.data(), gx_count);
-        self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
-                        packet.is_indexed, packet.index_offset);
+        if (census_on) {
+            const auto mark = self.CensusBegin();
+            self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
+                            packet.is_indexed, packet.index_offset);
+            self.CensusDraw(mark);
+        } else {
+            self.DrawRecord(static_cast<const GraphicsPipeline*>(packet.pipeline), packet.prepared,
+                            packet.is_indexed, packet.index_offset);
+        }
         SwapGxRegisters(regs, gx_swapped.data(), gx_count);
     }
     Shader::Info::num_ud_snapshots = 0;
@@ -1872,6 +1889,80 @@ u32 Rasterizer::PrefetchDraw(const u8* data, u32 size) {
     return lines;
 }
 
+namespace {
+void CensusAdd(std::atomic<u64>& counter, u64 value) {
+    counter.store(counter.load(std::memory_order_relaxed) + value, std::memory_order_relaxed);
+}
+}
+
+bool Rasterizer::CensusWanted() {
+    static const bool wanted = [] {
+        const char* env = std::getenv("LANTERN_RUN_CENSUS");
+        return env && env[0] ? env[0] != '0' : BbSections::Enabled();
+    }();
+    return wanted;
+}
+
+Rasterizer::CensusMark Rasterizer::CensusBegin() {
+    const auto& paths = VideoCore::BufferCache::obtain_paths;
+    census_other = false;
+    return {scheduler.PassesBegun(),
+            paths[5],
+            paths[1] + paths[4],
+            paths[2],
+            texture_set_misses + texture_set_revalidated,
+            begin_memo_misses,
+            __rdtsc()};
+}
+
+void Rasterizer::CensusEndRun(u32 cut) {
+    auto& c = census;
+    if (!c.run) {
+        return;
+    }
+    CensusAdd(c.cuts[cut], 1);
+    CensusAdd(c.runs, 1);
+    CensusAdd(c.lengths[c.run < 8 ? 0 : c.run < 16 ? 1 : c.run < 64 ? 2 : 3], c.run);
+    if (c.run >= 8) {
+        CensusAdd(c.long_runs, 1);
+        CensusAdd(c.long_draws, c.run);
+        CensusAdd(c.long_cycles, c.run_cycles);
+    }
+    c.run = 0;
+    c.run_cycles = 0;
+}
+
+void Rasterizer::CensusDraw(const CensusMark& mark) {
+    const u64 spent = __rdtsc() - mark.start;
+    const auto& paths = VideoCore::BufferCache::obtain_paths;
+    auto& c = census;
+    CensusAdd(c.draws, 1);
+    u32 cut = RunCensus::CutCount;
+    if (scheduler.PassesBegun() != mark.passes) {
+        cut = RunCensus::CutPass;
+    } else if (paths[5] != mark.uploads) {
+        cut = RunCensus::CutUpload;
+    } else if (texture_set_misses + texture_set_revalidated != mark.textures) {
+        cut = RunCensus::CutTexture;
+    } else if (begin_memo_misses != mark.targets) {
+        cut = RunCensus::CutTarget;
+    } else if (paths[1] + paths[4] != mark.written) {
+        cut = RunCensus::CutWrite;
+    } else if (census_other) {
+        cut = RunCensus::CutOther;
+    }
+    if (cut != RunCensus::CutCount) {
+        CensusAdd(c.dirty_cycles, spent);
+        CensusEndRun(cut);
+        return;
+    }
+    CensusAdd(c.clean, 1);
+    CensusAdd(c.clean_cycles, spent);
+    CensusAdd(c.streamed, paths[2] != mark.streamed ? 1 : 0);
+    ++c.run;
+    c.run_cycles += spent;
+}
+
 void Rasterizer::PrintPipeStats() {
     static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
     if (!stats || (draw_pipe->packets & 1023) != 0) {
@@ -2019,6 +2110,55 @@ void Rasterizer::PrintPipeStats() {
                     draws > 0 ? lead / draws : 0.0, take(BbStats::lookahead_behind) / seconds,
                     take(BbStats::lookahead_waits) / seconds, 100.0 * busy / cycles,
                     take(BbStats::lookahead_recovered));
+    }
+    if (CensusWanted()) {
+        auto& c = census;
+        static std::array<u64, 32> last_census{};
+        u32 slot = 0;
+        const auto delta = [&](const std::atomic<u64>& counter) {
+            const u64 value = counter.load(std::memory_order_relaxed);
+            const u64 grown = value - last_census[slot];
+            last_census[slot++] = value;
+            return double(grown);
+        };
+        const double draws = delta(c.draws);
+        const double clean = delta(c.clean);
+        const double streamed = delta(c.streamed);
+        const double clean_cycles = delta(c.clean_cycles);
+        const double dirty_cycles = delta(c.dirty_cycles);
+        const double long_runs = delta(c.long_runs);
+        const double long_draws = delta(c.long_draws);
+        const double long_cycles = delta(c.long_cycles);
+        std::array<double, 4> lengths{};
+        for (u32 i = 0; i < lengths.size(); ++i) {
+            lengths[i] = delta(c.lengths[i]);
+        }
+        std::array<double, RunCensus::CutCount> cuts{};
+        for (u32 i = 0; i < cuts.size(); ++i) {
+            cuts[i] = delta(c.cuts[i]);
+        }
+        const double us = 1e6 * seconds / cycles;
+        const double dirty = draws - clean;
+        const double stage_b = double(busy - last_busy);
+        const auto share = [&](double part) { return draws > 0 ? 100.0 * part / draws : 0.0; };
+        std::printf("  runs for workers: %.0f%% of %.0f draws/s clean (%.2f us each, the others "
+                    "%.2f us), %.0f%% in runs of 8 or more (%.0f runs/s, %.1f draws each, %.1f%% "
+                    "of stage B's time: two workers would take up to %.1f%% off it); draws by run "
+                    "length 1-7 %.0f%%, 8-15 %.0f%%, 16-63 %.0f%%, 64+ %.0f%%; runs ended by",
+                    share(clean), draws / seconds, clean > 0 ? clean_cycles * us / clean : 0.0,
+                    dirty > 0 ? dirty_cycles * us / dirty : 0.0, share(long_draws),
+                    long_runs / seconds, long_runs > 0 ? long_draws / long_runs : 0.0,
+                    stage_b > 0 ? 100.0 * long_cycles / stage_b : 0.0,
+                    stage_b > 0 ? 100.0 * long_cycles * 2.0 / 3.0 / stage_b : 0.0,
+                    share(lengths[0]), share(lengths[1]), share(lengths[2]), share(lengths[3]));
+        static constexpr const char* cut_names[RunCensus::CutCount] = {
+            "task", "dispatch", "other packet", "new pass", "upload",
+            "texture lookup", "targets", "GPU-written buffer", "other"};
+        for (u32 i = 0; i < cuts.size(); ++i) {
+            std::printf(" %s %.0f/s", cut_names[i], cuts[i] / seconds);
+        }
+        std::printf("; clean draws streaming constants %.0f%%\n",
+                    clean > 0 ? 100.0 * streamed / clean : 0.0);
     }
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};
@@ -2365,6 +2505,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // target is that frame.
     if (camera_motion->Enabled() && regs.color_buffers[0] &&
         FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+        census_other = true;
         scene_started = false;
         // bbport: native HDR output: the gain map of the frame this pass copies, for this
         // display buffer (before OnFrameStart forgets the frame's UI phase).
@@ -2383,6 +2524,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
     }
+    census_other |= FrameCapture::Active();
     bind_prepared = used_prepared;
     motion_draw = (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexOutputs) != 0;
     capture_draw = (pipeline->GetGraphicsKey().motion_vectors & Shader::MotionVectors::VertexCapture) != 0;
@@ -2470,54 +2612,34 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                                palette);
             }
         }
-        push_data.motion_param = 0;
-        if (!gated || object_motion->Moving({.shader = vs.pgm_hash,
-                                             .geometry = motion_geometry,
-                                             .indices = index_address,
-                                             .index_count = regs.num_indices,
-                                             .instances = regs.num_instances.NumInstances(),
-                                             .first_instance = first_instance},
-                                            palette)) {
-            Motion::VertexRange range{base_vertex, regs.num_indices};
-            u64 topology = 0;
-            if (is_indexed) {
-                range = {};
-                const u64 bytes = u64(regs.num_indices) * index_size;
-                if (index_address && memory->IsValidGpuMapping(index_address, 0) &&
-                    memory->ClampRangeSize(index_address, bytes) == bytes) {
-                    const bool restart = regs.enable_primitive_restart != 0;
-                    const u32 count = regs.num_indices;
-                    const auto scanned = object_motion->IndexRange(
-                        {index_address, count, index_size, s32(base_vertex), restart}, [&] {
-                            const auto* data = reinterpret_cast<const void*>(index_address);
-                            const auto scan_range =
-                                index_size == 2
-                                    ? Motion::IndexedRange(
-                                          std::span(static_cast<const u16*>(data), count),
-                                          s32(base_vertex), restart)
-                                    : Motion::IndexedRange(
-                                          std::span(static_cast<const u32*>(data), count),
-                                          s32(base_vertex), restart);
-                            return Motion::IndexRangeCache::Result{scan_range,
-                                                                   XXH3_64bits(data, bytes)};
-                        });
-                    range = scanned.range;
-                    topology = scanned.topology;
-                }
-            }
-            push_data.motion_param = object_motion->PrepareDraw({
-                .shader = vs.pgm_hash,
-                .geometry = motion_geometry,
-                .indices = index_address,
-                .topology = topology,
-                .index_count = regs.num_indices,
-                .instances = regs.num_instances.NumInstances(),
-                .first_instance = first_instance,
-                .vertices = range,
-            });
-        }
+        const u32 instances = regs.num_instances.NumInstances();
+        const u64 index_bytes = u64(regs.num_indices) * index_size;
+        push_data.motion_param = object_motion->Draw({
+            .draw = {.shader = vs.pgm_hash,
+                     .geometry = motion_geometry,
+                     .indices = index_address,
+                     .index_count = regs.num_indices,
+                     .instances = instances,
+                     .first_instance = first_instance},
+            .gate = {.shader = vs.pgm_hash,
+                     .geometry = motion_geometry,
+                     .indices = index_address,
+                     .index_count = regs.num_indices,
+                     .instances = instances,
+                     .first_instance = first_instance},
+            .palette = palette,
+            .index_address = index_address,
+            .base_vertex = s32(base_vertex),
+            .index_size = is_indexed ? index_size : 0u,
+            .gated = gated,
+            .restart = regs.enable_primitive_restart != 0,
+            .indices_valid = is_indexed && index_address &&
+                             memory->IsValidGpuMapping(index_address, 0) &&
+                             memory->ClampRangeSize(index_address, index_bytes) == index_bytes,
+        });
     }
     if (capture_draw) {
+        census_other = true;
         EffectsCaptureDraw(regs, pipeline, is_indexed, index_offset);
     }
     if (effects_wanted) {
@@ -2554,6 +2676,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // is missing for those frames.
     vk::Pipeline handle = pipeline->HandleIfReady();
     if (!handle) [[unlikely]] {
+        census_other = true;
         if (SkipUncompiledDraw(pipeline)) {
             ResetBindings(false);
             scheduler.KickRecording();
@@ -2576,6 +2699,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // vkCmdDraw (inside the open render pass; vk_occlusion.h).
     const auto query = occlusion ? occlusion->BeginDraw(push_data.scene_size)
                                  : Occlusion::DrawQuery{};
+    if (query.pool) {
+        census_other = true;
+    }
     scheduler.RecordCrumb(crumb, [=](vk::CommandBuffer cmdbuf) {
         if (handle) { // null: bound by the command before (BindWhenCompiled)
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
@@ -3658,9 +3784,7 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
             const u64 part = key_of(buffer.base_address);
             key = part ? (key ^ part) * 0x100000001B3ull | 1 : 0;
         }
-        std::tie(range.buffer, range.offset) =
-            key ? BindByObject(key, range.base_address, size)
-                : buffer_cache.ObtainBuffer(range.base_address, size, false);
+        std::tie(range.buffer, range.offset) = BindVertexRange(key, range.base_address, size);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
     }
 
@@ -3693,6 +3817,21 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     v.num_buffers = static_cast<u32>(guest_buffers.size());
 }
 
+std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindVertexRange(u64 key, VAddr base, u64 size) {
+    static const bool by_range = [] {
+        const char* env = std::getenv("LANTERN_RANGE_BINDS");
+        return env && env[0] == '1';
+    }();
+    if (key) {
+        return BindByObject(key, base, size);
+    }
+    if (by_range && size != 0) {
+        ++range_binds;
+        return BindByObject(RangeBindKey, base, size);
+    }
+    return buffer_cache.ObtainBuffer(base, u32(size), false);
+}
+
 std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindByObject(u64 key, VAddr base, u64 size) {
     const u64 slot_key = (key ^ base ^ (size << 32)) * 0x9E3779B97F4A7C15ull;
     auto& bind = object_binds[slot_key >> 52];
@@ -3701,6 +3840,7 @@ std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindByObject(u64 key, VAddr
         if (!BbEngine::GxRecords::Compared() && (++object_bind_checks & 63) != 0) {
             buffer_cache.NoteBound(base, size);
             BbEngine::GxRecords::NoteBind(true, false, true, base, size);
+            range_hits += key == RangeBindKey;
             return {bind.buffer, bind.offset};
         }
         const u64 uploads = VideoCore::BufferCache::obtain_paths[5];
@@ -3708,6 +3848,10 @@ std::pair<const VideoCore::Buffer*, u64> Rasterizer::BindByObject(u64 key, VAddr
         const bool same = found.first == bind.buffer && found.second == bind.offset &&
                           VideoCore::BufferCache::obtain_paths[5] == uploads;
         BbEngine::GxRecords::NoteBind(same, true, same, base, size);
+        if (key == RangeBindKey) {
+            ++range_checked;
+            range_differ += !same;
+        }
         if (!same) {
             bind.key = 0;
         }
@@ -3746,9 +3890,7 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
 
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
-    const auto [buffer, offset] =
-        packet_index_key ? BindByObject(packet_index_key, index_address, index_buffer_size)
-                         : buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
+    const auto [buffer, offset] = BindVertexRange(packet_index_key, index_address, index_buffer_size);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
     index_bind = {buffer->Handle(), offset, index_type};
 }
@@ -4361,6 +4503,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                               Shader::Backend::Bindings& binding, u32& write_index,
                               bool& barrier, bool on_helper) {
     BB_SECTION(BindTextures);
+    static const bool empty_fast = [] {
+        const char* env = std::getenv("LANTERN_EMPTY_TEXTURE_STAGES");
+        return !(env && env[0] == '0');
+    }();
+    if (empty_fast && stage.images.empty()) {
+        if (!on_helper) {
+            ++texture_set_skip[1];
+        }
+        BindSamplers(stage, prepared, binding, write_index, false);
+        return;
+    }
     const u32 first_image_idx = image_infos.size();
     TextureSet* set_slot = nullptr;
     // bbport: a stage the draw-preparation workers did not reach reads its T#s and their
@@ -5221,6 +5374,14 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     // bbport: RenderStateMemo (see BeginMemo).
     const bool memo_on = !BbToggle::Disabled(BbToggle::RenderStateMemo) && !FrameCapture::Active();
     if (BbStats::enabled && ((begin_memo_hits + begin_memo_misses) & 0x3FFFF) == 0x3FFFF) {
+        if (range_binds) {
+            std::printf("Vertex and index binds by range: %llu looked up, %llu reused (%llu checked, "
+                        "%llu differ)\n",
+                        static_cast<unsigned long long>(range_binds),
+                        static_cast<unsigned long long>(range_hits),
+                        static_cast<unsigned long long>(range_checked),
+                        static_cast<unsigned long long>(range_differ));
+        }
         std::printf("Render state memo: %llu hits (%llu revalidated), %llu misses; texture sets: "
                     "%llu hits (%llu revalidated), %llu misses; lookups revalidated: textures "
                     "%llu, targets %llu\n",

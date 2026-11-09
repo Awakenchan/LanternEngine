@@ -80,7 +80,7 @@ class NativeFrameRateTests(unittest.TestCase):
         return image
 
     def engine_writes(self, fps):
-        names = ['90 FPS++', 'Sprint Fix (High FPS)'] if fps > 60 else ['60 FPS++']
+        names = ['90 FPS++', 'Sprint Fix (High FPS)'] if fps > 60 else ['60 FPS++', 'Sprint Fix (High FPS)']
         image = Image(self.eboot)
         for n in names:
             for a, d in self.lists[n]:
@@ -97,8 +97,14 @@ class NativeFrameRateTests(unittest.TestCase):
         for fps in (60, 120, 144):
             start, engine = self.start_writes(fps), self.engine_writes(fps)
             touched = sorted(set(start.bytes) | set(engine.bytes))
-            differ = [hex(a) for a in touched if start.get(a, 1) != engine.get(a, 1)]
+            wall = {a + i for a, d in self.lists['Sprint Fix (High FPS)'] for i in range(len(d))} if fps <= 60 else set()
+            differ = [hex(a) for a in touched if a not in wall and start.get(a, 1) != engine.get(a, 1)]
             self.assertEqual(differ, [], f'{fps} FPS')
+
+    def test_the_engine_measures_wall_speed_at_60(self):
+        engine = self.engine_writes(60)
+        for a, d in self.lists['Sprint Fix (High FPS)']:
+            self.assertEqual(engine.get(a, len(d)), d)
 
 
 if __name__ == '__main__':

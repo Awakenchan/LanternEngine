@@ -670,6 +670,7 @@ void PipelineCache::WarmUp() {
     };
     // bbport (docs/pipeline_compiles.md): how long the start waits for the cached pipelines.
     const auto warmup_start = std::chrono::steady_clock::now();
+    database.ReadAhead();
     // The pipelines' state is rebuilt here, one after the other: selection, programs, SRT walker
     // allocation and archive reads are shared. Their creation by the driver (100-300 ms each with
     // its cache cold, after every compiler or driver change) is collected (WarmupJobs) and runs

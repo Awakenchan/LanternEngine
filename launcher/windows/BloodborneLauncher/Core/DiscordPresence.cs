@@ -118,7 +118,7 @@ namespace BloodborneLauncher.Core
             if (look.Buttons.Count > 0)
             {
                 var buttons = new JsonArray();
-                foreach (var (label, url) in look.Buttons) buttons.Add(new JsonObject { ["label"] = label, ["url"] = url });
+                foreach (var (label, url) in look.Buttons) buttons.Add((JsonNode)new JsonObject { ["label"] = label, ["url"] = url });
                 activity["buttons"] = buttons;
             }
             return activity;

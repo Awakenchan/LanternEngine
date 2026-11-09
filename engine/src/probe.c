@@ -9,6 +9,7 @@
 #include "sys/sys.h"
 #include "gpu/bbgpu.h"
 #include "respawn_patch.h"
+#include "isa_rewrite.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -45,13 +46,16 @@ static LinkedModule modules[16];
 static uint64_t module_count;
 static int entered_game;
 static int gpu_enabled;
+static unsigned isa_missing_sets;
+static IsaTable *isa_table;
+static unsigned char *isa_stubs;
+static size_t isa_stubs_size;
 int vulkan_smoke(void);
 
 static __attribute__((noreturn)) void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 
 static void check_cpu(void) {
     const char *skip = getenv("BB_SKIP_CPU_CHECK");
-    if (skip && !strcmp(skip, "1")) return;
     unsigned a, b, c, d, leaf1_c = 0, leaf7_b = 0, ext1_c = 0;
     if (__get_cpuid(1, &a, &b, &c, &d)) leaf1_c = c;
     if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) leaf7_b = b;
@@ -62,23 +66,40 @@ static void check_cpu(void) {
         __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
         avx = (lo & 6) == 6;
     }
-    const struct { int present; const char *name; } features[] = {
-        {avx, "AVX"}, {(leaf7_b & bit_BMI) != 0, "BMI1"}, {(leaf1_c & bit_MOVBE) != 0, "MOVBE"},
-        {(ext1_c & bit_LZCNT) != 0, "LZCNT"}, {(leaf1_c & bit_POPCNT) != 0, "POPCNT"},
+
+    const struct { int present; const char *name; } fatal_features[] = {
+        {avx, "AVX"}, {(leaf1_c & bit_POPCNT) != 0, "POPCNT"},
         {(leaf1_c & bit_SSE4_2) != 0, "SSE4.2"},
     };
     char missing[64] = "";
-    for (unsigned i = 0; i < sizeof(features) / sizeof(features[0]); ++i) {
-        if (features[i].present) continue;
+    for (unsigned i = 0; i < sizeof(fatal_features) / sizeof(fatal_features[0]); ++i) {
+        if (fatal_features[i].present) continue;
         if (missing[0]) strcat(missing, ", ");
-        strcat(missing, features[i].name);
+        strcat(missing, fatal_features[i].name);
     }
-    if (!missing[0]) return;
-    fprintf(stderr,
-            "ERROR: this CPU lacks %s. Bloodborne's code was compiled for the PS4's CPU and uses "
-            "these instructions directly: it needs an Intel Haswell (4th generation Core, 2013) or "
-            "newer, or an AMD Ryzen. BB_SKIP_CPU_CHECK=1 starts anyway.\n", missing);
-    exit(1);
+    if (missing[0] && (!skip || strcmp(skip, "1"))) {
+        fprintf(stderr,
+                "ERROR: this CPU lacks %s. Bloodborne's baseline instruction set requires AVX, POPCNT "
+                "and SSE4.2. BB_SKIP_CPU_CHECK=1 bypasses this baseline check.\n", missing);
+        exit(1);
+    }
+    if (missing[0])
+        fprintf(stderr, "WARNING: BB_SKIP_CPU_CHECK=1 bypasses missing baseline features: %s\n", missing);
+
+    isa_missing_sets = 0;
+    if (!(leaf1_c & bit_MOVBE)) isa_missing_sets |= CPU_SET_MOVBE;
+    if (!(leaf7_b & bit_BMI)) isa_missing_sets |= CPU_SET_BMI1;
+    if (!(ext1_c & bit_LZCNT)) isa_missing_sets |= CPU_SET_LZCNT;
+
+    if (isa_missing_sets) {
+        char absent[32] = "";
+        if (isa_missing_sets & CPU_SET_MOVBE) strcat(absent, "MOVBE");
+        if (isa_missing_sets & CPU_SET_BMI1) strcat(absent, absent[0] ? ", BMI1" : "BMI1");
+        if (isa_missing_sets & CPU_SET_LZCNT) strcat(absent, absent[0] ? ", LZCNT" : "LZCNT");
+        printf("CPU: missing %s; enabling instruction compatibility rewriting\n", absent);
+    } else {
+        puts("CPU: native MOVBE, BMI1 and LZCNT; instruction rewriting disabled");
+    }
 }
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
@@ -151,6 +172,33 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     ucontext_t *uc = context;
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    if (sig == SIGTRAP && isa_table && rip) {
+        IsaRegs regs = {0};
+        greg_t *g = uc->uc_mcontext.gregs;
+        regs.rflags = (uint64_t)g[REG_EFL];
+        regs.gpr[0] = (uint64_t)g[REG_RAX]; regs.gpr[1] = (uint64_t)g[REG_RCX];
+        regs.gpr[2] = (uint64_t)g[REG_RDX]; regs.gpr[3] = (uint64_t)g[REG_RBX];
+        regs.gpr[4] = (uint64_t)g[REG_RSP]; regs.gpr[5] = (uint64_t)g[REG_RBP];
+        regs.gpr[6] = (uint64_t)g[REG_RSI]; regs.gpr[7] = (uint64_t)g[REG_RDI];
+        regs.gpr[8] = (uint64_t)g[REG_R8]; regs.gpr[9] = (uint64_t)g[REG_R9];
+        regs.gpr[10] = (uint64_t)g[REG_R10]; regs.gpr[11] = (uint64_t)g[REG_R11];
+        regs.gpr[12] = (uint64_t)g[REG_R12]; regs.gpr[13] = (uint64_t)g[REG_R13];
+        regs.gpr[14] = (uint64_t)g[REG_R14]; regs.gpr[15] = (uint64_t)g[REG_R15];
+        uintptr_t next_rip = 0;
+        if (isa_rewrite_trap(isa_table, rip - 1, &regs, &next_rip)) {
+            g[REG_RAX] = (greg_t)regs.gpr[0]; g[REG_RCX] = (greg_t)regs.gpr[1];
+            g[REG_RDX] = (greg_t)regs.gpr[2]; g[REG_RBX] = (greg_t)regs.gpr[3];
+            g[REG_RSP] = (greg_t)regs.gpr[4]; g[REG_RBP] = (greg_t)regs.gpr[5];
+            g[REG_RSI] = (greg_t)regs.gpr[6]; g[REG_RDI] = (greg_t)regs.gpr[7];
+            g[REG_R8] = (greg_t)regs.gpr[8]; g[REG_R9] = (greg_t)regs.gpr[9];
+            g[REG_R10] = (greg_t)regs.gpr[10]; g[REG_R11] = (greg_t)regs.gpr[11];
+            g[REG_R12] = (greg_t)regs.gpr[12]; g[REG_R13] = (greg_t)regs.gpr[13];
+            g[REG_R14] = (greg_t)regs.gpr[14]; g[REG_R15] = (greg_t)regs.gpr[15];
+            g[REG_EFL] = (greg_t)regs.rflags;
+            g[REG_RIP] = (greg_t)next_rip;
+            return;
+        }
+    }
     char line[512];
     Dl_info where;
     if (rip - (uintptr_t)image < 0x10000000)
@@ -539,6 +587,30 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *e) {
         if (!(e->ContextRecord->Dr7 & (3u << 16))) e->ContextRecord->EFlags |= 0x10000;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
+    if (r->ExceptionCode == EXCEPTION_BREAKPOINT && isa_table && e->ContextRecord->Rip) {
+        CONTEXT *c = e->ContextRecord;
+        IsaRegs regs = {0};
+        regs.rflags = c->EFlags;
+        regs.gpr[0] = c->Rax; regs.gpr[1] = c->Rcx; regs.gpr[2] = c->Rdx; regs.gpr[3] = c->Rbx;
+        regs.gpr[4] = c->Rsp; regs.gpr[5] = c->Rbp; regs.gpr[6] = c->Rsi; regs.gpr[7] = c->Rdi;
+        regs.gpr[8] = c->R8; regs.gpr[9] = c->R9; regs.gpr[10] = c->R10; regs.gpr[11] = c->R11;
+        regs.gpr[12] = c->R12; regs.gpr[13] = c->R13; regs.gpr[14] = c->R14; regs.gpr[15] = c->R15;
+        uintptr_t next_rip = 0;
+        uintptr_t rip = (uintptr_t)c->Rip;
+        /* Windows reports the breakpoint RIP at the INT3 byte on some paths, while
+         * other paths report the following byte. Accept either convention. */
+        int handled = isa_rewrite_trap(isa_table, rip - 1, &regs, &next_rip);
+        if (!handled) handled = isa_rewrite_trap(isa_table, rip, &regs, &next_rip);
+        if (handled) {
+            c->Rax = regs.gpr[0]; c->Rcx = regs.gpr[1]; c->Rdx = regs.gpr[2]; c->Rbx = regs.gpr[3];
+            c->Rsp = regs.gpr[4]; c->Rbp = regs.gpr[5]; c->Rsi = regs.gpr[6]; c->Rdi = regs.gpr[7];
+            c->R8 = regs.gpr[8]; c->R9 = regs.gpr[9]; c->R10 = regs.gpr[10]; c->R11 = regs.gpr[11];
+            c->R12 = regs.gpr[12]; c->R13 = regs.gpr[13]; c->R14 = regs.gpr[14]; c->R15 = regs.gpr[15];
+            c->EFlags = (DWORD)regs.rflags;
+            c->Rip = (DWORD64)next_rip;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
     if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
         if (gpu_enabled && bbgpu_handle_fault(e, (void *)r->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
         if (runtime_fault_recover) {
@@ -820,7 +892,7 @@ int main(int argc, char **argv) {
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL); sigaction(SIGTRAP, &sa, NULL);
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
@@ -932,6 +1004,21 @@ int main(int argc, char **argv) {
 #endif
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    if (isa_missing_sets) {
+        char table_path[4096];
+        const char *slash = strrchr(argv[1], '/');
+#ifdef _WIN32
+        const char *backslash = strrchr(argv[1], '\\');
+        if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
+        if (slash) snprintf(table_path, sizeof(table_path), "%.*s%cisa-rewrite.bin",
+                            (int)(slash - argv[1]), argv[1], *slash);
+        else snprintf(table_path, sizeof(table_path), "isa-rewrite.bin");
+        isa_table = isa_table_load(table_path);
+        if (!isa_table) fail("CPU needs MOVBE/BMI1/LZCNT emulation but the ISA rewrite table is unavailable");
+        if (isa_table_matches(isa_table, image, size))
+            fail("ISA rewrite table does not match the linked boot image");
+    }
     if (!cpu_only) {
         char title[128]="Bloodborne", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
@@ -994,6 +1081,16 @@ int main(int argc, char **argv) {
     printf("Guest thread pointer reads: %" PRIu64 " use TEB TLS slot %u\n", patch_tls_reads(segments, ns), runtime_win_tls_slot());
 #endif
     if (!cpu_only) bbgpu_patch_image(image, size);
+    if (isa_table) {
+        isa_stubs_size = round_page(isa_stub_area_size(isa_table));
+        if (isa_stubs_size) isa_stubs = allocate(isa_stubs_size);
+        IsaReport report = isa_rewrite_apply(isa_table, image, isa_stubs, isa_missing_sets);
+        if (report.unsupported_needed)
+            fail("the linked image contains MOVBE/BMI1/LZCNT encodings that this compatibility layer cannot rewrite");
+        if (isa_stubs && isa_stubs_size) protect(isa_stubs, isa_stubs_size, 5);
+        printf("ISA: rewrote %u sites (%u jmp, %u relocated, %u int3); %u changed sites skipped\n",
+               report.rewritten, report.jmp, report.relocated, report.int3, report.skipped);
+    }
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

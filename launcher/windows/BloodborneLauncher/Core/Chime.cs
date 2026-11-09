@@ -95,6 +95,14 @@ namespace BloodborneLauncher.Core
                         PlayMedia(customFile, Math.Clamp(volumePercent, 0, 100) / 100.0);
                         return;
                     }
+#else
+                    if (scaled == null)
+                    {
+                        var volume = Math.Clamp(volumePercent, 0, 100) * 10;
+                        var file = Path.GetFullPath(customFile);
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() => PlayMci(file, volume));
+                        return;
+                    }
 #endif
                     (scaled != null ? new SoundPlayer(new MemoryStream(scaled)) : new SoundPlayer(customFile)).Play();
                     return;
@@ -107,6 +115,26 @@ namespace BloodborneLauncher.Core
                 // No audio device: the notification still shows.
             }
         }
+
+#if AVALONIA
+        [System.Runtime.InteropServices.DllImport("winmm.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, EntryPoint = "mciSendStringW")]
+        private static extern int MciSend(string command, IntPtr result, int length, IntPtr callback);
+
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+        private static void PlayMci(string file, int volume)
+        {
+            try
+            {
+                MciSend("close lanternchime", IntPtr.Zero, 0, IntPtr.Zero);
+                if (MciSend($"open \"{file}\" type mpegvideo alias lanternchime", IntPtr.Zero, 0, IntPtr.Zero) != 0) return;
+                MciSend($"setaudio lanternchime volume to {volume}", IntPtr.Zero, 0, IntPtr.Zero);
+                MciSend("play lanternchime", IntPtr.Zero, 0, IntPtr.Zero);
+            }
+            catch
+            {
+            }
+        }
+#endif
 
 #if !AVALONIA
         // Kept until the sound ends: a collected player stops.

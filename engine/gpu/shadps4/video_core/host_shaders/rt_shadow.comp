@@ -26,6 +26,8 @@ float cb(int i) { return uintBitsToFloat(cbuf.d[base + uint(i)]); }
 vec4 row(int i) { return vec4(cb(i), cb(i + 1), cb(i + 2), cb(i + 3)); }
 
 mat4 invMat;
+shared mat4 shared_inverse;
+shared vec3 shared_sun;
 
 vec3 viewPosAt(vec2 uv, float depth) {
     vec4 v = invMat * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
@@ -70,6 +72,13 @@ float noise(vec2 pixel) {
 
 void main() {
     base = (buf_off & 0xffu) >> 2;
+    if (gl_LocalInvocationIndex == 0u) {
+        invMat = transpose(mat4(row(0), row(4), row(8), row(12)));
+        shared_inverse = invMat;
+        shared_sun = sunDirection();
+    }
+    barrier();
+    invMat = shared_inverse;
     const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(pixel, ivec2(size)))) {
         return;
@@ -80,9 +89,8 @@ void main() {
         imageStore(raw_img, pixel, vec4(1.0));
         return;
     }
-    invMat = transpose(mat4(row(0), row(4), row(8), row(12)));
     const vec3 P = viewPosAt(uv, d0);
-    const vec3 dir = sunDirection();
+    const vec3 dir = shared_sun;
     const vec3 n = surfaceNormal(uv, P, 1.0 / size);
     const float reach = bias_m + 0.0015 * P.z;
     if (dot(n, dir) <= 0.0 && n != vec3(0.0)) {

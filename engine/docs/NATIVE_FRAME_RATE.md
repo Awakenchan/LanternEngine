@@ -52,6 +52,24 @@ kind; a site that holds neither is left alone and counted in the log.
   down on a 30 FPS stall (loading screens). They are written through the hook layer's `WriteCode`.
 - Engine switches: `LANTERN_FRAMERATE` (native frame rate) and `LANTERN_FRAMERATE_FOLLOW` (steps follow the rate
   held; off keeps every value at the target), both on.
+- The blocked-movement check (`0x1514C24`, the "Sprint Fix" list) is written at every rate above 30, 60 included,
+  whether the engine or the start writes the lists: the game multiplies this frame's distance by 30 and calls the
+  hunter blocked below 1 m/s, which at 60 FPS meant below 2 m/s and cut the movement to half (see
+  `notes/ground-stuck-high-fps.md`). `LANTERN_FRAMERATE_WALL_SPEED=0` leaves 60 FPS as before.
+- The steep-ground slide (`0x1A46BC0`) adds 1.0 m/s a frame (`0x5128370`) while the ground is steeper than 35
+  degrees and decays it by 0.65 a frame (`0x5128374`); both follow the frame time like the data steps:
+  `30 / r` and `0.65^(30 / r)`. `LANTERN_FRAMERATE_SLOPE=0` leaves the game's per-frame values.
+  The gain is not spread over frames but given at the console's sampling: the game's own 1.0 on a frame where a
+  1/30 s tick has passed and 0 between ticks (`LANTERN_FRAMERATE_SLOPE_TICK`, on; 0 gives `30 / r` every frame; the user saw the legs stay out of the elevator step with it, 2026-11-09).
+  The ground trace at 120 FPS showed the per-frame check holding the hunter on a step's corner for 15 frames
+  (pushed back within 8 ms), against 1-3 frames at 30, and the legs 3-10 cm further into the step
+  (`notes/ground-stuck-high-fps.md`, Part 4).
+- The physics world (`0x17F99D0`, the hknp step input at `0x17F9B71`) steps with the same time the characters
+  get each frame: the flipper's measured time (`+0x264`), at least its shortest step (`+0x18`), at most the game's
+  1/30 (`0x4926364`), the frame cave's own clamp. Held at 1/target it ran slower than the characters whenever the
+  game fell below the target, and a hunter riding an elevator shook against its floor. The code goes in the
+  lock-failure print the uncapped list also uses (`0x17F9CA9`, its branch at `0x17F9BDE` made a nop). 60, 90 and
+  120 only; uncapped keeps its list's 1/60 cap. `LANTERN_FRAMERATE_WORLD_STEP=0` holds it at 1/target.
 
 ## Live steps (tried, taken out)
 

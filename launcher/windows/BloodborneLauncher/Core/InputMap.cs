@@ -179,7 +179,7 @@ namespace BloodborneLauncher.Core
         private static readonly Lazy<HashSet<string>> KeyNames = new(() =>
         {
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (Key key in Enum.GetValues(typeof(Key)))
+            foreach (var key in Enum.GetValues<Key>())
                 if (SdlKeyName(key) is { } name) names.Add(name);
             return names;
         });

@@ -1101,6 +1101,9 @@ namespace BloodborneLauncher
             try
             {
                 ws.SaveNow();
+                var savesRoot = GameEnvironment.SavesRoot(ws.Settings);
+                if (await System.Threading.Tasks.Task.Run(() => SaveGuard.Secure(savesRoot)) > 0)
+                    ws.Log(L.F($"Saves: safety copy made in {SaveGuard.VaultDir} before the update."), LogLevel.Info);
                 var skipped = await Updater.InstallAsync(release, package, progress);
                 if (skipped.Count > 0)
                     Prompt.Tell(L.T("Updated, with files left out"),

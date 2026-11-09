@@ -38,10 +38,10 @@ when it works on one PC.
 ## Build
 
 - **Windows**: `build.ps1` in the repository's root (MSYS2 with the CLANG64 toolchain in
-  `C:\msys64`, .NET 8 for the launcher). `build.ps1 -Version <v> -Release` makes the release zip.
-- **Linux**: `build.sh` here (clang, CMake, Ninja, Vulkan and SDL3 headers; Ubuntu 24.04:
-  `packaging/linux/setup-ubuntu.sh` builds the libraries once). `packaging/linux/build.sh` makes
-  the release archive with the Linux launcher.
+  `C:\msys64`, .NET 8 for the launcher, and the Rust stable toolchain with `cargo`). `build.ps1 -Version <v> -Release` makes the release zip.
+- **Linux**: `build.sh` here (clang, CMake, Ninja, Vulkan and SDL3 headers, plus the Rust stable
+  toolchain with `cargo`; Ubuntu 24.04: `packaging/linux/setup-ubuntu.sh` builds the libraries once).
+  `packaging/linux/build.sh` makes the release archive with the Linux launcher.
 - **Run from a checkout (Linux)**: `BB_GAME_DIR=/path/to/CUSA03173 ./run.sh`.
 
 ## Tests and checks

@@ -268,7 +268,7 @@ struct Vk {
         return i;
     }
     Pipeline MakePipeline(std::initializer_list<VkDescriptorType> types, unsigned push_bytes,
-                          const std::uint32_t* code, std::size_t code_bytes) {
+                          const std::uint32_t* code, std::size_t code_bytes, VkPipelineCreateFlags create_flags = 0) {
         Pipeline p;
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         for (const auto type : types)
@@ -285,7 +285,7 @@ struct Vk {
         VkShaderModuleCreateInfo mi{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = code_bytes, .pCode = code};
         CHECK(vkCreateShaderModule(device, &mi, nullptr, &module));
         VkComputePipelineCreateInfo pc{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .flags = create_flags, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main"}, .layout = p.layout};
         CHECK(vkCreateComputePipelines(device, {}, 1, &pc, nullptr, &p.pipeline));
         vkDestroyShaderModule(device, module, nullptr);
@@ -329,6 +329,7 @@ struct Vk {
         VkPhysicalDeviceVulkan12Features v12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
             .pNext = &as, .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = VK_TRUE};
         VkPhysicalDeviceFeatures2 f2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &v12};
+        f2.features.shaderStorageImageExtendedFormats = VK_TRUE;
         VkDeviceCreateInfo di{.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f2,
             .queueCreateInfoCount = 1, .pQueueCreateInfos = &qi,
             .enabledExtensionCount = unsigned(extensions.size()), .ppEnabledExtensionNames = extensions.data()};
@@ -841,7 +842,7 @@ int main(int argc, char** argv) {
     vk.MakePipeline({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 56, RT_UNPROJECT_COMP, sizeof(RT_UNPROJECT_COMP));
     vk.MakePipeline({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR},
+                     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
                     64, POINT_SHADOW_RAY_COMP, sizeof(POINT_SHADOW_RAY_COMP));
     vk.MakePipeline({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -860,6 +861,348 @@ int main(int argc, char** argv) {
         {{{-4, 1.7f, 12}, {0.8f, -0.25f, 0.5f}}},
         {{{5, 3, 30}, {-0.5f, -0.5f, 1}}},
     }};
+    if (argc > 1 && std::strcmp(argv[1], "--speed") == 0) {
+        const unsigned total = argc > 2 ? unsigned(std::strtoul(argv[2], nullptr, 10)) : 1500000u;
+        Scene scene{vk, MakeScene(total, total / 1875)};
+        scene.Create(Trace | Update);
+        scene.Allocate();
+        scene.BuildAll(Trace | Update);
+        const unsigned n = unsigned(scene.blas.size());
+        std::printf("== Speed: %u triangles in %u BLAS\n", scene.triangles, n);
+        struct Variant { const char* name; VkBuildAccelerationStructureFlagsKHR flags; bool doubled; };
+        const std::array<Variant, 3> variants{{{"TLAS fast build", Fast, false},
+                                               {"TLAS fast trace", Trace, false},
+                                               {"TLAS fast build, every mesh twice", Fast, true}}};
+        const auto make_tlas = [&](unsigned count, VkBuildAccelerationStructureFlagsKHR flags) {
+            Tlas t;
+            t.count = count;
+            t.instances = vk.MakeBuffer(count * sizeof(VkAccelerationStructureInstanceKHR),
+                                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true);
+            VkAccelerationStructureGeometryKHR g{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .flags = VK_GEOMETRY_OPAQUE_BIT_KHR};
+            g.geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+            VkAccelerationStructureBuildGeometryInfoKHR info{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .flags = flags,
+                .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR, .geometryCount = 1, .pGeometries = &g};
+            VkAccelerationStructureBuildSizesInfoKHR s{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+            vk.sizes(vk.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &t.count, &s);
+            t.storage = vk.MakeBuffer(s.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false);
+            t.scratch = vk.MakeBuffer(s.buildScratchSize + AsAlign, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false);
+            VkAccelerationStructureCreateInfoKHR ci{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+                .buffer = t.storage.buffer, .size = s.accelerationStructureSize, .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR};
+            CHECK(vk.create_as(vk.device, &ci, nullptr, &t.handle));
+            return t;
+        };
+        const auto build_tlas = [&](Tlas& t, const Mat4& view, VkBuildAccelerationStructureFlagsKHR flags, bool doubled) {
+            auto* out = static_cast<VkAccelerationStructureInstanceKHR*>(t.instances.data);
+            for (unsigned copy = 0; copy < (doubled ? 2u : 1u); ++copy) {
+                for (unsigned i = 0; i < n; ++i) {
+                    Mat4 model = Identity();
+                    model.at(0, 3) = scene.meshes[i].position.x;
+                    model.at(1, 3) = scene.meshes[i].position.y;
+                    model.at(2, 3) = scene.meshes[i].position.z;
+                    const Mat4 m = view * model;
+                    VkAccelerationStructureInstanceKHR inst{};
+                    std::memcpy(inst.transform.matrix, m.m.data(), 12 * sizeof(float));
+                    inst.mask = doubled ? (copy ? 2 : 1) : 3;
+                    inst.accelerationStructureReference = scene.blas[i].address;
+                    out[copy * n + i] = inst;
+                }
+            }
+            VkAccelerationStructureGeometryKHR g{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .flags = VK_GEOMETRY_OPAQUE_BIT_KHR};
+            g.geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+            g.geometry.instances.data.deviceAddress = t.instances.address;
+            VkAccelerationStructureBuildGeometryInfoKHR info{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .flags = flags,
+                .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR, .dstAccelerationStructure = t.handle,
+                .geometryCount = 1, .pGeometries = &g};
+            info.scratchData.deviceAddress = t.scratch.address;
+            VkAccelerationStructureBuildRangeInfoKHR range{doubled ? 2 * n : n, 0, 0, 0};
+            const VkAccelerationStructureBuildRangeInfoKHR* pointer = &range;
+            vk.Begin();
+            vk.Stamp(0);
+            vk.build(vk.cmd, 1, &info, &pointer);
+            vk.Stamp(1);
+            vk.Barrier();
+            return vk.End();
+        };
+        struct LampPush {
+            unsigned first_light = 0, frame = 0;
+            float width = W, height = H, length = 0, thickness = 0, strength = 1, fade_start = 60, fade_end = 100;
+            unsigned count = 1, steps = 0;
+            float bias = 0.02f;
+            std::array<int, 4> rect{};
+        };
+        static_assert(sizeof(LampPush) == 64);
+        Pipeline lamp = vk.MakePipeline({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                         VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
+                                        64, POINT_SHADOW_RAY_COMP, sizeof(POINT_SHADOW_RAY_COMP),
+                                        VK_PIPELINE_CREATE_DISPATCH_BASE_BIT);
+        Buffer lights = vk.MakeBuffer(64 * 1024 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+        Image zero_image = vk.MakeImage(W, H, VK_FORMAT_B10G11R11_UFLOAT_PACK32);
+        std::array<Image, 2> history{vk.MakeImage(W, H, VK_FORMAT_R16G16B16A16_SFLOAT),
+                                     vk.MakeImage(W, H, VK_FORMAT_R16G16B16A16_SFLOAT)};
+        std::array<Image, 4> lamp_images{};
+        for (auto& image : lamp_images) image = vk.MakeImage(W, H, VK_FORMAT_B10G11R11_UFLOAT_PACK32);
+        vk.Begin();
+        for (auto& image : lamp_images) vk.ToGeneral(image.image);
+        vk.ToGeneral(zero_image.image);
+        for (auto& image : history) vk.ToGeneral(image.image);
+        {
+            VkClearColorValue zero{};
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(vk.cmd, zero_image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+        }
+        vk.Stamp(0); vk.Stamp(1);
+        vk.End();
+        const auto decode = [](std::uint32_t v) {
+            const unsigned e = (v >> 6) & 31u, m = v & 63u;
+            return e == 0 ? float(m) / 64.0f * std::ldexp(1.0f, -14) : std::ldexp(1.0f + float(m) / 64.0f, int(e) - 15);
+        };
+        std::vector<std::array<double, 3>> lamp_ms(variants.size()), sun_ms(variants.size());
+        std::array<double, 3> per_tile_ms{}, pick_ms{}, reuse_ms{}, reuse_error{};
+        std::array<std::array<double, 2>, 3> pick_error{};
+        std::vector<double> tlas_ms(variants.size());
+        double lit_sum = 0;
+        unsigned tile_sum = 0;
+        for (std::size_t cam = 0; cam < cameras.size(); ++cam) {
+            const Views views = MakeViews(cameras[cam][0], cameras[cam][1], sun);
+            std::vector<LampPush> tiles;
+            auto* words = static_cast<float*>(lights.data);
+            for (int r = 0; r < 4; ++r)
+                for (int k = 0; k < 4; ++k) words[r * 4 + k] = views.inv_proj.at(r, k);
+            unsigned used = 16;
+            const float radius = 9.0f;
+            for (float z = 2.0f; z < 100.0f; z += 6.5f) {
+                for (const float x : {-7.0f, 7.0f, 0.0f}) {
+                    if (x == 0.0f && int(z) % 3 != 0) continue;
+                    const Vec3 world{x, x == 0.0f ? 1.2f : 3.5f, z + (x > 0 ? 3.0f : 0.0f)};
+                    Vec3 v{};
+                    for (int r = 0; r < 3; ++r) {
+                        const float value = views.view.at(r, 0) * world.x + views.view.at(r, 1) * world.y +
+                                            views.view.at(r, 2) * world.z + views.view.at(r, 3);
+                        (r == 0 ? v.x : r == 1 ? v.y : v.z) = value;
+                    }
+                    if (v.z < -radius) continue;
+                    float x0 = 0, y0 = 0, x1 = float(W), y1 = float(H);
+                    if (v.z - radius > 0.1f) {
+                        x0 = float(W); y0 = float(H); x1 = 0; y1 = 0;
+                        for (int c = 0; c < 8; ++c) {
+                            const Vec3 corner{v.x + (c & 1 ? radius : -radius), v.y + (c & 2 ? radius : -radius),
+                                              v.z + (c & 4 ? radius : -radius)};
+                            const float nx = views.proj.at(0, 0) * corner.x / corner.z;
+                            const float ny = views.proj.at(1, 1) * corner.y / corner.z;
+                            const float px = (nx * 0.5f + 0.5f) * W, py = (0.5f - ny * 0.5f) * H;
+                            x0 = std::min(x0, px); x1 = std::max(x1, px);
+                            y0 = std::min(y0, py); y1 = std::max(y1, py);
+                        }
+                    }
+                    LampPush push;
+                    push.rect = {std::clamp(int(x0), 0, int(W)), std::clamp(int(y0), 0, int(H)),
+                                 std::clamp(int(x1) + 1, 0, int(W)), std::clamp(int(y1) + 1, 0, int(H))};
+                    if (push.rect[0] >= push.rect[2] || push.rect[1] >= push.rect[3]) continue;
+                    push.first_light = used;
+                    const std::array<float, 16> light{v.x, v.y, v.z, 1.0f / (radius * radius), 1.0f, 0.8f, 0.6f};
+                    std::memcpy(words + used, light.data(), sizeof(light));
+                    used += 16;
+                    tiles.push_back(push);
+                }
+            }
+            tile_sum += unsigned(tiles.size());
+            const unsigned table = used;
+            std::array<int, 4> covered{int(W), int(H), 0, 0};
+            for (const LampPush& tile : tiles) {
+                const std::array<std::uint32_t, 8> row{unsigned(tile.rect[0]), unsigned(tile.rect[1]), unsigned(tile.rect[2]),
+                                                       unsigned(tile.rect[3]), tile.first_light, 1u, 0u, 0u};
+                std::memcpy(words + used, row.data(), sizeof(row));
+                used += 8;
+                covered = {std::min(covered[0], tile.rect[0]), std::min(covered[1], tile.rect[1]),
+                           std::max(covered[2], tile.rect[2]), std::max(covered[3], tile.rect[3])};
+            }
+            for (std::size_t at = 0; at < variants.size(); ++at) {
+                const Variant& variant = variants[at];
+                Tlas tlas = make_tlas(variant.doubled ? 2 * n : n, variant.flags);
+                std::vector<double> builds;
+                for (int i = 0; i < 9; ++i) builds.push_back(build_tlas(tlas, views.view, variant.flags, variant.doubled));
+                tlas_ms[at] += Median(builds) / cameras.size();
+                if (at == 0) {
+                    lab.Prepare(tlas.handle, views);
+                }
+                std::vector<double> sun_samples, lamp_samples;
+                for (int i = 0; i < 15; ++i) {
+                    vk.Begin();
+                    vk.Stamp(0);
+                    RtPush p;
+                    p.rays = 2;
+                    lab.Rt(tlas.handle, p);
+                    vk.Stamp(1);
+                    vk.Barrier();
+                    sun_samples.push_back(vk.End());
+                }
+                const unsigned history_at = used;
+                const auto run_lamps = [&](bool per_tile, unsigned pick = 0, unsigned frame = 0, int parity = -1) {
+                    if (parity >= 0) {
+                        auto* block = reinterpret_cast<std::uint32_t*>(words) + history_at;
+                        block[0] = frame == 0 ? 2u : 3u;
+                        block[1] = frame;
+                        const std::array<float, 12> identity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+                        std::memcpy(block + 2, identity.data(), sizeof(identity));
+                        std::memcpy(block + 14, views.proj.m.data(), 64);
+                    }
+                    vk.Begin();
+                    VkClearColorValue one{};
+                    one.float32[0] = one.float32[1] = one.float32[2] = 1.0f;
+                    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    vkCmdClearColorImage(vk.cmd, lamp_images[0].image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &range);
+                    vkCmdClearColorImage(vk.cmd, lamp_images[2].image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &range);
+                    vk.Barrier();
+                    VkDescriptorBufferInfo data{lights.buffer, 0, (used + 32) * 4};
+                    VkDescriptorImageInfo depth{vk.sampler, lab.depth.view, VK_IMAGE_LAYOUT_GENERAL};
+                    std::array<VkDescriptorImageInfo, 4> images{};
+                    for (int k = 0; k < 4; ++k) images[k] = {{}, lamp_images[k].view, VK_IMAGE_LAYOUT_GENERAL};
+                    VkWriteDescriptorSetAccelerationStructureKHR as{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                        .accelerationStructureCount = 1, .pAccelerationStructures = &tlas.handle};
+                    const int cur_history = parity < 0 ? 0 : parity;
+                    VkDescriptorImageInfo history_prev{{}, history[cur_history ^ 1].view, VK_IMAGE_LAYOUT_GENERAL};
+                    VkDescriptorImageInfo history_cur{{}, history[cur_history].view, VK_IMAGE_LAYOUT_GENERAL};
+                    std::array<VkWriteDescriptorSet, 9> writes{};
+                    for (unsigned k = 0; k < 9; ++k) writes[k] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = k, .descriptorCount = 1};
+                    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[0].pBufferInfo = &data;
+                    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[1].pImageInfo = &depth;
+                    for (int k = 0; k < 4; ++k) { writes[2 + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[2 + k].pImageInfo = &images[k]; }
+                    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; writes[6].pNext = &as;
+                    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[7].pImageInfo = &history_prev;
+                    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[8].pImageInfo = &history_cur;
+                    const auto snapshot = [&](std::array<int, 4> r) {
+                        const VkImageCopy region{.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffset = {r[0], r[1], 0},
+                            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffset = {r[0], r[1], 0},
+                            .extent = {unsigned(r[2] - r[0]), unsigned(r[3] - r[1]), 1}};
+                        vkCmdCopyImage(vk.cmd, zero_image.image, VK_IMAGE_LAYOUT_GENERAL, lamp_images[1].image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+                        vkCmdCopyImage(vk.cmd, zero_image.image, VK_IMAGE_LAYOUT_GENERAL, lamp_images[3].image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+                        vk.Barrier();
+                    };
+                    const auto dispatch = [&](LampPush push) {
+                        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lamp.pipeline);
+                        vk.push(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lamp.layout, 0, 9, writes.data());
+                        vkCmdPushConstants(vk.cmd, lamp.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                        const unsigned gx0 = unsigned(push.rect[0]) / 8, gy0 = unsigned(push.rect[1]) / 8;
+                        const unsigned gx1 = (unsigned(push.rect[2]) + 7) / 8, gy1 = (unsigned(push.rect[3]) + 7) / 8;
+                        vkCmdDispatchBase(vk.cmd, gx0, gy0, 0, gx1 - gx0, gy1 - gy0, 1);
+                        vk.Barrier();
+                    };
+                    vk.Stamp(0);
+                    if (parity >= 0) {
+                        VkClearColorValue zero{};
+                        vkCmdClearColorImage(vk.cmd, history[cur_history].image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+                        vk.Barrier();
+                    }
+                    if (per_tile) {
+                        for (std::size_t t = 0; t < tiles.size(); ++t) {
+                            snapshot(tiles[t].rect);
+                            LampPush push = tiles[t];
+                            push.first_light = table + unsigned(t) * 8;
+                            push.count = 1;
+                            dispatch(push);
+                        }
+                    } else if (!tiles.empty()) {
+                        snapshot({0, 0, int(W), int(H)});
+                        LampPush push = tiles[0];
+                        push.first_light = table;
+                        push.count = unsigned(tiles.size());
+                        push.rect = covered;
+                        push.steps = pick;
+                        push.frame = frame;
+                        if (parity >= 0) std::memcpy(&push.length, &history_at, 4);
+                        dispatch(push);
+                    }
+                    vk.Stamp(1);
+                    vk.Barrier();
+                    return vk.End();
+                };
+                if (at == 1) {
+                    std::vector<double> per_tile;
+                    for (int i = 0; i < 15; ++i) per_tile.push_back(run_lamps(true));
+                    per_tile_ms[cam] = Median(per_tile);
+                    const auto lamp_values = [&] {
+                        const auto raw = lab.Read(lamp_images[0], VK_FORMAT_R32_SFLOAT);
+                        std::vector<float> out(raw.size());
+                        for (std::size_t k = 0; k < raw.size(); ++k) {
+                            std::uint32_t bits;
+                            std::memcpy(&bits, &raw[k], 4);
+                            out[k] = decode(bits);
+                        }
+                        return out;
+                    };
+                    run_lamps(false);
+                    const auto exact = lamp_values();
+                    std::vector<double> picked;
+                    for (int i = 0; i < 15; ++i) picked.push_back(run_lamps(false, 1, unsigned(i)));
+                    pick_ms[cam] = Median(picked);
+                    std::vector<float> average(exact.size(), 0.0f);
+                    double one_frame = 0, sixteen = 0;
+                    for (unsigned f = 0; f < 16; ++f) {
+                        run_lamps(false, 1, f);
+                        const auto one = lamp_values();
+                        for (std::size_t k = 0; k < one.size(); ++k) {
+                            average[k] += one[k] / 16.0f;
+                            if (f == 0) one_frame += std::abs(double(one[k]) - exact[k]);
+                        }
+                    }
+                    for (std::size_t k = 0; k < exact.size(); ++k) sixteen += std::abs(double(average[k]) - exact[k]);
+                    pick_error[cam] = {one_frame / double(exact.size()), sixteen / double(exact.size())};
+                    std::vector<double> reused;
+                    std::vector<float> reuse_average(exact.size(), 0.0f);
+                    for (unsigned f = 0; f < 24; ++f) {
+                        const double ms = run_lamps(false, 1, f, int(f & 1u));
+                        if (f >= 8) reused.push_back(ms);
+                        if (f >= 8) {
+                            const auto one = lamp_values();
+                            for (std::size_t k = 0; k < one.size(); ++k) reuse_average[k] += one[k] / 16.0f;
+                        }
+                    }
+                    reuse_ms[cam] = Median(reused);
+                    double reuse_sum = 0;
+                    for (std::size_t k = 0; k < exact.size(); ++k) reuse_sum += std::abs(double(reuse_average[k]) - exact[k]);
+                    reuse_error[cam] = reuse_sum / double(exact.size());
+                }
+                for (int i = 0; i < 15; ++i) lamp_samples.push_back(run_lamps(false));
+                sun_ms[at][cam] = Median(sun_samples);
+                lamp_ms[at][cam] = Median(lamp_samples);
+                if (at == 0) {
+                    const auto out = lab.Read(lamp_images[0], VK_FORMAT_R32_SFLOAT);
+                    double lit = 0;
+                    for (const float f : out) {
+                        std::uint32_t bits;
+                        std::memcpy(&bits, &f, 4);
+                        lit += decode(bits);
+                    }
+                    lit_sum += lit / double(out.size()) / cameras.size();
+                }
+                vk.destroy_as(vk.device, tlas.handle, nullptr);
+                vk.Free(tlas.instances); vk.Free(tlas.storage); vk.Free(tlas.scratch);
+            }
+        }
+        std::printf("%u lamp tiles over %zu cameras, mean lamp light kept %.4f\n", tile_sum, cameras.size(), lit_sum);
+        std::printf("Lamps on the fast-trace TLAS, a snapshot, dispatch and barriers per tile: %.3f %.3f %.3f ms\n",
+                    per_tile_ms[0], per_tile_ms[1], per_tile_ms[2]);
+        std::printf("Lamps, strongest lamp plus one picked by weight: %.3f %.3f %.3f ms; mean error against every lamp "
+                    "%.4f %.4f %.4f in one frame, %.4f %.4f %.4f over 16 frames\n",
+                    pick_ms[0], pick_ms[1], pick_ms[2], pick_error[0][0], pick_error[1][0], pick_error[2][0],
+                    pick_error[0][1], pick_error[1][1], pick_error[2][1]);
+        std::printf("Lamps, picked, reusing still 8x8 blocks (still camera, frames 8-23): %.3f %.3f %.3f ms; mean error "
+                    "against every lamp over 16 frames %.4f %.4f %.4f\n",
+                    reuse_ms[0], reuse_ms[1], reuse_ms[2], reuse_error[0], reuse_error[1], reuse_error[2]);
+        std::printf("%-36s %9s %21s %21s\n", "", "TLAS ms", "sun 2 rays ms", "lamp rays ms");
+        for (std::size_t at = 0; at < variants.size(); ++at) {
+            std::printf("%-36s %9.3f   %5.3f %5.3f %5.3f   %5.3f %5.3f %5.3f\n", variants[at].name, tlas_ms[at],
+                        sun_ms[at][0], sun_ms[at][1], sun_ms[at][2], lamp_ms[at][0], lamp_ms[at][1], lamp_ms[at][2]);
+        }
+        return 0;
+    }
     for (const auto [total, draws] : std::array<std::array<unsigned, 2>, 3>{{{500000, 400}, {1500000, 800}, {4000000, 1200}}}) {
         Scene scene{vk, MakeScene(total, draws)};
         scene.Create(Trace | Update);

@@ -91,11 +91,13 @@ namespace BloodborneLauncher.Core
             var failed = new List<string>();
             if (leftovers.Count == 0) return failed;
 #if AVALONIA
-            foreach (var path in leftovers)
+            var work = leftovers.Select(path => ("", (Action)(() =>
             {
                 try { Remove(path); }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { failed.Add(path); }
-            }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { lock (failed) failed.Add(path); }
+            }))).ToList();
+            Views.WorkWindow.Run("New version: cleaning up",
+                "Removing the old engine files from the Lantern Engine folder. Your saves, settings and mods stay. Please wait…", work, showSteps: false);
             return failed;
 #else
 

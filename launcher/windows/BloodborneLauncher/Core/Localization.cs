@@ -27,7 +27,12 @@ public static class Localization
         if (language == "en" || !Languages.Any(l => l.Code == language)) return null;
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream($"BloodborneLauncher.Localization.{language}.json")
             ?? throw new InvalidOperationException($"Missing {language} translation resource.");
-        return JsonSerializer.Deserialize<Dictionary<string, string>>(stream)!;
+        using var doc = JsonDocument.Parse(stream);
+        var strings = new Dictionary<string, string>();
+        foreach (var entry in doc.RootElement.EnumerateObject())
+            if (entry.Value.ValueKind == JsonValueKind.String)
+                strings[entry.Name] = entry.Value.GetString()!;
+        return strings;
     }
 
     /// <summary>Called before constructing the UI. English is the default, and the fallback for unknown

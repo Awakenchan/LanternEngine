@@ -18,6 +18,8 @@ enum class View : u8 { D1, D1Array, D2, D2Array, D2Msaa, D3, Other };
 enum class SwizzleSel : u8 { Zero = 0, One = 1, R = 4, G = 5, B = 6, A = 7 };
 
 constexpr u16 NoFlat = 0xffff;
+constexpr u32 MotionParamsCapacity = 1 + 4 * 8192;
+constexpr u32 CaptureParamsCapacity = 1 + 4 * 8192;
 
 struct Sharp {
     std::array<u16, 8> flat{NoFlat, NoFlat, NoFlat, NoFlat, NoFlat, NoFlat, NoFlat, NoFlat};

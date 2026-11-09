@@ -79,6 +79,9 @@ fi
 "$PYTHON" scripts/prepare.py "$game" --out "$out"
 "$PYTHON" scripts/link_libc.py "$game" --out "$out"
 "$PYTHON" scripts/link_modules.py "$game" --out "$out"
+if ! { grep -qw movbe /proc/cpuinfo && grep -qw bmi1 /proc/cpuinfo && grep -qw abm /proc/cpuinfo; }; then
+    "${BB_ISA_SCAN:-$out/bb-isa-scan}" "$out/boot-linked.bin" "$out"
+fi
 "$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
 # The engine's own features (the executable's identity, which every engine hook checks: keyboard
 # and mouse, PC menus, camera, widescreen...; the Dream mirror and PC menus), as bb-start.exe does

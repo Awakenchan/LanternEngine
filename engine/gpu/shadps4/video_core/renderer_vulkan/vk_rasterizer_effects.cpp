@@ -108,6 +108,32 @@ void Rasterizer::EffectsBeforeTargets(const GraphicsPipeline* pipeline) {
     }
     contact_shadow->Flush(hash == ShadowBlurHash);
     if (PointLightCount(hash) == 0) {
+        if (point_shadow->Pending()) {
+            const auto& regs = Regs();
+            const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+            const bool writes_color =
+                pipeline->GetGraphicsKey().mrt_mask != 0 &&
+                regs.color_control.mode != AmdGpu::ColorControl::OperationMode::Disable;
+            const bool writes_depth =
+                regs.depth_control.depth_enable && regs.depth_control.depth_write_enable;
+            const auto lights = point_shadow->PendingAddresses();
+            const auto is_light = [&](VAddr address) {
+                return address != 0 && (address == lights[0] || address == lights[1]);
+            };
+            const u32 mrt = pipeline->GetGraphicsKey().mrt_mask;
+            bool touches = !lights[0] || !lights[1] || (ps && ps->has_storage_images);
+            for (u32 cb = 0; writes_color && !touches && cb < 8; ++cb) {
+                touches = (mrt & (1u << cb)) && is_light(regs.color_buffers[cb].Address());
+            }
+            for (std::size_t i = 0; ps && !touches && i < ps->images.size(); ++i) {
+                touches = is_light(ps->images[i].GetSharp(*ps).Address());
+            }
+            if (!writes_depth && !touches) {
+                point_shadow->Kept();
+                return;
+            }
+            point_shadow->Ended(hash);
+        }
         const auto jitter = upscaler->Jitter();
         point_shadow->Flush(jitter[0] != 0.0f || jitter[1] != 0.0f);
     }
@@ -193,6 +219,14 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
         .solid = regs.depth_control.depth_write_enable != 0 && !regs.blend_control[0].enable,
         .alpha = ps && ps->has_discard,
     };
+    if (fetch) {
+        for (const auto& attribute : fetch->attributes) {
+            if (attribute.semantic == 0) {
+                draw.positions = attribute.GetSharp(vs).base_address;
+                break;
+            }
+        }
+    }
     if (is_indexed) {
         const VAddr address = regs.index_base_address.Address<VAddr>() + u64(index_offset) * index_size;
         const u64 bytes = u64(regs.num_indices) * index_size;

@@ -27,6 +27,24 @@ to 22). Re-count before each release (`tools/hardware_census.sh <folder of logs>
 | Intel 12th to 14th gen | 12400F, 12700K, 13600KF, 13700KF, 14600K, 14900K | 12 to 32 | hybrid P/E cores; the red-zone stores (patches/redzone.json) |
 | Intel 4th to 9th gen | 4790K, 6402P, 7700HQ, 9700K, 9750H, 9900K | 4 to 16 | the i5-6402P has 4 threads and no SMT |
 
+## CPU instruction-set baseline
+
+The native game runtime requires **AVX, POPCNT and SSE4.2** (including OS-enabled AVX state).
+These remain hard requirements; `BB_SKIP_CPU_CHECK=1` bypasses the check but does not emulate
+them.
+
+**MOVBE, BMI1 and LZCNT are optional host features.** On hosts that lack any of them, the
+preparation step scans the linked executable and emits a per-image rewrite table. The loader
+replaces only the affected guest instruction sites with compatibility stubs or breakpoint
+fallbacks that emulate the original operation. CPUs that have all three features skip scanning
+and execute the original image unchanged. The compatibility layer deliberately does not cover
+F16C.
+
+This makes Sandy Bridge and Ivy Bridge candidates when their AVX state, POPCNT and SSE4.2 are
+available. The new path is still experimental until tested on those physical CPUs on both
+Windows and Linux; CI's differential tests validate operation results and flags, not game
+stability or frame rate.
+
 ## What each GPU family lacks
 
 From players' logs ("Extension ... unavailable") and the Vulkan hardware database

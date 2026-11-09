@@ -7,8 +7,11 @@
 #include <stdexcept>
 
 #include <vk_mem_alloc.h>
+#include <xxhash.h>
 #include "bbport_settings.h"
+#include "bbport_threads.h"
 #include "bbport_toggles.h"
+#include "common/thread.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -157,11 +160,37 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     }();
     history.SetHold(hold);
     enabled = true;
-    std::printf("Object motion: on (%u vertices per frame, moved small skeletons held %u frames)\n",
-                PositionsPerFrame, hold);
+    static const bool worker_wanted = [] {
+        const char* env = std::getenv("LANTERN_MOTION_WORKER");
+        if (env && env[0]) {
+            return env[0] == '1';
+        }
+        return BbThreads::Available() >= 12;
+    }();
+    if (worker_wanted) {
+        jobs = std::make_unique<Job[]>(JobCapacity);
+        async = true;
+        worker = std::jthread([this](std::stop_token stop) { WorkerLoop(stop); });
+    }
+    std::printf("Object motion: on (%u vertices per frame, moved small skeletons held %u frames, "
+                "bookkeeping on %s)\n",
+                PositionsPerFrame, hold, async ? "its own thread" : "the recording thread");
+}
+
+void ObjectMotion::StopWorker() {
+    if (!async) {
+        return;
+    }
+    Sync();
+    worker.request_stop();
+    worker_wake.fetch_add(1, std::memory_order_seq_cst);
+    worker_wake.notify_one();
+    worker.join();
+    async = false;
 }
 
 ObjectMotion::~ObjectMotion() {
+    StopWorker();
     scheduler.Finish();
     const auto allocator = instance.GetAllocator();
     if (address_buffer) {
@@ -175,11 +204,16 @@ ObjectMotion::~ObjectMotion() {
     }
 }
 
-void ObjectMotion::OnFrameStart() {
-    if (!enabled) {
+void ObjectMotion::InvalidateHistory() {
+    if (async) {
+        Post({.kind = JobKind::Invalidate});
         return;
     }
-    if (BbStats::enabled && (frame % 600) == 0 && history.stats.draws) {
+    Run({.kind = JobKind::Invalidate});
+}
+
+void ObjectMotion::AdvanceHistory() {
+    if (BbStats::enabled && (history_frame % 600) == 0 && history.stats.draws) {
         const auto& s = history.stats;
         // bbport: "held" counts small-skeleton draws kept in history though their palette did
         // not change this frame (BB_OBJECT_MOTION_HOLD); they are part of "draws".
@@ -198,10 +232,150 @@ void ObjectMotion::OnFrameStart() {
         history.stats = {};
     }
     history.NextFrame();
-    ++frame;
-    if (frame % Motion::IndexRangeCache::Unused == 0) {
-        index_ranges.Trim(frame);
+    ++history_frame;
+    if (history_frame % Motion::IndexRangeCache::Unused == 0) {
+        index_ranges.Trim(history_frame);
     }
+}
+
+void ObjectMotion::Run(const Job& job) {
+    switch (job.kind) {
+    case JobKind::Draw:
+        WriteParam(job.param, Evaluate(job.draw));
+        break;
+    case JobKind::FrameStart:
+        AdvanceHistory();
+        break;
+    case JobKind::Invalidate:
+        history.NextFrame();
+        history.NextFrame();
+        break;
+    }
+}
+
+void ObjectMotion::Post(const Job& job) {
+    const u64 at = posted.load(std::memory_order_relaxed);
+    while (at - done.load(std::memory_order_acquire) >= JobCapacity) {
+        __builtin_ia32_pause();
+    }
+    jobs[at % JobCapacity] = job;
+    posted.store(at + 1, std::memory_order_seq_cst);
+    if (worker_sleeping.load(std::memory_order_seq_cst)) {
+        worker_wake.fetch_add(1, std::memory_order_seq_cst);
+        worker_wake.notify_one();
+    }
+}
+
+void ObjectMotion::Sync() {
+    if (!async) {
+        return;
+    }
+    const u64 target = posted.load(std::memory_order_acquire);
+    for (u32 spins = 1; done.load(std::memory_order_acquire) < target; ++spins) {
+        if (spins < 4096) {
+            __builtin_ia32_pause();
+        } else {
+            std::this_thread::yield();
+        }
+    }
+}
+
+void ObjectMotion::WorkerLoop(std::stop_token stop) {
+    Common::SetCurrentThreadName("bb:Motion");
+    static const auto spin_time =
+        std::chrono::microseconds(BbThreads::CapSpinUs(BbThreads::Available() >= 12 ? 200 : 50));
+    u64 next = 0;
+    while (true) {
+        if (posted.load(std::memory_order_acquire) == next) {
+            const auto spin_until = std::chrono::steady_clock::now() + spin_time;
+            for (u32 spins = 1; posted.load(std::memory_order_acquire) == next; ++spins) {
+                if (stop.stop_requested()) {
+                    return;
+                }
+                __builtin_ia32_pause();
+                if (!(spins & 255) && std::chrono::steady_clock::now() >= spin_until) {
+                    const u32 seen = worker_wake.load(std::memory_order_seq_cst);
+                    worker_sleeping.store(true, std::memory_order_seq_cst);
+                    if (posted.load(std::memory_order_seq_cst) == next && !stop.stop_requested()) {
+                        worker_wake.wait(seen, std::memory_order_seq_cst);
+                    }
+                    worker_sleeping.store(false, std::memory_order_relaxed);
+                }
+            }
+        }
+        Run(jobs[next % JobCapacity]);
+        ++next;
+        done.store(next, std::memory_order_release);
+    }
+}
+
+Motion::History::Allocation ObjectMotion::Evaluate(const DrawJob& job) {
+    if (job.gated && !history.Moving(job.gate, job.palette)) {
+        return {};
+    }
+    Motion::Draw draw = job.draw;
+    if (!job.index_size) {
+        draw.vertices = {u32(job.base_vertex), draw.index_count};
+        return history.Prepare(draw);
+    }
+    draw.vertices = {};
+    if (job.indices_valid) {
+        const u32 count = draw.index_count;
+        const u64 bytes = u64(count) * job.index_size;
+        BbRecoverBuf* const outer_recover = runtime_fault_recover;
+        BbRecoverBuf recover;
+        if (BB_RECOVER_SET(recover)) {
+            runtime_fault_recover = outer_recover;
+            return history.Prepare(draw);
+        }
+        runtime_fault_recover = &recover;
+        const auto scanned = index_ranges.Get(
+            {job.index_address, count, job.index_size, job.base_vertex, job.restart}, history_frame,
+            [&] {
+                const auto* data = reinterpret_cast<const void*>(job.index_address);
+                const auto range =
+                    job.index_size == 2
+                        ? Motion::IndexedRange(std::span(static_cast<const u16*>(data), count),
+                                               job.base_vertex, job.restart)
+                        : Motion::IndexedRange(std::span(static_cast<const u32*>(data), count),
+                                               job.base_vertex, job.restart);
+                return Motion::IndexRangeCache::Result{range, XXH3_64bits(data, bytes)};
+            });
+        runtime_fault_recover = outer_recover;
+        draw.vertices = scanned.range;
+        draw.topology = scanned.topology;
+    }
+    return history.Prepare(draw);
+}
+
+void ObjectMotion::WriteParam(u32 index, const Motion::History::Allocation& allocation) {
+    const u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
+                      (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
+    u32* param = params_mapped + index * 8;
+    if (!flags) {
+        std::memset(param, 0, 32);
+        return;
+    }
+    param[0] = allocation.store;
+    param[1] = allocation.load;
+    param[2] = allocation.vertices;
+    param[3] = flags;
+    param[4] = allocation.first_vertex;
+    param[5] = allocation.first_instance;
+    param[6] = allocation.instances;
+    param[7] = 0;
+}
+
+void ObjectMotion::OnFrameStart() {
+    if (!enabled) {
+        return;
+    }
+    if (async) {
+        Post({.kind = JobKind::FrameStart});
+    } else {
+        AdvanceHistory();
+    }
+    ++frame;
     const u32 slot = u32(frame % FrameSlots);
     // Do not overwrite host parameters still referenced by queued GPU work.
     if (params_ticks[slot]) {
@@ -226,27 +400,23 @@ void ObjectMotion::OnFrameStart() {
     });
 }
 
-u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
+u32 ObjectMotion::Draw(const DrawJob& job) {
     if (!enabled || BbToggle::Disabled(1u << 29) || params_used >= ParamsPerFrame) {
         return 0;
     }
-    const auto allocation = history.Prepare(draw);
-    u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
-                (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
-    if (!flags) {
+    const u32 slot = u32(frame % FrameSlots);
+    if (async) {
+        const u32 index = 1 + slot * ParamsPerFrame + params_used++;
+        params_ticks[slot] = scheduler.CurrentTick();
+        Post({.kind = JobKind::Draw, .param = index, .draw = job});
+        return index;
+    }
+    const auto allocation = Evaluate(job);
+    if (!allocation.store && !allocation.load) {
         return 0;
     }
-    const u32 slot = u32(frame % FrameSlots);
     const u32 index = 1 + slot * ParamsPerFrame + params_used++;
-    u32* param = params_mapped + index * 8;
-    param[0] = allocation.store;
-    param[1] = allocation.load;
-    param[2] = allocation.vertices;
-    param[3] = flags;
-    param[4] = allocation.first_vertex;
-    param[5] = allocation.first_instance;
-    param[6] = allocation.instances;
-    param[7] = 0;
+    WriteParam(index, allocation);
     params_ticks[slot] = scheduler.CurrentTick();
     return index;
 }

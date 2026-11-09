@@ -13,6 +13,8 @@ layout(set = 0, binding = 3, r11f_g11f_b10f) uniform readonly image2D snap0;
 layout(set = 0, binding = 4, r11f_g11f_b10f) uniform image2D cur1;
 layout(set = 0, binding = 5, r11f_g11f_b10f) uniform readonly image2D snap1;
 layout(set = 0, binding = 6) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 7, rgba16f) uniform readonly image2D history_prev;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D history_cur;
 
 layout(push_constant) uniform Constants {
     uint first_light;
@@ -31,11 +33,14 @@ layout(push_constant) uniform Constants {
 
 const float LAMP_CLEARANCE = 0.35;
 
+const uint MAX_GROUP_TILES = 256u;
+
 shared mat4 shared_inverse;
+shared uint group_tiles[MAX_GROUP_TILES];
+shared uint group_count;
 
 float word(uint i) { return uintBitsToFloat(data.d[i]); }
 vec4 row(uint i) { return vec4(word(i), word(i + 1u), word(i + 2u), word(i + 3u)); }
-float lb(uint k, uint i) { return word(first_light + k * 16u + i); }
 
 vec3 viewPosAt(vec2 uv, float depth) {
     vec4 v = shared_inverse * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
@@ -75,64 +80,233 @@ float visibility(vec3 origin, float reach, vec3 L) {
                                                                                                   : 0.0;
 }
 
+bool inside(uint tile, ivec2 lo, ivec2 hi) {
+    const uint at = first_light + tile * 8u;
+    const ivec4 r = ivec4(data.d[at], data.d[at + 1u], data.d[at + 2u], data.d[at + 3u]);
+    return r.x < hi.x && lo.x < r.z && r.y < hi.y && lo.y < r.w;
+}
+
+const uint HISTORY_READ = 1u;
+const uint HISTORY_WRITE = 2u;
+const float STABLE_FRAMES = 3.0;
+const float STABLE_CHANGE = 0.05;
+
+shared uint group_trace;
+
 void main() {
     if (gl_LocalInvocationIndex == 0u) {
         shared_inverse = transpose(mat4(row(0u), row(4u), row(8u), row(12u)));
+        group_count = 0u;
+        group_trace = 0u;
     }
     barrier();
+    const ivec2 group_lo = ivec2(gl_WorkGroupID.xy) * 8;
+    const ivec2 group_hi = group_lo + 8;
+    for (uint t = gl_LocalInvocationIndex; t < light_count; t += 64u) {
+        if (inside(t, group_lo, group_hi)) {
+            const uint slot = atomicAdd(group_count, 1u);
+            if (slot < MAX_GROUP_TILES) {
+                group_tiles[slot] = t;
+            }
+        }
+    }
+    barrier();
+    const uint listed = group_count;
+    if (listed == 0u) {
+        return;
+    }
+    const bool overflow = listed > MAX_GROUP_TILES;
+    const uint tile_count = overflow ? light_count : listed;
+    const uint history_at = floatBitsToUint(length_m);
+    const uint history_flags = history_at != 0u ? data.d[history_at] : 0u;
 
     const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
-    if (px.x < rect.x || px.y < rect.y || px.x >= rect.z || px.y >= rect.w) {
-        return;
-    }
-    const vec3 s0 = imageLoad(snap0, px).rgb;
-    const vec3 c0 = imageLoad(cur0, px).rgb;
-    const vec3 s1 = imageLoad(snap1, px).rgb;
-    const vec3 c1 = imageLoad(cur1, px).rgb;
-    if (all(lessThanEqual(c0, s0)) && all(lessThanEqual(c1, s1))) {
-        return;
+    bool live = px.x >= rect.x && px.y >= rect.y && px.x < rect.z && px.y < rect.w;
+    vec3 s0 = vec3(0.0), c0 = vec3(0.0), s1 = vec3(0.0), c1 = vec3(0.0);
+    if (live) {
+        s0 = imageLoad(snap0, px).rgb;
+        c0 = imageLoad(cur0, px).rgb;
+        s1 = imageLoad(snap1, px).rgb;
+        c1 = imageLoad(cur1, px).rgb;
+        live = !(all(lessThanEqual(c0, s0)) && all(lessThanEqual(c1, s1)));
     }
     const vec2 uv = (vec2(px) + 0.5) / size;
-    const float d0 = textureLod(depth_tex, uv, 0.0).x;
-    if (!(d0 < 1.0) || !(d0 > 0.0)) {
-        return;
+    vec3 P = vec3(0.0);
+    float fade = 0.0;
+    if (live) {
+        const float d0 = textureLod(depth_tex, uv, 0.0).x;
+        live = d0 < 1.0 && d0 > 0.0;
+        if (live) {
+            P = viewPosAt(uv, d0);
+            live = P.z > 0.0;
+            fade = 1.0 - smoothstep(fade_start_m, fade_end_m, P.z);
+            live = live && fade > 0.0;
+        }
     }
-    const vec3 P = viewPosAt(uv, d0);
-    if (!(P.z > 0.0)) {
-        return;
+    if (live) {
+        const vec3 delta = max(c0 - s0, vec3(0.0)) + max(c1 - s1, vec3(0.0));
+        const vec3 base_light = s0 + s1;
+        live = max(max(delta.r, delta.g), delta.b) * strength * fade >
+                 max(max(base_light.r, base_light.g), base_light.b) * (1.0 / 512.0) + 1e-7;
     }
-    const float fade = 1.0 - smoothstep(fade_start_m, fade_end_m, P.z);
-    if (fade <= 0.0) {
-        return;
-    }
-    const vec3 n = surfaceNormal(uv, P);
-    const float reach = bias_m + 0.0015 * P.z;
-    const vec3 origin = P + n * reach;
+
     float wsum = 0.0;
+    const bool exact = steps == 0u;
+    float top_w = 0.0;
+    vec3 top_l = vec3(0.0);
+    float rest_w = 0.0;
+    vec3 rest_l = vec3(0.0);
     float vsum = 0.0;
-    for (uint k = 0u; k < light_count; ++k) {
-        const float inv_r2 = lb(k, 3u);
-        if (!(inv_r2 > 0.0)) {
-            continue;
-        }
-        const vec3 L = vec3(lb(k, 0u), lb(k, 1u), lb(k, 2u));
-        const float t = length(L - P) * sqrt(inv_r2);
-        if (t >= 1.0) {
-            continue;
-        }
-        const vec3 col = vec3(lb(k, 4u), lb(k, 5u), lb(k, 6u));
-        float w = 1.0 - t * t;
-        w *= w * dot(col, vec3(0.299, 0.587, 0.114));
-        if (!(w > 1e-5)) {
-            continue;
-        }
-        wsum += w;
-        vsum += w * visibility(origin, reach, L);
+    vec3 n = vec3(0.0);
+    float reach = 0.0;
+    vec3 origin = vec3(0.0);
+    uint seed = (uint(px.x) * 1973u + uint(px.y) * 9277u + frame_index * 26699u) | 1u;
+    if (live) {
+        n = surfaceNormal(uv, P);
+        reach = bias_m + 0.0015 * P.z;
+        origin = P + n * reach;
     }
-    if (!(wsum > 0.0)) {
+    const ivec2 px_hi = px + 1;
+    bool exact_pending = false;
+    for (uint i = 0u; live && i < tile_count; ++i) {
+        const uint tile = overflow ? i : group_tiles[i];
+        if (!inside(tile, px, px_hi)) {
+            continue;
+        }
+        const uint table = first_light + tile * 8u;
+        const uint lights_at = data.d[table + 4u];
+        const uint lights = data.d[table + 5u];
+        for (uint k = 0u; k < lights; ++k) {
+            const uint at = lights_at + k * 16u;
+            const float inv_r2 = word(at + 3u);
+            if (!(inv_r2 > 0.0)) {
+                continue;
+            }
+            const vec3 L = vec3(word(at), word(at + 1u), word(at + 2u));
+            const vec3 to_light = L - P;
+            const float t2 = dot(to_light, to_light) * inv_r2;
+            if (t2 >= 1.0) {
+                continue;
+            }
+            const vec3 col = vec3(word(at + 4u), word(at + 5u), word(at + 6u));
+            float w = 1.0 - t2;
+            w *= w * dot(col, vec3(0.299, 0.587, 0.114));
+            if (!(w > 1e-5)) {
+                continue;
+            }
+            wsum += w;
+            if (exact) {
+                exact_pending = true;
+                continue;
+            }
+            float cand_w = w;
+            vec3 cand_l = L;
+            if (w > top_w) {
+                cand_w = top_w;
+                cand_l = top_l;
+                top_w = w;
+                top_l = L;
+            }
+            if (cand_w > 0.0) {
+                rest_w += cand_w;
+                seed = seed * 747796405u + 2891336453u;
+                const uint mixed = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
+                const float u = float((mixed >> 22u) ^ mixed) * (1.0 / 4294967296.0);
+                if (u * rest_w < cand_w) {
+                    rest_l = cand_l;
+                }
+            }
+        }
+    }
+    live = live && wsum > 0.0;
+
+    float old_ratio = 1.0;
+    float old_stable = 0.0;
+    bool old_valid = false;
+    if (live && (history_flags & HISTORY_READ) != 0u) {
+        const vec4 v = vec4(P, 1.0);
+        const vec3 p = vec3(dot(vec4(word(history_at + 2u), word(history_at + 3u), word(history_at + 4u),
+                                     word(history_at + 5u)), v),
+                            dot(vec4(word(history_at + 6u), word(history_at + 7u), word(history_at + 8u),
+                                     word(history_at + 9u)), v),
+                            dot(vec4(word(history_at + 10u), word(history_at + 11u), word(history_at + 12u),
+                                     word(history_at + 13u)), v));
+        const vec4 clip = vec4(dot(row(history_at + 14u), vec4(p, 1.0)), dot(row(history_at + 18u), vec4(p, 1.0)),
+                               dot(row(history_at + 22u), vec4(p, 1.0)), dot(row(history_at + 26u), vec4(p, 1.0)));
+        if (clip.w > 1e-4) {
+            const vec2 ndc = clip.xy / clip.w;
+            const ivec2 hp = ivec2(floor(vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * size));
+            if (all(greaterThanEqual(hp, ivec2(0))) && all(lessThan(hp, ivec2(size)))) {
+                const vec4 h = imageLoad(history_prev, hp);
+                if (h.g > 0.0 && abs(h.g - p.z) < 0.03 * p.z + 0.02) {
+                    old_valid = true;
+                    old_ratio = h.r;
+                    old_stable = h.b;
+                }
+            }
+        }
+    }
+    const uint refresh = data.d[history_at + 1u];
+    const bool due = history_flags == 0u ||
+                     ((gl_WorkGroupID.x & 1u) + 2u * (gl_WorkGroupID.y & 1u)) == (refresh & 3u);
+    if (live && (due || !old_valid || old_stable < STABLE_FRAMES)) {
+        atomicOr(group_trace, 1u);
+    }
+    barrier();
+    if (!live) {
         return;
     }
-    const float scale = mix(1.0, vsum / wsum, strength * fade);
+    float ratio;
+    float stable;
+    if (group_trace != 0u) {
+        if (exact) {
+            if (exact_pending) {
+                for (uint i = 0u; i < tile_count; ++i) {
+                    const uint tile = overflow ? i : group_tiles[i];
+                    if (!inside(tile, px, px_hi)) {
+                        continue;
+                    }
+                    const uint table = first_light + tile * 8u;
+                    const uint lights_at = data.d[table + 4u];
+                    const uint lights = data.d[table + 5u];
+                    for (uint k = 0u; k < lights; ++k) {
+                        const uint at = lights_at + k * 16u;
+                        const float inv_r2 = word(at + 3u);
+                        if (!(inv_r2 > 0.0)) {
+                            continue;
+                        }
+                        const vec3 L = vec3(word(at), word(at + 1u), word(at + 2u));
+                        const vec3 to_light = L - P;
+                        const float t2 = dot(to_light, to_light) * inv_r2;
+                        if (t2 >= 1.0) {
+                            continue;
+                        }
+                        const vec3 col = vec3(word(at + 4u), word(at + 5u), word(at + 6u));
+                        float w = 1.0 - t2;
+                        w *= w * dot(col, vec3(0.299, 0.587, 0.114));
+                        if (!(w > 1e-5)) {
+                            continue;
+                        }
+                        vsum += w * visibility(origin, reach, L);
+                    }
+                }
+            }
+        } else {
+            vsum = top_w * visibility(origin, reach, top_l);
+            if (rest_w > 0.0) {
+                vsum += rest_w * visibility(origin, reach, rest_l);
+            }
+        }
+        ratio = clamp(vsum / wsum, 0.0, 1.0);
+        stable = old_valid && abs(ratio - old_ratio) < STABLE_CHANGE ? min(old_stable + 1.0, 15.0) : 0.0;
+    } else {
+        ratio = old_ratio;
+        stable = old_stable;
+    }
+    if ((history_flags & HISTORY_WRITE) != 0u) {
+        imageStore(history_cur, px, vec4(ratio, P.z, stable, 1.0));
+    }
+    const float scale = mix(1.0, ratio, strength * fade);
     imageStore(cur0, px, vec4(s0 + max(c0 - s0, vec3(0.0)) * scale, 1.0));
     imageStore(cur1, px, vec4(s1 + max(c1 - s1, vec3(0.0)) * scale, 1.0));
 }

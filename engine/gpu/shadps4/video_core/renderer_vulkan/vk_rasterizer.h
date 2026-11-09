@@ -466,6 +466,35 @@ private:
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
     void PrintPipeStats();
+    struct RunCensus {
+        enum Cut : u32 {
+            CutTask,
+            CutDispatch,
+            CutPacket,
+            CutPass,
+            CutUpload,
+            CutTexture,
+            CutTarget,
+            CutWrite,
+            CutOther,
+            CutCount,
+        };
+        std::atomic<u64> draws{0}, clean{0}, streamed{0}, clean_cycles{0}, dirty_cycles{0};
+        std::atomic<u64> runs{0}, long_runs{0}, long_draws{0}, long_cycles{0};
+        std::array<std::atomic<u64>, 4> lengths{};
+        std::array<std::atomic<u64>, CutCount> cuts{};
+        u32 run = 0;
+        u64 run_cycles = 0;
+    };
+    struct CensusMark {
+        u64 passes, uploads, written, streamed, textures, targets, start;
+    };
+    static bool CensusWanted();
+    CensusMark CensusBegin();
+    void CensusDraw(const CensusMark& mark);
+    void CensusEndRun(u32 cut);
+    RunCensus census;
+    bool census_other = false;
     /// The registers of the draw being recorded: stage B's copy there, else Liverpool's.
     const AmdGpu::Regs& Regs() const;
     AmdGpu::CbDbExtent CbExtent(u32 index) const;
@@ -914,6 +943,9 @@ private:
     std::array<ObjectBind, 4096> object_binds{};
     u64 object_bind_checks = 0;
     std::pair<const VideoCore::Buffer*, u64> BindByObject(u64 key, VAddr base, u64 size);
+    std::pair<const VideoCore::Buffer*, u64> BindVertexRange(u64 key, VAddr base, u64 size);
+    static constexpr u64 RangeBindKey = 0x52414e4745ull;
+    u64 range_binds = 0, range_hits = 0, range_checked = 0, range_differ = 0;
     const RingBinding* FindRingBinding(const Shader::Info& stage, u32 index) const {
         for (u32 i = 0; i < num_ring_stages; ++i) {
             if (ring_stages[i].info == &stage) {
@@ -971,6 +1003,7 @@ private:
     std::atomic<u64> signals_published_upto{0};
     std::atomic<bool> signal_flush_requested{false};
     std::jthread gpu_signal_thread;
+    bool gpu_signal_started = false;
     void SubmitForSignalsNow();
     /// steady_clock nanoseconds of the last submission (written by both pipeline stages).
     std::atomic<s64> last_flush_ns{0};

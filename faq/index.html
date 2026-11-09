@@ -483,7 +483,7 @@ GPU fault: 3 addresses
 <span class="w">STOP: GPU library assertion failed</span>
 bb-probe exited with code 23
 - the game exited (code 23) -</pre>
-            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.39 beta 31</span></div>
+            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.40</span></div>
             <div class="ui-back" id="crash-back">
               <div class="ui-modal" role="dialog" aria-label="The game crashed">
                 <h4>The game crashed</h4>
@@ -542,14 +542,14 @@ bb-probe exited with code 23
                   <div class="ui-row3"><span class="ui-btn">Close</span><span class="ui-btn ring">Copy report</span><span class="ui-btn def">Use safe mode</span></div>
                 </div>
               </div>
-              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.39 beta 31</span></div>
+              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.40</span></div>
             </div>
           </div>
           <div class="shot">
             <div data-ui role="img" aria-label="The launcher's More, Log page with the Copy, Export and Clear buttons">
               <div class="ui-pills sub"><span>Mods</span><span>Cheats</span><span>Engine</span><span class="on">Log</span></div>
               <div class="ui-tools"><span class="ui-tog" aria-pressed="true"></span><span>Follow new output</span><span class="grow"></span><span class="ui-btn">Copy</span><span class="ui-btn ring">Export…</span><span class="ui-btn">Clear</span></div>
-              <pre class="ui-log">Lantern Engine 0.9.39 beta 31
+              <pre class="ui-log">Lantern Engine 0.9.40
 GPU: NVIDIA GeForce RTX 3070 Ti
 Shaders: 4,812 pipelines ready
 Loading: begins
@@ -720,6 +720,13 @@ Loading: begins
           </div>
         </details>
         <details>
+          <summary>How do I get the picture as on the PS4?</summary>
+          <div class="answer">
+            <p><span class="k">Looks › PS4 original › Use</span>, or in the game <span class="k">System › PC Looks</span>. It turns the game's own anti-aliasing, depth of field, motion blur and chromatic aberration back on, which Lantern keeps off by default, and adds none of the extra effects. Like the PS4, it plays at your output resolution with no upscaler, so expect fewer FPS than with DLSS or FSR.</p>
+            <p>Picking another look, or <b>Go back</b> at the top of the Looks page, brings your upscaler back. The look you're using shows <b>Selected</b>.</p>
+          </div>
+        </details>
+        <details>
           <summary>Output resolution</summary>
           <div class="answer">
             <p><span class="k">Display › Output resolution</span> is the size of the finished picture, usually your screen's. The upscaler renders below it and fills it in. On cards with 3–4 GB of video memory, 1080p is the safe choice.</p>
@@ -881,8 +888,8 @@ Loading: begins
 
   <section id="coop">
     <div class="sec-head">
-      <h2 class="rv">Seamless co-op <span class="bt">Beta</span></h2>
-      <p class="lead rv" style="--d:80ms">Play the host's world together, up to 4 hunters, in a private encrypted room. In the 0.9.39 betas; get one from <a href="#beta-join">Join or leave the beta</a>.</p>
+      <h2 class="rv">Seamless co-op</h2>
+      <p class="lead rv" style="--d:80ms">Play the host's world together, up to 4 hunters, in a private encrypted room. In 0.9.40 and newer. It's still being worked on: expect bugs, and report them in #issues on our Discord.</p>
     </div>
     <div class="qa rv" style="--d:120ms">
       <div class="qa-list">
@@ -903,7 +910,7 @@ Loading: begins
           <summary>Set it up: host and guests</summary>
           <div class="answer">
             <ol>
-              <li>Everyone: update to the newest beta (<span class="k">Settings › Updates</span>, channel <b>Beta</b>).</li>
+              <li>Everyone: update to the same newest version (<span class="k">Settings › Updates</span>). Everyone in a room must run the same version.</li>
               <li>Everyone: on the launcher's <b>Online</b> page, turn on <b>Play online</b> and <b>Seamless co-op</b>.</li>
               <li>Everyone: set your <b>Plate name</b>, the name the others see above your hunter (up to 16 characters).</li>
               <li>The host sets <b>Role</b> to <b>Host</b>, presses <b>Copy invite code</b> and sends the code to friends (Discord DM, for example).</li>
@@ -960,7 +967,7 @@ Loading: begins
               <li>A guest's save keeps what was done while they were in the host's world. It never gets the host's earlier progress.</li>
               <li>An NPC is one character for the whole room: killing or angering one does it for everyone.</li>
             </ul>
-            <p>New in 0.9.39 beta 31: guests get the map's items and chests, their full enemy drops, and NPCs that talk through windows. This hasn't been played with two hunters yet, so please tell us in #issues if a guest still misses items.</p>
+            <p>Since 0.9.40 guests get the map's items and chests, their full enemy drops, and NPCs that talk through windows. We haven't played this with two hunters ourselves yet, so please tell us in #issues if a guest still misses items.</p>
           </div>
         </details>
         <details>
@@ -1071,8 +1078,8 @@ Loading: begins
           <div class="answer">
             <ul>
               <li>Update to the newest version: many flicker and texture bugs are fixed in newer versions.</li>
-              <li>Lamp fog popping in and out, or sunlight fog flickering to another colour: fixed in 0.9.39 beta 31 <span class="bt">Beta</span>. <span class="k">Graphics</span> has <b>Steady lamp fog</b> and <b>Steady sunlight color</b> to compare.</li>
-              <li>On 0.9.39 beta 31 and newer, something drawn wrong that the version before drew right: turn off <span class="k">Engine switches › Native renderer: draws</span> once, and say in your report whether it helped.</li>
+              <li>Lamp fog popping in and out, or sunlight fog flickering to another colour: fixed in 0.9.40. <span class="k">Graphics</span> has <b>Steady lamp fog</b> and <b>Steady sunlight color</b> to compare.</li>
+              <li>The native renderer is off by default since 0.9.40. If you turned parts of it on under <span class="k">Engine switches › Native renderer</span> and something draws wrong, turn them off again and say in your report which one it was.</li>
               <li>If it happens in every save (missing skin or hair), clear the shader cache once: <span class="k">Settings › Shader cache › Clear</span>.</li>
               <li>Try with mods off, and with frame generation off.</li>
               <li>Still there? Post a short video and your log.</li>
@@ -1128,17 +1135,37 @@ Loading: begins
       <div class="band rv" data-find>
         <div class="q"><q>Lamp fog pops in and out when I move the camera</q><span class="who">Forbidden Woods bridge, lots of lamps.</span></div>
         <div class="answer"><p>The game only lists lamps it sees, so the fog dropped lamps as the camera turned. Lamps are now remembered and fade in and out. <span class="k">Graphics › Steady lamp fog</span> switches it.</p></div>
-        <span class="st fixed">Fixed in 0.9.39 beta 31</span>
+        <span class="st fixed">Fixed in 0.9.40</span>
       </div>
       <div class="band rv" data-find>
         <div class="q"><q>Sunlight fog flickers between white and blue</q></div>
         <div class="answer"><p>The fog took its colour from a default light that came and went. It now follows the area's own light and changes smoothly, so some places look bluer than before. <span class="k">Graphics › Steady sunlight color</span> switches it.</p></div>
-        <span class="st fixed">Fixed in 0.9.39 beta 31</span>
+        <span class="st fixed">Fixed in 0.9.40</span>
       </div>
       <div class="band rv" data-find>
         <div class="q"><q>As a guest in seamless co-op I get no items from chests or enemies</q></div>
         <div class="answer"><p>Guests now get the map's items, chests and their own enemy drops. Please tell us in #issues if a guest still misses items. See <a href="#coop">Items, loot and progress</a>.</p></div>
-        <span class="st tip">Try 0.9.39 beta 31</span>
+        <span class="st tip">Try 0.9.40</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The elevator shakes and I fall through it</q><span class="who">High frame rates.</span></div>
+        <div class="answer"><p>The physics world stepped at a fixed rate while the hunter followed the real frame time, so below your target the two drifted apart. They now share one frame time.</p></div>
+        <span class="st fixed">Fixed in 0.9.40</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>My legs sink into stairs and edges at 120 FPS</q></div>
+        <div class="answer"><p>The game pushes you off steep edges by a fixed amount every frame, so at 120 FPS the push was four times as strong as on the console. It now builds on the game's own 1/30 s ticks. At 60 FPS, slopes and ladder tops no longer slow you to half speed either.</p></div>
+        <span class="st fixed">Fixed in 0.9.40</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Can I play in Japanese and still go online?</q></div>
+        <div class="answer"><p>Yes: turn on <span class="k">Mods &amp; patches › Unlock All Languages (Works Online)</span> and leave <b>Unlock Game Region</b> off. Every text language and the eight voice languages with their own recordings become available on the international server.</p></div>
+        <span class="st fixed">Fixed in 0.9.40</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Black screen after Apply and restart in the game</q></div>
+        <div class="answer"><p>The new start asked for its memory while the old game still held its own. It now waits for the old one to end first.</p></div>
+        <span class="st fixed">Fixed in 0.9.40</span>
       </div>
       <div class="band rv" data-find>
         <div class="q"><q>Game crash after 10 min, sometimes 1h later</q><span class="who">The graphics driver stopped responding.</span></div>
@@ -1208,17 +1235,18 @@ Loading: begins
           <div data-ui class="upd" id="upd-ui">
             <p class="upd-label">Updates</p>
             <div class="upd-card">
-              <div class="upd-row"><div>Launcher updates<small>You have v0.9.39 beta 31, the latest (v0.9.39 beta 31)</small></div>
+              <div class="upd-row"><div>Launcher updates<small>You have v0.9.40, the latest (v0.9.40)</small></div>
                 <span class="upd-ctl"><span class="ui-btn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1M13.5 2.5v3h-3"/></svg>Check now</span></span></div>
               <div class="upd-row col"><div>Update channel</div>
                 <div class="upd-seg" data-on="beta" role="group" aria-label="Update channel"><button type="button" data-ch="stable" aria-pressed="false">Stable</button><button type="button" data-ch="beta" aria-pressed="true">Beta</button></div></div>
               <div class="upd-row"><div>Check for updates at start</div><button type="button" class="ui-tog" aria-pressed="true" aria-label="Check for updates at start"></button></div>
-              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.39 beta 31. 130 versions to choose from</small></div>
+              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.40. 131 versions to choose from</small></div>
                 <span class="upd-ctl">
-                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.39 beta 31 (installed)</span><span aria-hidden="true">⌄</span></button>
+                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.40 · stable (installed)</span><span aria-hidden="true">⌄</span></button>
                   <button type="button" class="ui-btn" id="upd-install" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5M3 14h10"/></svg>Install</button>
                   <div class="upd-list" id="upd-list" role="listbox" aria-label="Version">
-                    <button type="button" role="option" aria-selected="true" data-v="v0.9.39 beta 31 (installed)">v0.9.39 beta 31 (installed)</button>
+                    <button type="button" role="option" aria-selected="true" data-v="v0.9.40 · stable (installed)">v0.9.40 · stable (installed)</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 31">v0.9.39 beta 31</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 30">v0.9.39 beta 30</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 29">v0.9.39 beta 29</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.38 · stable">v0.9.38 · stable</button>
@@ -1279,7 +1307,7 @@ Loading: begins
   </section>
 
   <section id="beta-current">
-    <div class="sec-head"><h2>Current beta</h2><p class="lead">The newest beta is <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.39 beta 31</a>; the newest stable is 0.9.38.</p></div>
+    <div class="sec-head"><h2>No beta right now</h2><p class="lead">The newest version is the stable <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.40</a>, which has everything from the 0.9.39 betas; on the beta channel the launcher installs it too.</p></div>
     <div class="qa" id="beta-qa" hidden>
       <div class="qa-list" id="beta-notes"></div>
       <div class="pane" aria-live="polite"></div>
@@ -1329,7 +1357,7 @@ Loading: begins
       </div>
       <div class="tile t-ver">
         <span>Newest version</span>
-        <b id="newest">0.9.38</b>
+        <b id="newest">0.9.40</b>
         <a href="https://github.com/Awakenchan/LanternEngine/releases" id="newest-link">Release notes</a>
       </div>
       <div class="tile t-word">
@@ -1647,7 +1675,7 @@ Loading: begins
       var v = o.getAttribute('data-v');
       document.getElementById('upd-val').textContent = v;
       install.disabled = /installed/.test(v);
-      updSay.textContent = install.disabled ? 'You have v0.9.39 beta 31. 130 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.39 beta 31.';
+      updSay.textContent = install.disabled ? 'You have v0.9.40. 131 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.40.';
       openList(false);
     });
   });

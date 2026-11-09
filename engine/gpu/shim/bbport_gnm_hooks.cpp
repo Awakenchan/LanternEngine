@@ -317,29 +317,167 @@ using ReserveFn = u8(BB_GNM_ABI*)(u64 cb, std::uint32_t dwords, u64 user);
 using ThreadTraceFn = u8(BB_GNM_ABI*)();
 constexpr u64 ThreadTraceCheck = 0x1089c40;
 
+constexpr u64 SetIndexOffset = 0x1074040, SetNumInstances = 0x1075370;
+constexpr u64 GxDrawsBegin = 0x21696c0, GxDrawsEnd = 0x21699d0;
+constexpr std::size_t GxDrawSites = 4;
+
+bool tokens = false;
+u64 index_sites[GxDrawSites], instances_sites[GxDrawSites];
+
+struct Deferred {
+    u64 cb = 0;
+    u64 at = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t base_vertex = 0;
+    std::uint32_t instances = 0;
+};
+thread_local Deferred deferred;
+
+u64 WritePointer(u64 cb) {
+    return *reinterpret_cast<const u64*>(cb + 0x10);
+}
+
+bool Reserve(u64 cb, std::uint32_t dwords) {
+    const u64 at = WritePointer(cb);
+    const u64 end = *reinterpret_cast<const u64*>(cb + 0x8);
+    if (std::uint32_t((end - at) >> 2) >= dwords) {
+        return true;
+    }
+    const auto reserve = *reinterpret_cast<const ReserveFn*>(cb + 0x18);
+    return reserve(cb, dwords, *reinterpret_cast<const u64*>(cb + 0x20)) != 0;
+}
+
+void WritePackets(u64 cb, const std::uint32_t* words, std::uint32_t count) {
+    if (!Reserve(cb, count)) {
+        return;
+    }
+    auto* out = *reinterpret_cast<std::uint32_t* const*>(cb + 0x10);
+    std::memcpy(out, words, count * sizeof(std::uint32_t));
+    *reinterpret_cast<u64*>(cb + 0x10) = reinterpret_cast<u64>(out + count);
+}
+
+bool IsSite(const u64* sites, u64 return_address) {
+    for (std::size_t k = 0; k < GxDrawSites; ++k) {
+        if (sites[k] == return_address) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void FlushDeferred() {
+    if (!deferred.flags) {
+        return;
+    }
+    const Deferred d = deferred;
+    deferred = {};
+    BbNativeCalls::DrawRecord r;
+    r.flags = d.flags;
+    r.base_vertex = d.base_vertex;
+    r.instances = d.instances;
+    std::uint32_t words[BbNativeCalls::SetIndexOffsetDwords + BbNativeCalls::SetNumInstancesDwords];
+    WritePackets(d.cb, words, BbNativeCalls::EncodeRegisterPackets(r, words));
+    BbNativeCalls::NoteToken(false);
+}
+
+BB_GNM_ABI void DeferSetIndexOffset(u64 cb, std::uint32_t value) {
+    const u64 from = reinterpret_cast<u64>(__builtin_return_address(0));
+    FlushDeferred();
+    if (tokens && IsSite(index_sites, from)) {
+        deferred = {cb, WritePointer(cb), BbNativeCalls::CarriesBaseVertex, value, 0};
+        return;
+    }
+    const std::uint32_t words[] = {0xc0016900u, 0x102u, value};
+    WritePackets(cb, words, 3);
+}
+
+BB_GNM_ABI void DeferSetNumInstances(u64 cb, std::uint32_t value) {
+    const u64 from = reinterpret_cast<u64>(__builtin_return_address(0));
+    if (IsSite(instances_sites, from) && deferred.flags == BbNativeCalls::CarriesBaseVertex &&
+        deferred.cb == cb && deferred.at == WritePointer(cb)) {
+        deferred.flags |= BbNativeCalls::CarriesInstances;
+        deferred.instances = value;
+        return;
+    }
+    FlushDeferred();
+    const std::uint32_t words[] = {0xc0002f00u, value};
+    WritePackets(cb, words, 2);
+}
+
+std::uint32_t DeferKindAt(u64 offset) {
+    return offset == SetIndexOffset ? 1 : offset == SetNumInstances ? 2 : 0;
+}
+
+u64 DeferEntry(std::uint32_t kind) {
+    return kind == 1 ? reinterpret_cast<u64>(&DeferSetIndexOffset)
+                     : reinterpret_cast<u64>(&DeferSetNumInstances);
+}
+
+std::size_t FindCalls(const u8* image, u64 target, u64* sites) {
+    std::size_t found = 0;
+    for (u64 at = GxDrawsBegin; at + 5 <= GxDrawsEnd; ++at) {
+        if (image[at] != 0xe8) {
+            continue;
+        }
+        std::int32_t rel;
+        std::memcpy(&rel, image + at + 1, 4);
+        if (at + 5 + std::int64_t(rel) != std::int64_t(target)) {
+            continue;
+        }
+        if (found < GxDrawSites) {
+            sites[found] = reinterpret_cast<u64>(image) + at + 5;
+        }
+        ++found;
+    }
+    return found;
+}
+
+bool TokensWanted() {
+    const char* env = std::getenv("LANTERN_DRAW_TOKENS");
+    return !(env && env[0] == '0');
+}
+
 void NativeDraw(u64 cb, BbNativeCalls::DrawRecord r) {
     const std::uint32_t index = native_index[r.kind];
     if (census) {
         __atomic_fetch_add(CounterAt(index), 1, __ATOMIC_RELAXED);
     }
-    const std::uint32_t n = BbNativeCalls::ReservedDwords(r.kind);
-    const u64 before = *reinterpret_cast<const u64*>(cb + 0x10);
-    const u64 end = *reinterpret_cast<const u64*>(cb + 0x8);
-    if (std::uint32_t((end - before) >> 2) <= n - 1) {
-        const auto reserve = *reinterpret_cast<const ReserveFn*>(cb + 0x18);
-        if (!reserve(cb, n, *reinterpret_cast<const u64*>(cb + 0x20))) {
-            return;
+    if (deferred.flags) {
+        if (deferred.cb == cb && deferred.at == WritePointer(cb) &&
+            deferred.flags == (BbNativeCalls::CarriesBaseVertex | BbNativeCalls::CarriesInstances)) {
+            r.flags = deferred.flags;
+            r.base_vertex = deferred.base_vertex;
+            r.instances = deferred.instances;
+            deferred = {};
+        } else {
+            FlushDeferred();
         }
+    }
+    const bool trace = reinterpret_cast<ThreadTraceFn>(image_base + ThreadTraceCheck)();
+    std::uint32_t registers[BbNativeCalls::SetIndexOffsetDwords + BbNativeCalls::SetNumInstancesDwords];
+    const std::uint32_t register_words = trace ? BbNativeCalls::EncodeRegisterPackets(r, registers) : 0;
+    const std::uint32_t n = trace ? register_words + BbNativeCalls::ReservedDwords(r.kind)
+                                  : BbNativeCalls::RecordDwords(r.kind, r.flags);
+    const u64 before = WritePointer(cb);
+    if (!Reserve(cb, n)) {
+        return;
     }
     auto* out = *reinterpret_cast<std::uint32_t* const*>(cb + 0x10);
     const std::uint32_t flags = *reinterpret_cast<const std::uint32_t*>(cb + 0x28);
     r.predicate = flags & 1;
-    if (reinterpret_cast<ThreadTraceFn>(image_base + ThreadTraceCheck)()) {
-        const std::uint32_t words = BbNativeCalls::EncodeDrawPacket(r, out);
-        out[words] = 0xc0004600u | (flags & 2);
-        out[words + 1] = 0x35;
+    if (trace) {
+        std::memcpy(out, registers, register_words * sizeof(std::uint32_t));
+        const std::uint32_t words = BbNativeCalls::EncodeDrawPacket(r, out + register_words);
+        out[register_words + words] = 0xc0004600u | (flags & 2);
+        out[register_words + words + 1] = 0x35;
         BbNativeCalls::NoteWritten(false);
+        if (r.flags) {
+            BbNativeCalls::NoteToken(false);
+        }
     } else {
+        if (r.flags) {
+            BbNativeCalls::NoteToken(true);
+        }
         BbNativeCalls::EncodeRecordNop(r, out);
         BbNativeCalls::NoteWritten(true);
         if (BbEngine::GxTrace::On()) BbEngine::GxTrace::Stamp(reinterpret_cast<u64>(out), r.index_count);
@@ -678,11 +816,54 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
         std::sscanf(r, "%zu:%zu", &first, &last);
     }
     u8* counters = stubs + code_bytes;
-    std::size_t native_hooked = 0;
+    std::size_t native_hooked = 0, deferred_hooked = 0;
+    if (native_mode == BbNativeCalls::Mode::Native && TokensWanted() && size >= GxDrawsEnd) {
+        const std::size_t index_calls = FindCalls(image, SetIndexOffset, index_sites);
+        const std::size_t instances_calls = FindCalls(image, SetNumInstances, instances_sites);
+        tokens = index_calls == GxDrawSites && instances_calls == GxDrawSites &&
+                 std::memcmp(image + SetIndexOffset, "\x55\x48\x89\xe5\x41\x56", 6) == 0 &&
+                 std::memcmp(image + SetNumInstances, "\x55\x48\x89\xe5\x41\x56", 6) == 0;
+        if (!tokens) {
+            std::printf("Draw tokens: off - GX's draws call setIndexOffset %zu and setNumInstances %zu "
+                        "times (4 each in the 1.09 eboot)\n",
+                        index_calls, instances_calls);
+        }
+    }
     for (std::size_t i = first; i < std::min(last, Count); ++i) {
         const Entry& e = Table[i];
         const std::uint32_t kind =
             native_mode != BbNativeCalls::Mode::Off ? NativeKindAt(e.offset) : 0;
+        const std::uint32_t defer = tokens ? DeferKindAt(e.offset) : 0;
+        if (defer) {
+            u8* fn = image + e.offset;
+            u8* s = stubs + i * SlotSize;
+            Writer w{s};
+            w.Put({0x48, 0xb8});
+            w.Imm64(DeferEntry(defer));
+            w.Put({0xff, 0xe0});
+            std::int32_t to_stub;
+            if (!Rel32(fn + 5, s, to_stub)) {
+                ++mismatched;
+                continue;
+            }
+#ifdef _WIN32
+            DWORD old_protect = 0;
+            if (!VirtualProtect(fn, e.prologue_size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+                ++mismatched;
+                continue;
+            }
+#endif
+            fn[0] = 0xe9;
+            std::memcpy(fn + 1, &to_stub, 4);
+            std::memset(fn + 5, 0xcc, e.prologue_size - 5);
+#ifdef _WIN32
+            VirtualProtect(fn, e.prologue_size, old_protect, &old_protect);
+            FlushInstructionCache(GetCurrentProcess(), fn, e.prologue_size);
+#endif
+            ++patched;
+            ++deferred_hooked;
+            continue;
+        }
         if (!observe && !census && kind == 0) {
             continue;
         }
@@ -759,6 +940,12 @@ void PatchImage(unsigned char* image, std::uint64_t size) {
     if (native_mode != BbNativeCalls::Mode::Off) {
         std::printf("Native calls: %zu of 3 draw functions hooked (%s)\n", native_hooked,
                     native_mode == BbNativeCalls::Mode::Native ? "replaced" : "verified");
+    }
+    if (tokens) {
+        tokens = deferred_hooked == 2;
+        std::printf("Draw tokens: %s - GX's draws carry their base vertex and instance count in the "
+                    "draw's record (LANTERN_DRAW_TOKENS=0 off)\n",
+                    tokens ? "on" : "off, setIndexOffset or setNumInstances not hooked");
     }
     if (!observe && !census) {
         std::fflush(stdout);

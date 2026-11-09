@@ -231,7 +231,7 @@ if(FFX_VK_PORTABLE_BUILD_FSR3_HOST)
             "${FFX_1_1_4_ROOT}/src/shared"
             "${FFX_1_1_4_ROOT}/src/components"
     )
-    if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ffx_vulkan_fsr3_host_1_1_4 PRIVATE
             -include "${CMAKE_CURRENT_SOURCE_DIR}/src/ffx_1_1_4_portability.hpp"
         )
@@ -281,7 +281,7 @@ if(FFX_VK_PORTABLE_BUILD_FSR3_VK_BACKEND)
     target_link_libraries(ffx_vulkan_fsr3_vk_backend_1_1_4
         PUBLIC ffx-vulkan::fsr3-host-1.1.4 Vulkan::Vulkan
     )
-    if(NOT WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(NOT MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(ffx_vulkan_fsr3_vk_backend_1_1_4 PRIVATE
             -include "${CMAKE_CURRENT_SOURCE_DIR}/src/ffx_1_1_4_portability.hpp"
         )

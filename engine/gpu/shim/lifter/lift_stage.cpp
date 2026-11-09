@@ -947,7 +947,8 @@ void Lift_::VertexMotion() {
     };
     const u32 position = Emit(O(spv::Op::OpLoad), t_v4f, Ty::V4F, {var_position});
     const u32 raw_param = PushU32(11, -1);
-    const u32 param_index = in.vertex_capture ? IOp(O(spv::Op::OpBitwiseAnd), raw_param, CU(0xffffu)) : raw_param;
+    const u32 masked_param = in.vertex_capture ? IOp(O(spv::Op::OpBitwiseAnd), raw_param, CU(0xffffu)) : raw_param;
+    const u32 param_index = Select(ICmp(O(spv::Op::OpULessThan), masked_param, CU(MotionParamsCapacity)), masked_param, CU(0));
     const u32 params_address = Emit(O(spv::Op::OpLoad), t_u64, Ty::U64, {Emit(O(spv::Op::OpAccessChain), ptr_u64, Ty::None, {var_motion_addr, CU(0)})});
     const u32 positions_address = Emit(O(spv::Op::OpLoad), t_u64, Ty::U64, {Emit(O(spv::Op::OpAccessChain), ptr_u64, Ty::None, {var_motion_addr, CU(1)})});
     const u32 ptr_v4u = PtrType(storage, t_v4u);
@@ -1019,7 +1020,8 @@ void Lift_::VertexCapture() {
     };
     const u32 position = Emit(O(spv::Op::OpLoad), t_v4f, Ty::V4F, {var_position});
     const u32 raw_param = PushU32(11, -1);
-    const u32 param_index = both ? IOp(O(spv::Op::OpShiftRightLogical), raw_param, CU(16u)) : raw_param;
+    const u32 capture_param = both ? IOp(O(spv::Op::OpShiftRightLogical), raw_param, CU(16u)) : raw_param;
+    const u32 param_index = Select(ICmp(O(spv::Op::OpULessThan), capture_param, CU(CaptureParamsCapacity)), capture_param, CU(0));
     const auto table = [&](u32 member) {
         return Emit(O(spv::Op::OpLoad), t_u64, Ty::U64,
                     {Emit(O(spv::Op::OpAccessChain), ptr_u64, Ty::None, {var_motion_addr, CU(member)})});

@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -45,6 +45,36 @@ namespace BloodborneLauncher.Core
             catch { return false; }
         }
 
+        public static bool HasHunters(string dir)
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) return false;
+                foreach (var file in Directory.EnumerateFiles(dir, "userdata000?", SearchOption.AllDirectories))
+                {
+                    var name = Path.GetFileName(file);
+                    if (name.Length != 12 || !char.IsAsciiDigit(name[^1])) continue;
+                    try
+                    {
+                        using var stream = File.OpenRead(file);
+                        if (stream.Length != SaveSlot.FileSize) return true;
+                        var head = new byte[64];
+                        stream.ReadExactly(head);
+                        if (Array.Exists(head, b => b != 0)) return true;
+                    }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch
+            {
+                return HasFiles(dir);
+            }
+        }
+
         /// <summary>The profiles in `root` with saves (Main first) and the newest save time.</summary>
         public static (List<string> Profiles, DateTime Saved) ProfilesWithSaves(string root)
         {
@@ -61,7 +91,7 @@ namespace BloodborneLauncher.Core
             foreach (var name in names)
             {
                 var data = SaveData(root, name);
-                if (!HasFiles(data)) continue;
+                if (!HasHunters(data)) continue;
                 found.Add(name);
                 try
                 {
@@ -161,7 +191,7 @@ namespace BloodborneLauncher.Core
             var found = new List<Found>();
             try
             {
-                if (HasFiles(SaveData(root, profile))) return found;
+                if (HasHunters(SaveData(root, profile))) return found;
                 var roots = new List<string>(moreRoots ?? Enumerable.Empty<string>());
                 roots.AddRange(SettingsRoots());
                 var vaultPlaces = new List<(string Root, string Dir)>();
@@ -193,7 +223,7 @@ namespace BloodborneLauncher.Core
                     if (!SameDir(path, root) && ProfilesWithSaves(path).Profiles.Count > 0) continue;
                     foreach (var name in new[] { profile, PlayerProfiles.Main }.Distinct(StringComparer.OrdinalIgnoreCase))
                     {
-                        if (Copies(Path.Combine(dir, PlayerProfiles.SafeName(name))).FirstOrDefault() is not { } copy) continue;
+                        if (Copies(Path.Combine(dir, PlayerProfiles.SafeName(name))).FirstOrDefault(c => HasHunters(Path.Combine(c, "savedata"))) is not { } copy) continue;
                         var when = DateTime.TryParseExact(Path.GetFileName(copy), Stamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out var t) ? t : DateTime.MinValue;
                         found.Add(new Found(path, new List<string> { name }, when, Path.Combine(copy, "savedata")));
                         break;
@@ -290,7 +320,8 @@ namespace BloodborneLauncher.Core
         {
             if (found.Copy == null) return;
             var target = SaveBackups.SaveData(s);
-            if (HasFiles(target)) throw new IOException(L.T("This profile has saves now; nothing was replaced."));
+            if (HasHunters(target)) throw new IOException(L.T("This profile has saves now; nothing was replaced."));
+            if (HasFiles(target)) SaveBackups.Create(s, beforeRestore: true);
             var staging = target + ".restoring";
             if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
             SaveBackups.Copy(found.Copy, staging);

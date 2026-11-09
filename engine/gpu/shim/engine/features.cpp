@@ -8,6 +8,7 @@
 #include "change_appearance.h"
 #include "cheats.h"
 #include "effect_timing.h"
+#include "ground_trace.h"
 #include "engine_state.h"
 #include "camera_timing.h"
 #include "frame_rate.h"
@@ -146,6 +147,7 @@ void Install(std::uint8_t* image, std::size_t size) {
     const bool online = OnlineFixes::Install(image, size);
     const bool guard = RenderGuard::Install(image, size);
     const bool timing = EffectTiming::Install(image, size);
+    const bool ground_trace = GroundTrace::Install(image, size);
     const bool frame_rate = FrameRate::Install(image, size);
     CameraTiming::Install(image, size);
     const bool slots = JobSlots::Install(image, size);
@@ -155,7 +157,7 @@ void Install(std::uint8_t* image, std::size_t size) {
     GxDraws::Install(image, size);
     GxRecords::Install(image, size);
     if (!(editor || input || camera || wide || graphics || local_shadows || spot_shadows ||
-          directional_shadows || directional_resolution || menus || rebirth || cheats || online || guard || timing ||
+          directional_shadows || directional_resolution || menus || rebirth || cheats || online || guard || timing || ground_trace ||
           frame_rate || slots || status)) {
         for (auto& h : hooks) Discard(h);
         host_log("engine features off: none could be prepared");

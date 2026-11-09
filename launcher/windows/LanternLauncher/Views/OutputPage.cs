@@ -33,45 +33,76 @@ namespace BloodborneLauncher.Views
             _output.Classes.Add("CodeBox");
             Body.Children.Add(_output);
 
-            // One append per batch; while the page is not on screen nothing is laid out, and it
-            // catches up in one go when shown.
             Ws.GameOutput += batch =>
             {
-                if (!IsShown)
+                if (!IsShown || MainWindow.Instance?.WindowState == WindowState.Minimized)
                 {
                     _stale = true;
+                    _pending.Clear();
                     return;
                 }
-                _lines += batch.Count;
-                if (_lines > Workspace.MaxOutputLines + 500)
-                {
-                    Rebuild();
-                    return;
-                }
-                _output.Text += string.Join("\n", batch) + "\n";
-                if (_follow.IsChecked == true)
-                    ScrollToEnd();
+                _pending.AddRange(batch);
             };
             Ws.OutputCleared += () =>
             {
                 _output.Text = "";
                 _lines = 0;
+                _pending.Clear();
             };
-            AttachedToVisualTree += (_, _) => { if (_stale) Rebuild(); };
+            _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _timer.Tick += (_, _) => Tick();
+            AttachedToVisualTree += (_, _) =>
+            {
+                if (_stale) Rebuild();
+                _timer.Start();
+            };
+            DetachedFromVisualTree += (_, _) => _timer.Stop();
             Rebuild();
         }
 
+        private const int Kept = 2000;
+        private readonly List<string> _pending = new();
+        private readonly DispatcherTimer _timer;
+        private DateTime _flushed;
         private int _lines;
         private bool _stale;
+
+        private void Tick()
+        {
+            if (!IsShown || MainWindow.Instance?.WindowState == WindowState.Minimized) return;
+            if (_stale)
+            {
+                Rebuild();
+                return;
+            }
+            if (_pending.Count == 0) return;
+            var wait = MainWindow.Instance?.IsActive == true ? 250 : 2000;
+            if ((DateTime.UtcNow - _flushed).TotalMilliseconds < wait) return;
+            _flushed = DateTime.UtcNow;
+            _lines += _pending.Count;
+            if (_lines > Kept + 500)
+            {
+                Rebuild();
+                return;
+            }
+            _output.Text += string.Join("\n", _pending) + "\n";
+            _pending.Clear();
+            if (_follow.IsChecked == true)
+                ScrollToEnd();
+        }
 
         private void ScrollToEnd() =>
             Dispatcher.UIThread.Post(() => _output.CaretIndex = (_output.Text ?? "").Length, DispatcherPriority.Background);
 
         private void Rebuild()
         {
-            _output.Text = Ws.OutputLines.Count > 0 ? string.Join("\n", Ws.OutputLines) + "\n" : "";
-            _lines = Ws.OutputLines.Count;
+            var all = Ws.OutputLines;
+            var from = Math.Max(0, all.Count - Kept);
+            _output.Text = all.Count > 0 ? string.Join("\n", all.GetRange(from, all.Count - from)) + "\n" : "";
+            _lines = all.Count - from;
+            _pending.Clear();
             _stale = false;
+            _flushed = DateTime.UtcNow;
             if (_follow.IsChecked == true)
                 ScrollToEnd();
         }
@@ -85,8 +116,8 @@ namespace BloodborneLauncher.Views
 
         private void Copy()
         {
-            if ((_output.Text ?? "").Length == 0) return;
-            if (ClipboardText.Set(_output.Text!))
+            if (Ws.OutputLines.Count == 0) return;
+            if (ClipboardText.Set(string.Join("\n", Ws.OutputLines) + "\n"))
                 Ws.Log(L.T("Game output copied."), LogLevel.Good);
             else
                 Ws.Log(L.T("Could not copy: another program is using the clipboard. Try again, or use Export."), LogLevel.Warn);
@@ -108,7 +139,7 @@ namespace BloodborneLauncher.Views
                     from.CopyTo(to);
                 }
                 else
-                    File.WriteAllText(file, _output.Text);
+                    File.WriteAllText(file, string.Join("\n", Ws.OutputLines) + "\n");
                 Ws.Log(L.T("Game output saved: ") + file, LogLevel.Good);
             }
             catch (Exception e)

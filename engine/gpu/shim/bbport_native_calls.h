@@ -12,16 +12,45 @@ Mode GetMode();
 
 enum DrawKind : u32 { DrawNone = 0, DrawAuto = 1, DrawIndex = 2, DrawIndexOffset = 3 };
 
+enum RecordFlag : u32 { CarriesBaseVertex = 1, CarriesInstances = 2 };
+
 struct DrawRecord {
     u32 kind = DrawNone;
     u32 predicate = 0;
     u32 index_count = 0;
     u32 index_offset = 0;
     u64 index_addr = 0;
+    u32 flags = 0;
+    u32 base_vertex = 0;
+    u32 instances = 0;
 };
 
 constexpr u32 ReservedDwords(u32 kind) {
     return kind == DrawAuto ? 5 : kind == DrawIndex ? 8 : kind == DrawIndexOffset ? 7 : 0;
+}
+
+constexpr u32 RecordDwords(u32 kind, u32 flags) {
+    return kind == DrawAuto && flags ? 7 : ReservedDwords(kind);
+}
+
+constexpr u32 ExtraSlot(u32 kind) {
+    return kind == DrawAuto ? 2 : kind == DrawIndex ? 4 : kind == DrawIndexOffset ? 3 : 0;
+}
+
+constexpr u32 SetIndexOffsetDwords = 3, SetNumInstancesDwords = 2;
+
+inline u32 EncodeRegisterPackets(const DrawRecord& r, u32* out) {
+    u32 n = 0;
+    if (r.flags & CarriesBaseVertex) {
+        out[n++] = 0xc0016900u;
+        out[n++] = 0x102u;
+        out[n++] = r.base_vertex;
+    }
+    if (r.flags & CarriesInstances) {
+        out[n++] = 0xc0002f00u;
+        out[n++] = r.instances;
+    }
+    return n;
 }
 
 inline u32 EncodeDrawPacket(const DrawRecord& r, u32* out) {
@@ -65,7 +94,8 @@ inline u32 RecordCheck(const u32* payload, u32 count) {
 }
 
 inline u32 EncodeRecordNop(const DrawRecord& r, u32* out) {
-    const u32 n = ReservedDwords(r.kind);
+    const u32 flags = r.flags & (CarriesBaseVertex | CarriesInstances);
+    const u32 n = RecordDwords(r.kind, flags);
     if (n == 0) {
         return 0;
     }
@@ -75,13 +105,17 @@ inline u32 EncodeRecordNop(const DrawRecord& r, u32* out) {
     for (u32 k = 0; k < payload; ++k) {
         p[k] = 0;
     }
-    p[0] = TagMagic | ((r.predicate & 1) << 8) | r.kind;
+    p[0] = TagMagic | (flags << 9) | ((r.predicate & 1) << 8) | r.kind;
     p[1] = r.index_count;
     if (r.kind == DrawIndex) {
         p[2] = static_cast<u32>(r.index_addr);
         p[3] = static_cast<u32>(r.index_addr >> 32);
     } else if (r.kind == DrawIndexOffset) {
         p[2] = r.index_offset;
+    }
+    if (flags) {
+        p[ExtraSlot(r.kind)] = r.base_vertex;
+        p[ExtraSlot(r.kind) + 1] = r.instances;
     }
     p[payload - 1] = RecordCheck(p, payload - 1);
     return n;
@@ -97,11 +131,12 @@ inline bool DecodeRecordNop(const u32* packet, DrawRecord& r) {
         return false;
     }
     const u32* p = packet + 1;
-    if ((p[0] & TagMask) != TagMagic || (p[0] & 0xfe00u) != 0) {
+    if ((p[0] & TagMask) != TagMagic || (p[0] & 0xf800u) != 0) {
         return false;
     }
     const u32 kind = p[0] & 0xff;
-    const u32 n = ReservedDwords(kind);
+    const u32 flags = (p[0] >> 9) & 3;
+    const u32 n = RecordDwords(kind, flags);
     if (n == 0 || count != n - 2) {
         return false;
     }
@@ -114,6 +149,9 @@ inline bool DecodeRecordNop(const u32* packet, DrawRecord& r) {
     r.index_count = p[1];
     r.index_offset = kind == DrawIndexOffset ? p[2] : 0;
     r.index_addr = kind == DrawIndex ? (u64(p[3]) << 32 | p[2]) : 0;
+    r.flags = flags;
+    r.base_vertex = flags ? p[ExtraSlot(kind)] : 0;
+    r.instances = flags ? p[ExtraSlot(kind) + 1] : 0;
     return true;
 }
 
@@ -139,11 +177,18 @@ void ReportMismatch(const char* what, u64 address, const DrawRecord& record, con
                     u32 words, u32 num_instances);
 
 void NoteWritten(bool as_record);
+void NoteToken(bool carried);
 void NoteDecoded();
 
 bool TimingEnabled();
 inline u64 Ticks() {
     return __builtin_ia32_rdtsc();
+}
+inline constexpr u64 PacketSampling = 16;
+inline bool SamplePacket() {
+    thread_local u32 state = 0x9E3779B9u;
+    state = state * 1664525u + 1013904223u;
+    return (state >> 28) == 0;
 }
 void AddPacketTicks(u64 ticks, bool is_draw);
 void MaybeReport();

@@ -88,7 +88,7 @@ static_assert(std::size(kPadIcons) == BbSettings::PadIconsCount);
 const Choice kSunShadows[] = {{0, 127010}, {1, 127011}, {2, 127012}};
 const Choice kLampShadows[] = {{0, 127010}, {1, 127013}, {2, 127014}};
 const Choice kBlurQuality[] = {{0, 127010}, {1, 127013}};
-const Choice kLookChoices[] = {{0, 128010}, {1, 128011}, {2, 128012}, {3, 128013}, {4, 128014}, {5, 128015}};
+const Choice kLookChoices[] = {{0, 128010}, {1, 128011}, {2, 128012}, {3, 128013}, {4, 128014}, {5, 128016}, {6, 128015}};
 static_assert(std::size(kLookChoices) == BbLooks::PresetCount + 2);
 
 Setting Toggle(std::uint32_t id, std::int32_t def, bool picture = false) { return {Kind::Toggle, id, def, 0, 0, {}, picture}; }

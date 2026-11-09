@@ -90,10 +90,9 @@ namespace BloodborneLauncher.Core
         private static void Show(List<(string Text, Action Work)> steps)
         {
 #if AVALONIA
-            foreach (var (_, work) in steps)
-            {
-                try { work(); } catch (Exception) { /* the next step still runs */ }
-            }
+            Views.WorkWindow.Run("Updating to Lantern Engine",
+                "The launcher has a new name. Renaming files and fixing shortcuts; your game, saves, " +
+                "settings and mods stay as they are. Don't close this window: it takes a few seconds.", steps, showSteps: true);
             return;
 #else
             if (steps.Count == 0) return;
@@ -165,8 +164,7 @@ namespace BloodborneLauncher.Core
             public static List<string> Pointing(string target)
             {
                 var found = new List<string>();
-                var shell = Shell();
-                if (shell == null) return found;
+                var wanted = Path.GetFullPath(target);
                 foreach (var folder in Folders().Where(Directory.Exists))
                 {
                     IEnumerable<string> links;
@@ -174,13 +172,8 @@ namespace BloodborneLauncher.Core
                     catch (Exception) { continue; }
                     foreach (var link in links)
                     {
-                        try
-                        {
-                            var path = (string)shell.CreateShortcut(link).TargetPath;
-                            if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
-                                found.Add(link);
-                        }
-                        catch (Exception) { }
+                        if (string.Equals(ShellLinks.TargetOf(link), wanted, StringComparison.OrdinalIgnoreCase))
+                            found.Add(link);
                     }
                 }
                 return found;
@@ -188,17 +181,16 @@ namespace BloodborneLauncher.Core
 
             public static void Retarget(List<string> links, string target)
             {
-                var shell = Shell();
-                if (shell == null) return;
                 foreach (var link in links)
                 {
                     try
                     {
-                        var shortcut = shell.CreateShortcut(link);
-                        shortcut.TargetPath = target;
-                        shortcut.WorkingDirectory = Path.GetDirectoryName(target);
-                        shortcut.IconLocation = target + ",0";
-                        shortcut.Save();
+                        ShellLinks.Change(link, shortcut =>
+                        {
+                            shortcut.SetPath(target);
+                            shortcut.SetWorkingDirectory(Path.GetDirectoryName(target) ?? "");
+                            shortcut.SetIconLocation(target, 0);
+                        });
                     }
                     catch (Exception) { }
                 }
@@ -206,24 +198,17 @@ namespace BloodborneLauncher.Core
 
             public static void Restyle(IEnumerable<string> links, string icon)
             {
-                var shell = Shell();
-                if (shell == null) return;
-                var location = icon + ",0";
                 foreach (var link in links)
                 {
                     try
                     {
-                        var shortcut = shell.CreateShortcut(link);
-                        if (string.Equals((string)shortcut.IconLocation, location, StringComparison.OrdinalIgnoreCase)) continue;
-                        shortcut.IconLocation = location;
-                        shortcut.Save();
+                        if (ShellLinks.Read(link) is { IconIndex: 0 } current &&
+                            string.Equals(current.IconPath, icon, StringComparison.OrdinalIgnoreCase)) continue;
+                        ShellLinks.Change(link, shortcut => shortcut.SetIconLocation(icon, 0));
                     }
                     catch (Exception) { }
                 }
             }
-
-            private static dynamic? Shell() =>
-                Type.GetTypeFromProgID("WScript.Shell") is { } type ? Activator.CreateInstance(type) : null;
         }
     }
 }

@@ -17,6 +17,9 @@
 
 #include <condition_variable>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -236,6 +239,7 @@ bool DataBase::Save(BlobType type, const std::string& name, std::vector<u8>&& da
         return false;
     }
 
+    Forget(type, name);
     auto path = EmulatorSettings.IsPipelineCacheArchived() ? std::filesystem::path{name}
                                                            : cache_path / name;
     return WriteVector(type, std::move(path), std::move(data));
@@ -246,6 +250,7 @@ bool DataBase::Save(BlobType type, const std::string& name, std::vector<u32>&& d
         return false;
     }
 
+    Forget(type, name);
     auto path = EmulatorSettings.IsPipelineCacheArchived() ? std::filesystem::path{name}
                                                            : cache_path / name;
     return WriteVector(type, std::move(path), std::move(data));
@@ -259,6 +264,7 @@ bool DataBase::SaveNow(BlobType type, const std::string& name, std::span<const u
     if (!IsFolder()) {
         return false;
     }
+    Forget(type, name);
     auto path = cache_path / name;
     path.replace_extension(GetBlobFileExtension(type));
     return ReplaceCacheFile(path, data);
@@ -268,6 +274,7 @@ void DataBase::Remove(BlobType type, const std::string& name) {
     if (!IsFolder()) {
         return;
     }
+    Forget(type, name);
     auto path = cache_path / name;
     path.replace_extension(GetBlobFileExtension(type));
     std::error_code error;
@@ -278,6 +285,9 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u8>& dat
     if (!opened) {
         return;
     }
+    if (TakeAhead(type, name, data)) {
+        return;
+    }
 
     auto path = EmulatorSettings.IsPipelineCacheArchived() ? std::filesystem::path{name}
                                                            : cache_path / name;
@@ -286,6 +296,13 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u8>& dat
 
 void DataBase::Load(BlobType type, const std::string& name, std::vector<u32>& data) {
     if (!opened) {
+        return;
+    }
+    if (std::vector<u8> bytes; TakeAhead(type, name, bytes)) {
+        if (bytes.size() % sizeof(u32) == 0) {
+            data.resize(bytes.size() / sizeof(u32));
+            std::memcpy(data.data(), bytes.data(), bytes.size());
+        }
         return;
     }
 
@@ -327,6 +344,10 @@ void DataBase::Clear() {
     if (!opened) {
         return;
     }
+    {
+        std::scoped_lock lock{ahead_mutex};
+        ahead.clear();
+    }
     // Only called during preload, before any asynchronous writes have been submitted.
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         if (ar_is_read_only) {
@@ -354,6 +375,10 @@ void DataBase::Clear() {
 }
 
 void DataBase::FinishPreload() {
+    {
+        std::scoped_lock lock{ahead_mutex};
+        ahead.clear();
+    }
     if (opened && EmulatorSettings.IsPipelineCacheArchived() && ar_is_read_only) {
         if (!mz_zip_writer_init_from_reader(&zip_ar, cache_path.string().c_str())) {
             LOG_WARNING(Render, "Cannot reopen pipeline cache archive for writing");
@@ -362,6 +387,102 @@ void DataBase::FinishPreload() {
         }
         ar_is_read_only = false;
     }
+}
+
+std::string AheadName(BlobType type, const std::string& name) {
+    return name + "." + GetBlobFileExtension(type);
+}
+
+bool DataBase::TakeAhead(BlobType type, const std::string& name, std::vector<u8>& data) {
+    if (EmulatorSettings.IsPipelineCacheArchived()) {
+        return false;
+    }
+    std::scoped_lock lock{ahead_mutex};
+    if (ahead.empty()) {
+        return false;
+    }
+    const auto found = ahead.find(AheadName(type, name));
+    if (found == ahead.end()) {
+        return false;
+    }
+    data = found->second;
+    return true;
+}
+
+void DataBase::Forget(BlobType type, const std::string& name) {
+    std::scoped_lock lock{ahead_mutex};
+    if (!ahead.empty()) {
+        ahead.erase(AheadName(type, name));
+    }
+}
+
+void DataBase::ReadAhead() {
+    if (!IsFolder()) {
+        return;
+    }
+    const char* env = std::getenv("BB_CACHE_READ_AHEAD");
+    if (env && env[0] == '0') {
+        return;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::filesystem::path> files;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator{cache_path, error}) {
+        const auto ext = entry.path().extension();
+        if (ext == ".key" || ext == ".spv" || ext == ".meta") {
+            files.push_back(entry.path());
+        }
+    }
+    std::vector<std::vector<u8>> data(files.size());
+    std::vector<u8> read(files.size());
+    std::atomic<size_t> next{0};
+    std::atomic<u64> bytes{0};
+    const auto worker = [&] {
+        for (size_t i; (i = next.fetch_add(1)) < files.size();) {
+            const auto file = Common::FS::IOFile{files[i], Common::FS::FileAccessMode::Read};
+            if (!file.IsOpen()) {
+                continue;
+            }
+            const u64 size = file.GetSize();
+            if (size > MaxRecordBytes) {
+                continue;
+            }
+            data[i].resize(size);
+            if (file.Read(data[i]) != size) {
+                data[i] = {};
+                continue;
+            }
+            read[i] = 1;
+            bytes.fetch_add(size, std::memory_order_relaxed);
+        }
+    };
+    const u32 threads = u32(std::clamp<size_t>(files.size() / 64, 1, 16));
+    std::vector<std::thread> pool;
+    for (u32 t = 1; t < threads; ++t) {
+        pool.emplace_back(worker);
+    }
+    worker();
+    for (auto& thread : pool) {
+        thread.join();
+    }
+    size_t taken = 0;
+    {
+        std::scoped_lock lock{ahead_mutex};
+        ahead.clear();
+        ahead.reserve(files.size());
+        for (size_t i = 0; i < files.size(); ++i) {
+            if (read[i]) {
+                ahead.emplace(files[i].filename().string(), std::move(data[i]));
+                ++taken;
+            }
+        }
+    }
+    std::printf("GPU cache: %zu of %zu files read ahead in %.2f s on %u threads (%.1f MiB; "
+                "BB_CACHE_READ_AHEAD=0: one at a time)\n",
+                taken, files.size(),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
+                threads, double(bytes.load()) / (1024.0 * 1024.0));
+    std::fflush(stdout);
 }
 
 } // namespace Storage

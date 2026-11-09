@@ -80,6 +80,9 @@ static void EmitVertexMotion(EmitContext& ctx) {
     if (ctx.runtime_info.hw.vs.motion_vectors == MotionVectors::VertexBoth) {
         param_index = ctx.OpBitwiseAnd(u32_type, param_index, ctx.ConstU32(0xffffU));
     }
+    param_index = ctx.OpSelect(u32_type,
+                               ctx.OpULessThan(ctx.U1[1], param_index, ctx.ConstU32(MotionVectors::ParamsCapacity)),
+                               param_index, ctx.u32_zero_value);
     // Load process-local addresses through a descriptor, never SPIR-V constants. Physical
     // addressing keeps the existing history capacity (larger than the minimum SSBO range).
     const auto load_address = [&](u32 member) {
@@ -175,6 +178,9 @@ static void EmitVertexCapture(EmitContext& ctx) {
     if (both) {
         param_index = ctx.OpShiftRightLogical(u32_type, param_index, ctx.ConstU32(16U));
     }
+    param_index = ctx.OpSelect(u32_type,
+                               ctx.OpULessThan(ctx.U1[1], param_index, ctx.ConstU32(MotionVectors::CaptureParamsCapacity)),
+                               param_index, ctx.u32_zero_value);
     const auto load_address = [&](u32 member) {
         const Id pointer = ctx.TypePointer(spv::StorageClass::Uniform, ctx.U64);
         return ctx.OpLoad(ctx.U64, ctx.OpAccessChain(pointer, ctx.motion_addresses,

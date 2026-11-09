@@ -93,6 +93,7 @@ namespace BloodborneLauncher.Views
         Key24 = 0xF4B7,
         Keyboard24 = 0xF4B9,
         KeyboardShift24 = 0xF4BF,
+        Layer24 = 0xF4CC,
         Lightbulb24 = 0xF4D7,
         Link24 = 0xF4E5,
         LocalLanguage24 = 0xF4F4,
@@ -174,8 +175,8 @@ namespace BloodborneLauncher.Views
     /// <summary>A Fluent icon: a glyph of the icon font, regular or filled, in the text's colour.</summary>
     public sealed class SymbolIcon : TextBlock
     {
-        private static readonly FontFamily Regular = new("avares://Lantern Engine/Assets/Fonts#FluentSystemIcons-Regular");
-        private static readonly FontFamily FilledFont = new("avares://Lantern Engine/Assets/Fonts#FluentSystemIcons-Filled");
+        private static readonly FontFamily Regular = new("avares://LanternEngine/Assets/Fonts#FluentSystemIcons-Regular");
+        private static readonly FontFamily FilledFont = new("avares://LanternEngine/Assets/Fonts#FluentSystemIcons-Filled");
 
         /// <summary>The filled glyphs, where they differ from the regular one's codepoint.</summary>
         private static readonly Dictionary<SymbolRegular, int> FilledCodes = new()

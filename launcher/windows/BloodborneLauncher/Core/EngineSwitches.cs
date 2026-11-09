@@ -69,6 +69,9 @@ namespace BloodborneLauncher.Core
         private static EngineSwitch OnUnless0(string env, string group, string title, string hint) =>
             Toggle(env, group, title, hint, on: true);
 
+        private static EngineSwitch OffUnless1(string env, string group, string title, string hint) =>
+            Toggle(env, group, title, hint, on: false);
+
         private static EngineSwitch Number(string env, string group, string title, string hint, double value, double min, double max,
             double step, string unit = "") =>
             new(env, group, title, hint, SwitchKind.Number, value.ToString(step >= 1 ? "0" : "0.###", CultureInfo.InvariantCulture))
@@ -90,11 +93,11 @@ namespace BloodborneLauncher.Core
 
         public static readonly IReadOnlyList<EngineSwitch> All = new[]
         {
-            OnUnless0("LANTERN_GX_DRAWS", Performance, L.T("Native renderer: draws"), L.T("Lantern's own resource binds. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_TEXTURES", Performance, L.T("Native renderer: textures"), L.T("Images and depth targets taken from the game's own texture objects. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_BUFFERS", Performance, L.T("Native renderer: buffers"), L.T("The game's upload memory stays in place. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_RECORDS", Performance, L.T("Native renderer: pipelines"), L.T("Each draw's pipeline chosen from the game's own state. Turn off if something draws wrong or crashes")),
-            OnUnless0("LANTERN_GX_NATIVE", Performance, L.T("Native renderer: draws"), L.T("Bindings, render state, vertex and index buffers taken from the game's own objects instead of its command buffers. New in beta 31; turn off if something draws wrong or crashes")),
+            OffUnless1("LANTERN_GX_DRAWS", Performance, L.T("Native renderer: binds"), L.T("Lantern's own resource binds. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_TEXTURES", Performance, L.T("Native renderer: textures"), L.T("Images and depth targets taken from the game's own texture objects. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_BUFFERS", Performance, L.T("Native renderer: buffers"), L.T("The game's upload memory stays in place. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_RECORDS", Performance, L.T("Native renderer: pipelines"), L.T("Each draw's pipeline chosen from the game's own state. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
+            OffUnless1("LANTERN_GX_NATIVE", Performance, L.T("Native renderer: draws"), L.T("Bindings, render state, vertex and index buffers taken from the game's own objects instead of its command buffers. Needs Native renderer: pipelines. Off by default while the native renderer is rebuilt: today it adds work to every draw")),
             OnUnless0("LANTERN_READ_FILTER", Performance, L.T("Native renderer: read tracking"), L.T("Watches fewer memory reads. Turn off if something draws wrong or crashes")),
             OnUnless0("LANTERN_LIFTER", Performance, L.T("Native shader compiler"), L.T("Lantern's own shader compiler. Switching recompiles every shader once. Turn off if something draws wrong or crashes")),
             Pick("BB_GPU_ID", Graphics, L.T("Graphics card"),

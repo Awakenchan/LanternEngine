@@ -1,5 +1,4 @@
 using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 
 namespace BloodborneLauncher.Core
@@ -30,7 +29,8 @@ namespace BloodborneLauncher.Core
 
         private static async Task<JsonObject> Call(string path, JsonObject body, CancellationToken cancel)
         {
-            using var response = await Http.PostAsJsonAsync(Server + path, body, cancel);
+            using var content = new StringContent(body.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+            using var response = await Http.PostAsync(Server + path, content, cancel);
             var text = await response.Content.ReadAsStringAsync(cancel);
             JsonObject? reply = null;
             try { reply = JsonNode.Parse(text) as JsonObject; } catch (Exception) { }

@@ -135,9 +135,17 @@ namespace BloodborneLauncher.Build
             try
             {
                 var path = Path.Combine(appDir, StampName);
-                return File.Exists(path)
-                    ? JsonSerializer.Deserialize<Stamp>(File.ReadAllText(path)) ?? new Stamp()
-                    : new Stamp();
+                if (!File.Exists(path)) return new Stamp();
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+                string Text(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+                return new Stamp
+                {
+                    Launcher = Text(nameof(Stamp.Launcher)),
+                    Builder = Text(nameof(Stamp.Builder)),
+                    Source = Text(nameof(Stamp.Source)),
+                    Built = root.TryGetProperty(nameof(Stamp.Built), out var b) && b.TryGetDateTime(out var built) ? built : default,
+                };
             }
             catch
             {
@@ -145,8 +153,19 @@ namespace BloodborneLauncher.Build
             }
         }
 
-        public static void Write(string appDir, Stamp stamp) =>
-            File.WriteAllText(Path.Combine(appDir, StampName),
-                JsonSerializer.Serialize(stamp, new JsonSerializerOptions { WriteIndented = true }));
+        public static void Write(string appDir, Stamp stamp)
+        {
+            using var buffer = new MemoryStream();
+            using (var json = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
+            {
+                json.WriteStartObject();
+                json.WriteString(nameof(Stamp.Launcher), stamp.Launcher);
+                json.WriteString(nameof(Stamp.Builder), stamp.Builder);
+                json.WriteString(nameof(Stamp.Source), stamp.Source);
+                json.WriteString(nameof(Stamp.Built), stamp.Built);
+                json.WriteEndObject();
+            }
+            File.WriteAllBytes(Path.Combine(appDir, StampName), buffer.ToArray());
+        }
     }
 }

@@ -123,7 +123,7 @@ namespace BloodborneLauncher.Views
         {
             try
             {
-                using var stream = AssetLoader.Open(new Uri("avares://Lantern Engine/Assets/discord-logo.png"));
+                using var stream = AssetLoader.Open(new Uri("avares://LanternEngine/Assets/discord-logo.png"));
                 return new Bitmap(stream);
             }
             catch (Exception)

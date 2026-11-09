@@ -7,7 +7,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git xz-utils file patchelf \
-        clang-20 lld-20 llvm-20 g++-14 cmake ninja-build pkg-config python3 nasm \
+        clang-20 lld-20 llvm-20 g++-14 cmake ninja-build pkg-config python3 cargo rustc nasm \
         glslang-tools libvulkan-dev libboost-dev libxxhash-dev libssl-dev zlib1g-dev \
         libexpat1-dev nlohmann-json3-dev libx11-dev \
         libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \

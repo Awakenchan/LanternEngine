@@ -1,45 +1,80 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Lantern Engine launcher on Avalonia: Windows and Linux from one launcher. The logic (Core)
-       is the WPF launcher's own files, compiled here too; AVALONIA marks what differs. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>Lantern Engine</AssemblyName>
+    <AssemblyName>LanternEngine</AssemblyName>
+    <LanternBinaryName>Lantern Engine</LanternBinaryName>
     <RootNamespace>BloodborneLauncher</RootNamespace>
     <DefineConstants>$(DefineConstants);AVALONIA</DefineConstants>
     <ApplicationIcon>..\BloodborneLauncher\app.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
-    <!-- Core/PadMap.cs has a Main of its own (not an entry point). -->
     <StartupObject>BloodborneLauncher.Program</StartupObject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.9.9</Version>
+    <PublishAot>true</PublishAot>
+    <RuntimeFrameworkVersion>8.0.33</RuntimeFrameworkVersion>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <StripSymbols>true</StripSymbols>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(RuntimeIdentifier.StartsWith('win')) Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">
+    <ApplicationManifest>..\BloodborneLauncher\app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.2.3" />
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
-    <!-- SoundPlayer (Core/Chime.cs): plays on Windows; elsewhere it throws and the chime is silent. -->
     <PackageReference Include="System.Windows.Extensions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.DotNet.ILCompiler" Version="8.0.33" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\BloodborneLauncher\Core\**\*.cs" Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="..\Shared\SourceStamp.cs" Link="Core\SourceStamp.cs" />
     <Compile Include="..\BloodborneLauncher\GlobalUsings.cs" Link="GlobalUsings.cs" />
-    <!-- The window icons (Core/AppIcon.cs reads them by file name). -->
     <EmbeddedResource Include="..\BloodborneLauncher\app.ico" LogicalName="app.ico" />
     <EmbeddedResource Include="..\BloodborneLauncher\lantern-purple.ico" LogicalName="lantern-purple.ico" />
     <EmbeddedResource Include="..\BloodborneLauncher\lantern-orange.ico" LogicalName="lantern-orange.ico" />
     <EmbeddedResource Include="..\BloodborneLauncher\Assets\lantern-purple.png" LogicalName="lantern-purple.png" />
     <EmbeddedResource Include="..\BloodborneLauncher\Assets\lantern-orange.png" LogicalName="lantern-orange.png" />
     <EmbeddedResource Include="..\BloodborneLauncher\Localization\*.json" LogicalName="BloodborneLauncher.Localization.%(Filename)%(Extension)" />
-    <!-- The Discord status preview's picture (Settings › Community). -->
     <AvaloniaResource Include="..\BloodborneLauncher\Assets\discord-logo.png" Link="Assets\discord-logo.png" />
-    <!-- Fluent System Icons (Microsoft, MIT licence), the icon fonts WPF-UI carries: the same icons
-         as the WPF launcher, on every platform. -->
     <AvaloniaResource Include="Assets\Fonts\*.ttf" />
   </ItemGroup>
+
+  <Target Name="LanternNativeZip" AfterTargets="ResolvePackageAssets" Condition="$(RuntimeIdentifier.StartsWith('win'))">
+    <PropertyGroup>
+      <LanternNativeDir>$(ProjectDir)$(IntermediateOutputPath)native-runtime\</LanternNativeDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <LanternNative Include="@(NativeCopyLocalItems)" Condition="'%(Extension)' == '.dll'" />
+    </ItemGroup>
+    <RemoveDir Directories="$(LanternNativeDir)" />
+    <Copy SourceFiles="@(LanternNative)" DestinationFolder="$(LanternNativeDir)files" />
+    <ZipDirectory SourceDirectory="$(LanternNativeDir)files" DestinationFile="$(LanternNativeDir)native.zip" Overwrite="true" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(LanternNativeDir)native.zip" LogicalName="native.zip" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="LanternBinaryRename" AfterTargets="CopyNativeBinary;_CopyAotSymbols">
+    <PropertyGroup>
+      <LanternBinaryFrom>$(PublishDir)$(AssemblyName)$(NativeBinaryExt)</LanternBinaryFrom>
+      <LanternBinaryTo>$(PublishDir)$(LanternBinaryName)$(NativeBinaryExt)</LanternBinaryTo>
+    </PropertyGroup>
+    <Move SourceFiles="$(LanternBinaryFrom)" DestinationFiles="$(LanternBinaryTo)" Condition="Exists('$(LanternBinaryFrom)')" />
+  </Target>
+
+  <Target Name="LanternDropNativeFiles" AfterTargets="ComputeResolvedFilesToPublishList" Condition="$(RuntimeIdentifier.StartsWith('win'))">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.dll'" />
+    </ItemGroup>
+  </Target>
 
 </Project>

@@ -63,7 +63,7 @@ class SetupForm : Form {
     const string Title = "Bloodborne PC (bbport) setup";
     const string DefaultRepo = "https://github.com/deadinside28/bloodborne_pc.git";
     // README "Windows"; brace expansion by bash.
-    const string Packages = "git mingw-w64-clang-x86_64-{clang,lld,libc++,cmake,ninja,pkgconf,python,sdl3,boost,fmt,glslang,spirv-cross,spirv-headers,vulkan-headers,vulkan-loader,vulkan-memory-allocator,xxhash,zydis,robin-map,ffmpeg}";
+    const string Packages = "git mingw-w64-clang-x86_64-{clang,lld,libc++,cmake,ninja,pkgconf,python,protobuf,nlohmann-json,openssl,zlib,miniupnpc,rust,sdl3,boost,fmt,glslang,spirv-cross,spirv-headers,vulkan-headers,vulkan-loader,vulkan-memory-allocator,xxhash,zydis,robin-map,ffmpeg}";
     const string Msys2Installer = "https://repo.msys2.org/distrib/msys2-x86_64-latest.exe";
 
     // The in-game menu's choices (gpu/shim/bbport_overlay.cpp, bbport_settings.h).
@@ -618,7 +618,7 @@ class SetupForm : Form {
             int step = 0, steps = 6;
             Step(++step, steps, "MSYS2");
             EnsureMsys2(o);
-            Step(++step, steps, "MSYS2 packages (clang, cmake, SDL3, FFmpeg, Vulkan, ...)");
+            Step(++step, steps, "MSYS2 packages (clang, Rust, cmake, SDL3, FFmpeg, Vulkan, ...)");
             Must(Bash(o, "pacman -S --needed --noconfirm " + Packages), "installing the MSYS2 packages");
             Step(++step, steps, "Sources");
             EnsureSources(o);

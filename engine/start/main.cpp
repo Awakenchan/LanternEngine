@@ -9,6 +9,7 @@
 
 #include <windows.h>
 
+#include <cpuid.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -279,7 +280,46 @@ int RunProbe(const fs::path& probe, const std::vector<std::wstring>& arguments, 
     return int(code);
 }
 
+bool CpuNeedsIsaRewrite() {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid(1, &a, &b, &c, &d)) return true;
+    const bool movbe = (c & bit_MOVBE) != 0;
+    if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return true;
+    const bool bmi1 = (b & bit_BMI) != 0;
+    if (!__get_cpuid(0x80000001u, &a, &b, &c, &d)) return true;
+    const bool lzcnt = (c & bit_LZCNT) != 0;
+    return !(movbe && bmi1 && lzcnt);
+}
+
+void WaitForPreviousStart() {
+    const auto previous = Env("BB_START_PID");
+    SetEnv("BB_START_PID", std::to_string(GetCurrentProcessId()));
+    if (!previous) return;
+    const DWORD pid = DWORD(std::strtoul(previous->c_str(), nullptr, 10));
+    if (!pid || pid == GetCurrentProcessId()) return;
+    HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return;
+    wchar_t name[32768];
+    DWORD size = DWORD(std::size(name));
+    FILETIME theirs{}, ours{}, unused{};
+    const bool older = GetProcessTimes(process, &theirs, &unused, &unused, &unused) &&
+                       GetProcessTimes(GetCurrentProcess(), &ours, &unused, &unused, &unused) &&
+                       CompareFileTime(&theirs, &ours) < 0;
+    const bool same = older && QueryFullProcessImageNameW(process, 0, name, &size) &&
+                      _wcsicmp(fs::path(std::wstring(name, size)).filename().c_str(), SelfPath().filename().c_str()) == 0;
+    if (same) {
+        const auto start = std::chrono::steady_clock::now();
+        const DWORD result = WaitForSingleObject(process, 60000);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        Log(result == WAIT_OBJECT_0 ? "Restart: the previous start ended (waited %.1f s)"
+                                    : "Restart: the previous start is still running after %.1f s; starting anyway",
+            seconds);
+    }
+    CloseHandle(process);
+}
+
 int Main(std::vector<std::wstring> arguments) {
+    WaitForPreviousStart();
     const Folders folders = Locate();
     std::optional<std::string> game = Env("BB_GAME_DIR");
     if (arguments.size() > 1 && arguments[0] == L"--game-dir") {
@@ -428,6 +468,15 @@ int Main(std::vector<std::wstring> arguments) {
 
     try {
         PrepareImage(merged, out, folders.engine);
+        if (CpuNeedsIsaRewrite()) {
+            std::string isa_scan_output;
+            const int isa_scan_status = RunProgram(out / "bb-isa-scan.exe",
+                                                   {(out / "boot-linked.bin").native(), out.native()},
+                                                   &isa_scan_output);
+            if (isa_scan_status != 0)
+                throw Error("ISA scan failed (exit " + std::to_string(isa_scan_status) + "): " + Trim(isa_scan_output));
+            if (!Trim(isa_scan_output).empty()) Log("%s", Trim(isa_scan_output).c_str());
+        }
     } catch (const GameCheckError& e) {
         Log("\nUnsupported game files: %s\nSet BB_SKIP_GAME_CHECK=1 to start anyway.", e.what());
         return 2;

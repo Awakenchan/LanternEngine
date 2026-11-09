@@ -1041,6 +1041,10 @@ public:
     [[nodiscard]] static bool FenceOrderScoped();
     [[nodiscard]] static bool FenceOrderPossible();
 
+    [[nodiscard]] u64 PassesBegun() const noexcept {
+        return passes_begun;
+    }
+
     /// Whether a render pass with exactly this state is open.
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {
         return is_rendering && render_state == state;
@@ -1053,6 +1057,9 @@ public:
 
     /// CommandBuffer() calls that waited for a recording thread (BB_FRAME_STATS).
     static inline std::atomic<u64> direct_recordings{0};
+    static inline std::atomic<u64> producer_wakes{0};
+    static inline std::atomic<u64> peer_wakes_done{0};
+    static constexpr u32 NoPeer = ~0u;
     /// Command buffer segments submitted (BB_FRAME_STATS: segments per submission).
     static inline std::atomic<u64> recorded_segments{0};
     static inline std::atomic<u64> recorded_submissions{0};
@@ -1108,6 +1115,8 @@ private:
         std::atomic<size_t> queued{0};                  ///< queue.size() for lock-free polling
         bool busy = false;     ///< running a chunk (guarded by recorder_mutex)
         bool sleeping = false; ///< waiting on cv (guarded by recorder_mutex)
+        u32 wake_next = NoPeer;
+        bool peer_wakes = false;
         std::condition_variable_any cv;
         std::jthread thread;
     };
@@ -1239,6 +1248,7 @@ private:
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
     bool is_rendering = false;
+    u64 passes_begun = 0;
     // bbport: threaded recording. Commands go into chunks of the current segment; segments are
     // recorded in parallel, each into its own command buffer, and a submission runs their
     // command buffers in order. Guest memory copies and fence signals go into ordered chunks,

@@ -11,14 +11,17 @@ namespace BloodborneLauncher.Views
     {
         private readonly StackPanel _back = new();
         private readonly StackPanel _saved = new();
-        private readonly List<(Looks.Look Look, TextBlock Hint, string Text)> _hints = new();
+        private readonly List<(Looks.Look Look, TextBlock Hint, string Text, Button Use)> _hints = new();
 
         public LooksPage() : base(L.T("Looks"), L.T("Lighting and picture settings: pick a preset, or share your own with others"))
         {
             Body.Children.Add(_back);
             Group(L.T("Presets"));
             foreach (var look in Looks.Presets)
-                AddLook(look, Body, Row(SmallButton(L.T("Use"), SymbolRegular.Play24, (_, _) => Use(look))));
+            {
+                var use = UseButton(look);
+                AddLook(look, Body, use, Row(use));
+            }
             Group(L.T("Saved looks"));
             Body.Children.Add(_saved);
             Group(L.T("Share"));
@@ -32,12 +35,14 @@ namespace BloodborneLauncher.Views
 
         public override void OnShown() => Refresh();
 
-        private void AddLook(Looks.Look look, Panel into, object control)
+        private Button UseButton(Looks.Look look) => SmallButton(L.T("Use"), SymbolRegular.Play24, (_, _) => Use(look));
+
+        private void AddLook(Looks.Look look, Panel into, Button use, object control)
         {
             var row = Add(Card(SymbolRegular.Sparkle24, look.Name, null, control, out var hint), into);
             var text = look.BuiltIn ? look.Description
                 : look.Author.Length > 0 ? L.F($"By {look.Author}") : L.T("Author not given");
-            _hints.Add((look, hint, text));
+            _hints.Add((look, hint, text, use));
             SetHint(hint, text);
         }
 
@@ -53,13 +58,23 @@ namespace BloodborneLauncher.Views
             if (saved.Count == 0)
                 _saved.Children.Add(Text(L.T("None yet. Save your current picture or import someone's look below."), "Faint"));
             foreach (var look in saved)
-                AddLook(look, _saved, Row(
-                    SmallButton(L.T("Use"), SymbolRegular.Play24, (_, _) => Use(look)),
+            {
+                var use = UseButton(look);
+                AddLook(look, _saved, use, Row(
+                    use,
                     SmallButton(L.T("Copy code"), SymbolRegular.Copy24, (_, _) => CopyCode(look)),
                     SmallButton(L.T("Save as file"), SymbolRegular.Save24, (_, _) => Export(look)),
                     SmallButton(L.T("Delete"), SymbolRegular.Delete24, (_, _) => Delete(look))));
-            foreach (var (look, hint, text) in _hints)
-                SetHint(hint, Looks.IsCurrent(look, Ini) ? L.T("In use. ") + text : text);
+            }
+            foreach (var (look, hint, text, use) in _hints)
+            {
+                var current = Looks.IsCurrent(look, Ini);
+                SetHint(hint, current ? L.T("In use. ") + text : text);
+                use.Content = current ? L.T("Selected") : L.T("Use");
+                use.Icon = Icon(current ? SymbolRegular.Checkmark24 : SymbolRegular.Play24);
+                use.Appearance = current ? ControlAppearance.Primary : ControlAppearance.Secondary;
+                use.IsEnabled = !current;
+            }
         }
 
         private bool GameClosed()

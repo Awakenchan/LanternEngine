@@ -333,3 +333,68 @@ Expected after stage 4: B1 keeps decode, buffers, uploads and dispatches (~2.3 u
 targets and recording (~1.5 us); the critical path falls to ~2.3 us, ~+60% FPS where stage B
 limits, until the GPU or the game's main thread does. Stages 1 and 2 alone change little (the
 recording tail is ~0.5 us) but build the hand-off everything else needs.
+
+## 8. Runs committed by workers (2026-11-09)
+
+Measured before starting (`last_session.log` of 2026-11-09, RTX 5060, Ryzen 5 5600, 0.9.40
+candidate): stage B 98.7% busy at 3.83 us per packet (with `BB_SECTIONS=1`, whose timers cost
+about 0.39 us of that, measured offline for 25 scopes). The GPU command thread is not the limit:
+its sampled stacks spend 13-30% in `NtWaitForAlertByThreadId`, most of it waiting on stage B. No
+function of stage B is above ~3% of its samples.
+
+Approach A (section 3) failed per draw: the texture helper handed each draw's results across
+cores. A worker that commits a whole stretch of draws pays the hand-over once per stretch. The
+unit is a **run**: direct draws one after another in one render pass, with no ordered task,
+dispatch, indirect or special packet between them.
+
+### Step 1: the census (`LANTERN_RUN_CENSUS`, on with `BB_SECTIONS=1`)
+
+Before any worker exists, stage B classifies every direct draw after it ran: clean, or the
+first thing it did that changes what other draws share. In order: a render pass began (a real
+barrier ends the pass, so barriers land here), a buffer upload, a texture set lookup that was not
+a plain memo hit, a render state memo miss, a binding the GPU writes, other (occlusion query,
+pipeline still compiling, the display pass, the RT capture, frame capture). Clean draws in a row
+form a run; the line
+
+```
+  runs for workers: C% of D draws/s clean (X us each, the others Y us), L% in runs of 8 or more
+  (R runs/s, N draws each, S% of stage B's time: two workers would take up to T% off it); draws by
+  run length ...; runs ended by ...; clean draws streaming constants Z%
+```
+
+bounds the gain: `T` is two thirds of the time in runs of 8 or more, before fork and join costs.
+If `T` is small, the cuts list says which shared work to make worker-safe first.
+
+### Step 2: what a worker owns
+
+- **Registers.** `AmdGpu::Regs` is 0xD000 words (208 KiB): too much to copy at a fork. Each
+  worker keeps its own copy in step by applying every packet's changed blocks, as stage B does
+  (32-word blocks, a few per packet), whether or not the packet is its own.
+- **Per-draw scratch.** Everything `DrawRecord` fills for one draw moves into a draw context, one
+  per thread: push data, descriptor writes, image and buffer infos, vertex and index bindings, the
+  ring stages, the packet's V#s and keys, bound images and buffers, `needs_barrier`, the census
+  flags. Stage B keeps one too, so the single-thread path runs through the same code.
+- **Commands.** A worker records into chunks of its own. The main thread reserves the place of
+  each part in the command stream at the fork and splices the parts in order at the join; nothing
+  is copied.
+- **Counters and notes** (statistics, image binding flags to clear, buffer accesses for the
+  barrier tracker, object motion jobs) are kept per worker and applied by the main thread at the
+  join, in draw order.
+
+### Step 3: where a worker stops
+
+Before anything the census counts as a cut: a new pass, an upload, a texture lookup that would
+create, refresh or revalidate, a render state miss, a GPU-written binding, a query, a pipeline
+still compiling. The worker stops there, the main thread commits that draw and the rest of the
+part in order, and parts after a stop are thrown away and committed in order too.
+
+### Step 4: the fork
+
+At a clean draw with the render pass open, the main thread looks at the committed packets after
+it (`DrawPipe::PacketAt`), up to the first packet that is not a direct draw or changes a target
+register block. A run of 8 or more is split into contiguous parts: one for the main thread, one
+per worker. Workers spin briefly after a part and then sleep on an address, like the lookahead
+thread. `LANTERN_RUN_COMMIT=fork` forks with no work, to price the fork and join alone; `=on`
+commits; a compare mode commits each run both ways and counts differences per field, the
+second copy thrown away. Off by default, and off on CPUs with fewer than 12 threads until a run
+there shows a gain.

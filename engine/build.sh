@@ -19,6 +19,10 @@ if ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3 && co
     fi
     echo 'Need pkg-config with vulkan and sdl3, cmake and ninja (see shell.nix).' >&2; exit 1
 fi
+if ! command -v cargo >/dev/null 2>&1; then
+    echo 'Install the Rust toolchain (cargo) to build the MOVBE/BMI1/LZCNT scanner.' >&2
+    exit 1
+fi
 read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
 read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
 # Windows: MSYS2 CLANG64 shell (README "Windows": clang, libc++ and lld, whose threads and locks
@@ -36,6 +40,12 @@ if [[ -n $windows ]]; then
     threads=()
     libraries=("${libraries[@]/-mwindows/-mconsole}")
     cstd=(-std=gnu11 -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0A00)
+fi
+cargo build --manifest-path tools/isa-scan/Cargo.toml --release
+if [[ -n $windows ]]; then
+    install -m755 tools/isa-scan/target/release/bb-isa-scan.exe out/bb-isa-scan.exe
+else
+    install -m755 tools/isa-scan/target/release/bb-isa-scan out/bb-isa-scan
 fi
 # BB_JOBS=N: at most N compile and link-time optimization jobs (less memory, e.g. while the
 # game runs).
@@ -155,12 +165,13 @@ if [[ -n $windows ]]; then
         [[ ! -f $dependency ]] || gpu_inputs+=("$dependency")
     done
 fi
-if [[ -n $windows && -f out/bb-probe.exe && -f out/bb-gpu-capabilities.exe &&
+if [[ -n $windows && -f out/bb-probe.exe && -f out/bb-gpu-capabilities.exe && -f out/isa_emulate.o &&
       -z $(find src gpu/bbgpu.h "${gpu_inputs[@]}" out/libatrac9.a build.sh \
                tools/gpu_capabilities.c -newer out/bb-probe.exe -print -quit) ]]; then
     echo "Up to date: $PWD/out/bb-probe.exe"
 else
-"$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" "${link[@]}" -o out/bb-probe
+"$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" -mgeneral-regs-only "${includes[@]}" -I. -Isrc -c src/isa_emulate.c -o out/isa_emulate.o
+"$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc src/probe.c src/isa_rewrite.c out/isa_emulate.o "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" "${link[@]}" -o out/bb-probe
 echo "Built $PWD/out/bb-probe"
 # GPU and controller inventory; keep the Windows C dialect and include SDL headers.
 "$CC" "${cstd[@]}" -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
@@ -172,6 +183,19 @@ if [[ -n $windows ]] && [[ ! -f out/bb-start.exe || -n $(find start src/lantern.
         -municode -static start/*.cpp out/lantern.res -lz -lexpat -lbcrypt -o out/bb-start.exe
     echo "Built $PWD/out/bb-start.exe"
 fi
+# The game is launched outside MSYS2, so clang64/bin is not on its PATH.
+# Bundle the transitive CLANG64 runtime DLLs beside every Windows executable in out/
+# (notably libc++.dll, which bb-probe.exe needs through the statically linked GPU library).
+if [[ -n $windows ]]; then
+    for executable in out/bb-isa-scan.exe out/bb-probe.exe out/bb-gpu-capabilities.exe \
+                      out/bb-engine-assets.exe out/bb-ui-4k.exe out/bb-shader-lab.exe; do
+        [[ -f $executable ]] || continue
+        while IFS= read -r dll; do
+            [[ ! -f $dll ]] || cp -f "$dll" out/
+        done < <(ldd "$executable" 2>/dev/null | awk '$3 ~ /clang64\/bin\/.*[.]dll$/ {print $3}')
+    done
+fi
+
 if [[ ${1:-} == --test ]]; then
     test_link=()
     if [[ -n $windows ]]; then test_link=(-lws2_32 -lwinpthread -Wl,--disable-dynamicbase,--disable-high-entropy-va); fi
@@ -189,6 +213,8 @@ if [[ ${1:-} == --test ]]; then
     out/toml-patch-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_gx_records.cpp gpu/shim/engine/gx_bindings.cpp -o out/gx-records-test
     out/gx-records-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_draw_tokens.cpp -o out/draw-tokens-test
+    out/draw-tokens-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror "${threads[@]}" -I. tests/test_scene_proxy_release.cpp "${test_link[@]}" -o out/scene-proxy-release-test
     out/scene-proxy-release-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_mutex.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-mutex-test

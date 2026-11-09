@@ -28,7 +28,7 @@ root=out/package/LanternEngine
 bin=$root/engine/out
 rm -rf out/package
 mkdir -p "$bin/gpu"
-install -m755 out/bb-probe out/bb-gpu-capabilities packaging/linux/bb-start "$bin/"
+install -m755 out/bb-probe out/bb-gpu-capabilities out/bb-isa-scan packaging/linux/bb-start "$bin/"
 for tool in bb-engine-assets bb-ui-4k bb-shader-lab; do
     [[ ! -f out/$tool ]] || install -m755 "out/$tool" "$bin/"
 done

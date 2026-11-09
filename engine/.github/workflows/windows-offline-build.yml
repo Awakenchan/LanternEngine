@@ -10,8 +10,17 @@ on:
       - upstream-0.3-core-port
       - upstream-0.4-core-port
       - bbhost-enhancements-v1
+      - feature/sandy-bridge-isa
     paths:
       - "src/**"
+      - "engine/src/**"
+      - "engine/tools/isa-scan/**"
+      - "engine/tools/setup/**"
+      - "engine/start/**"
+      - "engine/build.sh"
+      - "engine/run.sh"
+      - "engine/packaging/**"
+      - "engine/.github/workflows/windows-offline-build.yml"
       - "gpu/**"
       - "tests/**"
       - "scripts/**"
@@ -31,6 +40,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup MSYS2 CLANG64
         uses: msys2/setup-msys2@v2
@@ -64,6 +76,10 @@ jobs:
             mingw-w64-clang-x86_64-nlohmann-json
             mingw-w64-clang-x86_64-openssl
             mingw-w64-clang-x86_64-miniupnpc
+
+      - name: Test the ISA scanner
+        shell: msys2 {0}
+        run: cargo test --manifest-path tools/isa-scan/Cargo.toml
 
       - name: Build bbport runtime
         shell: msys2 {0}
@@ -163,7 +179,7 @@ jobs:
           mkdir -p package/out package/scripts package/patches package/mods package/launcher-assets
           cp -f launcher-publish/BloodborneLauncher.exe package/
           cp -f run.bat build.sh setup.bat package/
-          cp -f out/bb-probe.exe out/bb-gpu-capabilities.exe out/bb-engine-assets.exe package/out/
+          cp -f out/bb-probe.exe out/bb-gpu-capabilities.exe out/bb-engine-assets.exe out/bb-isa-scan.exe package/out/
           cp -f launcher-windows/BloodborneLauncher/Assets/bloodborne.ico package/out/
           test ! -f out/nvngx_dlss.dll || cp -f out/nvngx_dlss.dll package/out/
           cp -rf scripts/* package/scripts/
@@ -175,7 +191,7 @@ jobs:
           cp -rf /clang64/share/licenses/. package/licenses/msys2/
           test ! -f README.md || cp -f README.md package/
           copy_deps() { local exe="$1"; ldd "$exe" 2>/dev/null | awk '{print $3}' | grep -E '^/[A-Za-z]/msys64/clang64/bin/.*\.dll$|^/clang64/bin/.*\.dll$' || true; }
-          for exe in out/bb-probe.exe out/bb-gpu-capabilities.exe out/bb-engine-assets.exe; do
+          for exe in out/bb-probe.exe out/bb-gpu-capabilities.exe out/bb-engine-assets.exe out/bb-isa-scan.exe; do
             while IFS= read -r dll; do [ -f "$dll" ] && cp -f "$dll" package/out/; done < <(copy_deps "$exe")
           done
           cat > package/README-FIRST.txt <<'EOF'

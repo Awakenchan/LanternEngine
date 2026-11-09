@@ -2,7 +2,7 @@
 { pkgs ? import <nixpkgs> {} }:
 pkgs.mkShell {
   packages = with pkgs; [
-    gcc gnumake cmake ninja pkg-config python3 binutils
+    gcc gnumake cmake ninja pkg-config python3 binutils cargo rustc
     vulkan-headers vulkan-loader sdl3 zlib
     # GPU library (gpu/): shadPS4 video core dependencies
     ffmpeg-headless boost fmt magic-enum robin-map xxhash vulkan-memory-allocator glslang spirv-cross xbyak zydis spirv-headers miniz libx11 libxcb xorgproto wayland

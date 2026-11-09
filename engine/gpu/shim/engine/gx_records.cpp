@@ -568,10 +568,10 @@ void NoteTarget(int target, std::uint64_t ours, std::uint64_t old) {
 
 bool Install(std::uint8_t* image, std::size_t size) {
     const char* on = std::getenv("LANTERN_GX_RECORDS");
-    if (on && on[0] != '1' && on[0] != '2' && on[0] != '3') return false;
-    const bool compare = on && on[0] == '2';
+    if (!on || (on[0] != '1' && on[0] != '2' && on[0] != '3')) return false;
+    const bool compare = on[0] == '2';
     const char* native = std::getenv("LANTERN_GX_NATIVE");
-    const bool use = (on && on[0] == '3') || (!compare && !(native && native[0] == '0'));
+    const bool use = on[0] == '3' || (!compare && native && native[0] == '1');
     if (!GxObjects::On()) {
         host_log("GX records off: they need the object table");
         return false;

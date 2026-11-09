@@ -1,0 +1,14 @@
+[package]
+name = "bb-isa-scan"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+iced-x86 = { version = "=1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+sha2 = "=0.10.9"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

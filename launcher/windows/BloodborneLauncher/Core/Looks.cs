@@ -67,6 +67,9 @@ namespace BloodborneLauncher.Core
             Level("graphics_ao_quality", 1),
         };
 
+        public const string UpscalerKey = "upscaler";
+        private const string UpscalerOff = "off";
+
         private static readonly Dictionary<string, Knob> ByKey = Knobs.ToDictionary(k => k.Key, StringComparer.Ordinal);
 
         private static Dictionary<string, string> Set(params string[] pairs)
@@ -79,7 +82,10 @@ namespace BloodborneLauncher.Core
         public static IReadOnlyList<Look> Presets { get; } = new[]
         {
             new Look(L.T("Original look"), "Lantern Engine", Set(),
-                L.T("The game's own lighting and picture, with none of the extra effects. Your baseline, costs nothing extra."), true),
+                L.T("The game's own lighting with none of the extra effects. Like Lantern's defaults, it keeps the game's anti-aliasing, depth of field, motion blur and chromatic aberration off; PS4 original turns them on."), true),
+            new Look(L.T("PS4 original"), "Lantern Engine",
+                Set("effect_chromatic_aberration", "1", "effect_dof", "1", "effect_motion_blur", "1", "effect_game_aa", "1", UpscalerKey, UpscalerOff),
+                L.T("The picture as on the PS4: native resolution with no upscaler, and the game's own anti-aliasing, depth of field, motion blur and chromatic aberration back on, with none of the extra effects. Another look or Go back brings your upscaler back."), true),
             new Look(L.T("Performance"), "Lantern Engine",
                 Set("graphics_controls", "1", "graphics_shadow_scale", "0.75", "effect_dynamic_shadows", "0", "effect_motion_blur", "0", "effect_ssr", "0"),
                 L.T("Turns off shadows from dynamic lights and motion blur and shortens shadow distance, so lamps stop casting moving shadows. How much it saves has not been measured."), true),
@@ -102,7 +108,8 @@ namespace BloodborneLauncher.Core
             look.Values.TryGetValue(knob.Key, out var value) ? value : knob.Default;
 
         public static bool IsCurrent(Look look, IniFile ini) =>
-            Knobs.All(knob => Same(knob, ValueIn(look, knob), Current(knob, ini)));
+            Knobs.All(knob => Same(knob, ValueIn(look, knob), Current(knob, ini))) &&
+            (!look.Values.TryGetValue(UpscalerKey, out var upscaler) || ini.Get(UpscalerKey) == upscaler);
 
         private static bool Same(Knob knob, string a, string b) =>
             Normal(knob, a) is { } x && Normal(knob, b) is { } y && x == y;
@@ -282,9 +289,34 @@ namespace BloodborneLauncher.Core
             var values = new JsonObject();
             foreach (var knob in Knobs)
                 values[knob.Key] = ini.Raw(knob.Key);
+            values[UpscalerKey] = ini.Raw(UpscalerKey);
+            WritePrevious(new JsonObject { ["values"] = values });
+        }
+
+        private static void WritePrevious(JsonNode root)
+        {
             var staging = PreviousFile + ".saving";
-            File.WriteAllText(staging, new JsonObject { ["values"] = values }.ToJsonString());
+            File.WriteAllText(staging, root.ToJsonString());
             File.Move(staging, PreviousFile, overwrite: true);
+        }
+
+        private static JsonObject? PreviousValues()
+        {
+            try
+            {
+                return JsonNode.Parse(File.ReadAllText(PreviousFile))?["values"] as JsonObject;
+            }
+            catch (Exception e) when (e is JsonException or IOException)
+            {
+                return null;
+            }
+        }
+
+        private static void RestoreUpscaler(IniFile ini, JsonObject? values)
+        {
+            if (values == null || !values.ContainsKey(UpscalerKey) || ini.Get(UpscalerKey) != UpscalerOff) return;
+            var kept = values[UpscalerKey] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+            if (kept != UpscalerOff) ini.Set(UpscalerKey, kept);
         }
 
         public static void Apply(Look look, IniFile ini)
@@ -292,6 +324,17 @@ namespace BloodborneLauncher.Core
             KeepPrevious(ini);
             foreach (var knob in Knobs)
                 ini.Set(knob.Key, Normal(knob, ValueIn(look, knob)) ?? knob.Default);
+            if (!look.Values.TryGetValue(UpscalerKey, out var upscaler))
+            {
+                RestoreUpscaler(ini, PreviousValues());
+                return;
+            }
+            if (ini.Get(UpscalerKey) != upscaler && PreviousValues() is { } values)
+            {
+                values[UpscalerKey] = ini.Raw(UpscalerKey);
+                WritePrevious(values.Root);
+            }
+            ini.Set(UpscalerKey, upscaler);
         }
 
         public static void GoBack(IniFile ini)
@@ -313,6 +356,7 @@ namespace BloodborneLauncher.Core
                 var kept = values[knob.Key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
                 ini.Set(knob.Key, kept == null ? null : Normal(knob, kept) ?? knob.Default);
             }
+            RestoreUpscaler(ini, values);
             File.Delete(PreviousFile);
         }
     }

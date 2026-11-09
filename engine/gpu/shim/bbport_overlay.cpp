@@ -655,9 +655,16 @@ void PictureSection() {
         const auto& effect = BbSettings::Effects[e];
         if (const char* label = Item(effect.label, effect.label_ru)) {
             Checkbox(label, s.effects[e]);
-            if (!BbSettings::EffectIsLive(e)) {
-                Hint(BbSettings::MenuText("Applied when the game restarts.", "Применяется после перезапуска игры."));
-                if (s.effects[e] != s.startup_effects[e]) {
+            if (e == BbSettings::EffectRayTracing && !s.startup_effects[e]) {
+                Hint(BbSettings::MenuText("Turning it on applies when the game restarts; turning it off applies at once.",
+                                          "Включение применяется после перезапуска игры, выключение сразу."));
+            }
+            if (!BbSettings::EffectIsLive(e) ||
+                (e == BbSettings::EffectRayTracing && !s.startup_effects[e])) {
+                if (!BbSettings::EffectIsLive(e)) {
+                    Hint(BbSettings::MenuText("Applied when the game restarts.", "Применяется после перезапуска игры."));
+                }
+                if (BbSettings::EffectChangeNeedsRestart(e, s.effects[e], s.startup_effects[e])) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
                                                                    "Применяется после перезапуска игры."));
@@ -2100,7 +2107,7 @@ void Menu() {
         s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
-        restart |= !BbSettings::EffectIsLive(e) && s.effects[e] != s.startup_effects[e];
+        restart |= BbSettings::EffectChangeNeedsRestart(e, s.effects[e], s.startup_effects[e]);
     }
     restart |= Vulkan::OptiScaler::Detect().loaded &&
                (s.optiscaler_compat != s.startup_optiscaler.compat ||
