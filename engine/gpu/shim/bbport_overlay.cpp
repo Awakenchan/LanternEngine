@@ -567,6 +567,42 @@ void HdrSection() {
     }
 }
 
+void AoQualityItem() {
+    auto& s = BbSettings::Get();
+    const char* label = Item("Ambient occlusion quality", "Качество затенения (AO)");
+    if (!label) {
+        return;
+    }
+    const char* levels[] = {
+        BbSettings::MenuText("Regular GTAO", "Обычный GTAO"),
+        BbSettings::MenuText("High (full-res bitmask GTAO, denoised, experimental)",
+                             "Высокое (битмаск GTAO в полном разрешении, с шумоподавлением, "
+                             "экспериментальное)")};
+    int quality = std::clamp(s.graphics_ao_quality.load(), 0, 1);
+    if (ImGui::Combo(label, &quality, levels, 2)) {
+        Store(s.graphics_ao_quality, quality, true);
+    }
+    Hint(BbSettings::MenuText(
+        "Regular GTAO is unchanged and selected by default. High traces three visibility-bitmask "
+        "GTAO directions at the full internal render resolution (it follows DLSS/FSR scaling) and "
+        "applies a depth/normal-aware denoiser for sharper, more stable contact shadows. Higher GPU "
+        "cost; GTAO must also be on. Both modes are computed fresh each frame from a fixed sampling "
+        "pattern, so they stay stable in motion with no ghosting or trailing. Applied when the game "
+        "restarts.",
+        "Обычный GTAO не меняется и выбран по умолчанию. Высокое трассирует три направления "
+        "битмаск GTAO в полном внутреннем разрешении рендера (следует масштабированию DLSS/FSR) "
+        "и применяет фильтр шумоподавления с учётом глубины и нормалей для более чётких и "
+        "стабильных контактных теней. Повышает нагрузку на GPU; GTAO должен быть включён. "
+        "Оба режима рассчитываются заново каждый кадр по фиксированному шаблону выборки, "
+        "поэтому остаются стабильными в движении без шлейфов и ореолов. "
+        "Применяется после перезапуска игры."));
+    if (s.graphics_ao_quality != s.startup_ao_quality) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", BbSettings::MenuText("Applied when the game restarts.",
+                                                       "Применяется после перезапуска игры."));
+    }
+}
+
 void PictureSection() {
     auto& s = BbSettings::Get();
     Section("Picture", "Изображение");
@@ -632,6 +668,9 @@ void PictureSection() {
                 ImGui::TextDisabled("%s", BbSettings::MenuText("Needs Screen-space reflections on",
                                                                "Нужны включённые экранные отражения"));
             }
+        }
+        if (e == BbSettings::EffectGtao) {
+            AoQualityItem();
         }
     }
     if (const char* heading = Item("Looks", "Образы")) {
@@ -2056,6 +2095,7 @@ void Menu() {
         s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
         s.live_resolution != s.startup_live_resolution || s.hdr != s.startup_hdr ||
         s.graphics_motion_blur_quality != s.startup_motion_blur_quality ||
+        s.graphics_ao_quality != s.startup_ao_quality ||
         s.graphics_shadow_resolution != s.startup_shadow_resolution ||
         s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution ||
         BbSettings::ResolutionNeedsRestart();

@@ -182,6 +182,7 @@ struct Values {
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
     std::atomic<int> graphics_shadow_resolution{0},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{0};
+    std::atomic<int> graphics_ao_quality{0}; // 0 regular GTAO, 1 high (full-res bitmask GTAO)
     std::atomic<int> look_choice{0};
     std::atomic<float> graphics_fog{1},graphics_brightness{1},graphics_contrast{1},graphics_hue{0};
     std::atomic<float> camera_fov_scale{1.0f}, camera_distance_scale{1.0f}, camera_height_scale{1.0f};
@@ -226,6 +227,7 @@ struct Values {
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
     int startup_motion_blur_quality = 0;
+    int startup_ao_quality = 0;
     int startup_shadow_resolution = 0;
     int startup_local_shadow_resolution = 0;
     bool startup_effects[EffectCount]{};

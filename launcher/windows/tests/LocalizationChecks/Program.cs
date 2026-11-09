@@ -26,6 +26,7 @@ Require(Localization.T("untranslated fallback") == "untranslated fallback", "Mis
 static void CheckGameLanguages()
 {
     Require(Choices.GameLanguages.Select(c => c.Value).SequenceEqual(new[] { "1", "8", "0", "2", "3", "4", "5", "17" }), "Game language values changed");
+    Require(Choices.AoQualities.Select(c => c.Value).SequenceEqual(new[] { "0", "1" }), "AO quality protocol values changed");
     var brazilian = Choices.GameLanguages.Single(c => c.Value == "17");
     Require(brazilian.Label == "Português (Brasil)", "Brazilian Portuguese must retain its native name");
     var settings = new LauncherSettings();

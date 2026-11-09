@@ -87,6 +87,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     pipeline_cache.SetPositionCapture(rt_shadow->Capturing());
     ssgi = std::make_unique<ScreenSpaceGI>(instance, scheduler, texture_cache, runtime,
                                            *scene_targets, *camera_motion, *rt_shadow);
+    spatial_ao = std::make_unique<SpatialAo>(instance, scheduler, runtime, *scene_targets,
+                                             texture_cache);
     ssr_temporal = std::make_unique<SsrTemporal>(instance, scheduler, texture_cache, runtime,
                                                  *scene_targets, *camera_motion);
     contact_shadow = std::make_unique<ContactShadow>(instance, scheduler, texture_cache, runtime,
@@ -2591,6 +2593,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     });
     EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
+    if (spatial_ao->Enabled()) {
+        HqAoAfterDraw(pipeline, state);
+    }
     if (FrameCapture::Active()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         FrameCapture::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances);

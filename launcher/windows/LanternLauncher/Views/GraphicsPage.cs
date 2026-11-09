@@ -217,6 +217,10 @@ namespace BloodborneLauncher.Views
                 var motionBlur = effect.Key == "effect_motion_blur";
                 IniToggle(EffectIcon(effect.Key), effect.Title, effect.Hint, effect.Key, changed: motionBlur ? UpdateUpscaler : null);
                 if (motionBlur) _motionBlurHint = ((SettingRow)Body.Children[^1]).Hint;
+                if (effect.Key == "effect_gtao")
+                    IniCombo(SymbolRegular.Color24, L.T("Ambient occlusion quality"),
+                        L.T("Regular GTAO is unchanged. High traces three visibility-bitmask GTAO directions at the full internal render resolution (follows DLSS/FSR scaling) and applies a depth/normal-aware denoiser for sharper, more stable contact shadows. Higher GPU cost; needs Better ambient occlusion (GTAO) on. Requires restarting Bloodborne."),
+                        Choices.AoQualities, "graphics_ao_quality");
             }
 
             Group(L.T("Lighting"));

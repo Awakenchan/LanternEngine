@@ -9,6 +9,7 @@
 
 #include "bbport_settings.h"
 #include "video_core/host_shaders/gtao_frag.h"
+#include "video_core/host_shaders/gtao_hq_frag.h"
 #include "video_core/host_shaders/native_motion_blur_frag.h"
 #include "video_core/host_shaders/ssr_frag.h"
 #include "video_core/renderer_vulkan/vk_pom_patch.h"
@@ -99,10 +100,13 @@ std::span<const u32> Replacement(const Shader::Info& info, const Shader::Profile
     }
     if (info.pgm_hash == SsaoHash && Wanted(BbSettings::EffectGtao)) {
         if (Fits(info, profile, start, 3, 3, 3)) {
+            const bool high = BbSettings::Get().startup_ao_quality == 1;
             if (!gtao_active.exchange(true, std::memory_order_relaxed)) {
-                std::printf("GTAO: in use in place of the game's SSAO shader\n");
+                std::printf(high ? "GTAO: in use in place of the game's SSAO shader (High: three "
+                                   "directions, spatial denoise, full internal resolution)\n"
+                                 : "GTAO: in use in place of the game's SSAO shader\n");
             }
-            return GTAO_FRAG;
+            return high ? std::span<const u32>(GTAO_HQ_FRAG) : std::span<const u32>(GTAO_FRAG);
         }
         Declined("GTAO", info, profile, start);
     } else if (info.pgm_hash == SsrHash && Wanted(BbSettings::EffectModernSsr)) {

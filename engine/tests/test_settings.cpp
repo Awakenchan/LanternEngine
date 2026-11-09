@@ -33,6 +33,9 @@ int main() {
     BbSettings::Load();
     auto& s = BbSettings::Get();
     assert(s.upscaler == BbSettings::UpscalerFsr3 && !s.show_fps && s.menu_x < 0.0f);
+    assert(s.graphics_ao_quality == 0 && s.startup_ao_quality == 0);
+    s.graphics_ao_quality = 1;
+    assert(s.startup_ao_quality == 0);
     s.show_fps = true;
     s.upscaler = BbSettings::UpscalerFsr411;
     s.menu_x = 0.625f;
@@ -46,11 +49,16 @@ int main() {
     assert(saved.find("menu_pos=0.6250,0.1250\n") != std::string::npos);
     assert(saved.find("upscaler=fsr3") == std::string::npos);
     assert(saved.find("fullscreen=1\n") != std::string::npos);
+    assert(saved.find("graphics_ao_quality=1\n") != std::string::npos);
 
     s.menu_x = -1.0f;
     s.menu_y = -1.0f;
     BbSettings::Load();
     assert(s.menu_x == 0.625f && s.menu_y == 0.125f && s.upscaler == BbSettings::UpscalerFsr411);
+    assert(s.graphics_ao_quality == 1 && s.startup_ao_quality == 1);
+    s.graphics_ao_quality = 0;
+    assert(s.startup_ao_quality == 1);
+    s.graphics_ao_quality = 1;
     s.upscaler = BbSettings::UpscalerDlss;
     BbSettings::Save();
     assert(Read(path).find("upscaler=dlss\n") != std::string::npos);
@@ -93,6 +101,15 @@ int main() {
     s.rebirth=false;s.graphics_bloom=1.0f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
+    for (const auto& [input, expected] :
+         {std::pair{"0", 0}, {"1", 1}, {"-1", 0}, {"2", 0}, {"nan", 0}, {"1bad", 0}}) {
+        { std::ofstream file(path); file << "graphics_ao_quality=" << input << "\n"; }
+        BbSettings::Load();
+        assert(s.graphics_ao_quality == expected && s.startup_ao_quality == expected);
+        BbSettings::Save();
+        assert(Read(path).find("graphics_ao_quality=" + std::to_string(expected) + "\n") !=
+               std::string::npos);
+    }
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(!BbSettings::Effects[e].default_on);
     }
