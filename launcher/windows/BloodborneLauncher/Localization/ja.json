@@ -1662,5 +1662,18 @@
   "Hunters": "狩人",
   "No hunters yet: they show up here once the game has saved": "狩人はまだいません。ゲームがセーブすると表示されます",
   "Level {0}  ·  {1} bosses": "レベル {0}  ·  ボス {1} 体",
-  "{0} played": "プレイ時間 {0}"
+  "{0} played": "プレイ時間 {0}",
+  "2K menu detail": "2Kメニュー品質",
+  "Jump on its own key": "ジャンプを専用キーに",
+  "Dodge": "ステップ",
+  "Dodges even while the sprint key is held": "ダッシュキーを押したままでもステップします",
+  "Backstep": "バックステップ",
+  "Steps back at once, also while moving or sprinting": "移動中やダッシュ中でもすぐに後ろへステップします",
+  "Sprint": "ダッシュ",
+  "Sprints at once while held, and never dodges": "押している間すぐにダッシュし、ステップは出ません",
+  "Jump / left stick click": "ジャンプ / 左スティック押し込み",
+  "Jumps when Jump on its own key is on": "「ジャンプを専用キーに」がオンのときジャンプします",
+  "Toggle": "切り替え",
+  "Hold": "長押し",
+  "The saves could not be read: ": "セーブデータを読み込めませんでした: "
 }

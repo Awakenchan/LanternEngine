@@ -188,6 +188,7 @@ int main() {
     Buffer game = MakeBuffer(vk, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     Buffer stream = MakeBuffer(vk, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
     Buffer scratch = MakeBuffer(vk, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    std::memset(scratch.mapped, 0, 4096);
     const uint64_t wrong_at = align + 12, sane_at = 8 * align + 4;
     const std::array<uint32_t, 3> wrong{3063677180u, 1, 1}, sane{5, 3, 2};
     std::memcpy(reinterpret_cast<uint8_t*>(game.mapped) + wrong_at, wrong.data(), 12);
@@ -212,9 +213,9 @@ int main() {
                          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                          .pBufferInfo = &infos[i]};
         }
-        const std::array<uint32_t, 4> push{vk.limits.maxComputeWorkGroupCount[0],
-                                           vk.limits.maxComputeWorkGroupCount[1],
-                                           vk.limits.maxComputeWorkGroupCount[2],
+        const std::array<uint32_t, 4> push{std::min(vk.limits.maxComputeWorkGroupCount[0], 65535u),
+                                           std::min(vk.limits.maxComputeWorkGroupCount[1], 65535u),
+                                           std::min(vk.limits.maxComputeWorkGroupCount[2], 65535u),
                                            uint32_t((offset - src_offset) / 4)};
         vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vk.push_descriptors(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 2, writes.data());
@@ -260,12 +261,10 @@ int main() {
                     want[1], want[2], ok ? "ok" : "WRONG");
         failures += !ok;
     };
-    const std::array<uint32_t, 3> limit{std::min(wrong[0], vk.limits.maxComputeWorkGroupCount[0]),
-                                        std::min(wrong[1], vk.limits.maxComputeWorkGroupCount[1]),
-                                        std::min(wrong[2], vk.limits.maxComputeWorkGroupCount[2])};
-    expect("wrong counts clamped", stream.mapped + slots[0] / 4, limit);
+    const std::array<uint32_t, 3> none{0, 0, 0};
+    expect("wrong counts run no groups", stream.mapped + slots[0] / 4, none);
     expect("sane counts kept", stream.mapped + slots[1] / 4, sane);
-    expect("indirect dispatch of the clamped counts", scratch.mapped + slots[0] / 4, limit);
+    expect("indirect dispatch of the wrong counts wrote nothing", scratch.mapped + slots[0] / 4, none);
     expect("indirect dispatch of the sane counts", scratch.mapped + slots[1] / 4, sane);
     std::printf("Indirect clamp: %s\n", failures ? "FAILED" : "all ok");
     return failures ? 1 : 0;

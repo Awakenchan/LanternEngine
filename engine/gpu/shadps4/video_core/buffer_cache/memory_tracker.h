@@ -88,6 +88,24 @@ public:
         return lines;
     }
 
+    bool IsRegionCpuModifiedRead(VAddr query_cpu_addr, u64 query_size) noexcept {
+        std::size_t remaining = query_size;
+        std::size_t page_index = query_cpu_addr >> TRACKER_HIGHER_PAGE_BITS;
+        u64 page_offset = query_cpu_addr & TRACKER_HIGHER_PAGE_MASK;
+        while (remaining > 0) {
+            const std::size_t amount =
+                std::min<std::size_t>(TRACKER_HIGHER_PAGE_SIZE - page_offset, remaining);
+            auto* manager = top_tier[page_index];
+            if (!manager || manager->template IsRegionModified<Type::CPU>(page_offset, amount)) {
+                return true;
+            }
+            ++page_index;
+            page_offset = 0;
+            remaining -= amount;
+        }
+        return false;
+    }
+
     /// Returns true if a region has been modified from the GPU
     bool IsRegionGpuModified(VAddr query_cpu_addr, u64 query_size) noexcept {
         return IteratePages<false>(

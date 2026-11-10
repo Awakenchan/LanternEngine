@@ -2402,11 +2402,12 @@ void FpsCounter() {
     char text[128];
     int n = 0;
     if (s.show_fps_rate) {
-        n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
-                           frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f);
-        if (s.frame_gen_active) {
-            n += std::snprintf(text + n, sizeof(text) - n, " (game %.0f, frame gen 2x)",
-                               s.frame_gen_game_fps.load());
+        const float game = s.frame_gen_game_fps.load(), shown = s.frame_gen_shown_fps.load();
+        if (s.frame_gen_active && game > 1.0f && shown >= game) {
+            n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS (game %.0f, frame gen %.1fx)", shown, game, shown / game);
+        } else {
+            n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
+                               frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f);
         }
     }
     if (s.show_fps_frame_time) {

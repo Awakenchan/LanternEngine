@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gpu/shim/engine/world_copy.h"
 #include <cstdio>
+#include <map>
 
 namespace {
 int failures = 0;
@@ -139,6 +140,47 @@ int main() {
     changed.clear();
     in.Take(sneaky.data(), sneaky.size(), changed);
     Check(changed.empty(), "a group that isn't shared is ignored");
+
+    Check(IsGiftFlag(9040) && IsGiftFlag(9045) && IsGiftFlag(9077) && !IsGiftFlag(9039) && !IsGiftFlag(9080), "the gift request flags of common events 9040 and 9100");
+    Check(ShareFlag(9045), "a gift flag sits in a shared block, so it has to be taken out as a hunter's own");
+    {
+        const Group gifts = RangeBits(9, kGiftFirst, kGiftLast);
+        Check(CountBits(gifts) == 40 && (gifts[5] & 0x80) != 0 && (gifts[4] & 0x01) == 0, "40 gift bits from 9040");
+    }
+    {
+        Group was{}, now{}, mask{};
+        mask[0] = 0xf0;
+        was[0] = 0x80;
+        now[0] = 0xc8;
+        const Group on = TurnedOn(was, now, mask);
+        Check(on[0] == 0x40 && CountBits(on) == 1, "only a bit that was off, is on and is watched counts as turned on");
+        std::uint8_t save[kGroupBytes] = {};
+        Check(SetBits(save, on) == 1 && save[0] == 0x40 && SetBits(save, on) == 0, "a witnessed flag is written once");
+    }
+    {
+        Witness witness;
+        std::map<std::uint32_t, Group> masks;
+        masks[12400].fill(0xff);
+        Image first;
+        first[12400][0] = 0x80;
+        Check(!witness.Ready(), "a witness starts with no baseline");
+        witness.Start(first);
+        bool rebuilt = true;
+        Check(witness.Step(first, masks, rebuilt).empty() && !rebuilt, "what was on at the baseline is not witnessed");
+        Image door = first;
+        door[12400][1] = 0x01;
+        const Image fresh = witness.Step(door, masks, rebuilt);
+        Check(fresh.size() == 1 && fresh.at(12400)[1] == 0x01 && fresh.at(12400)[0] == 0 && !rebuilt, "a door opened with the hunter there is witnessed");
+        Check(witness.Step(door, masks, rebuilt).empty(), "and only once");
+        Image image = door;
+        image[12400].fill(0xff);
+        Check(witness.Step(image, masks, rebuilt).empty() && rebuilt, "many flags at once are an image arriving, not play");
+        Image other = image;
+        other[52400][0] = 0x80;
+        Check(witness.Step(other, masks, rebuilt).empty() && !rebuilt, "a group that is not watched is never witnessed");
+        witness.Forget();
+        Check(!witness.Ready(), "a new copy of the world needs a new baseline");
+    }
 
     if (failures) return 1;
     std::printf("world-copy-test: ok\n");

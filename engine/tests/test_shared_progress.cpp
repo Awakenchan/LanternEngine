@@ -66,6 +66,11 @@ int main() {
     Check(given.First(21000, start + std::chrono::seconds(5)), "another boss's lot is its own");
     Check(given.First(31000, start + std::chrono::minutes(11)), "a later fight gives the lot again");
 
+    Check(BossRewards::InsightWord(3) == -3 && BossRewards::InsightOf(-3) == 3, "a boss's Insight travels as a negative word in the boss drop frame");
+    Check(BossRewards::InsightWord(0) == 0 && BossRewards::InsightWord(10) == 0 && BossRewards::InsightWord(-1) == 0, "only 1 to 9 Insight is sent");
+    Check(BossRewards::InsightOf(31000) == 0 && BossRewards::InsightOf(0) == 0 && BossRewards::InsightOf(-10) == 0, "a lot is never read as Insight");
+    Check(!BossRewards::IsBossLot(BossRewards::InsightWord(3)), "an older guest drops the word as an unknown lot");
+
     Check(BbEngine::SharedProgress::HostStepIsNewer(0b100, 0b010), "a guest behind the host's quest step takes it");
     Check(!BbEngine::SharedProgress::HostStepIsNewer(0b010, 0b100), "a guest ahead of the host keeps its quest step");
     Check(!BbEngine::SharedProgress::HostStepIsNewer(0b010, 0b010), "the same quest step writes nothing");

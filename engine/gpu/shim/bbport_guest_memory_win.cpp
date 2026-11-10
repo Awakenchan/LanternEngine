@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <windows.h>
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -104,10 +105,22 @@ bool PcModelGpu(const Vulkan::Instance& instance) {
                 return false;
             }
         }
-        if (instance.GetVendorID() != 0x1002) {
-            std::printf("Guest memory: the PC memory model on this GPU (vendor 0x%04x) is new; "
-                        "\"Write fault sites\" name writers its hooks miss\n",
+        const char* any = std::getenv("BB_PC_MODEL_ANY_GPU");
+        if (instance.GetVendorID() != 0x10de && !(any && any[0] == '1')) {
+            std::printf("Guest memory: the PC memory model stays off on this GPU (vendor 0x%04x): players "
+                        "with AMD and Intel GPUs reported broken lighting and a falling frame rate with "
+                        "it (BB_PC_MODEL_ANY_GPU=1 turns it on)\n",
                         instance.GetVendorID());
+            return false;
+        }
+        if (const char* user = std::getenv("BB_GPU_USER_DIR"); user && *user && !(any && any[0] == '1')) {
+            if (std::FILE* mark = std::fopen((std::string(user) + "/pc-model-hung").c_str(), "r")) {
+                std::fclose(mark);
+                std::printf("Guest memory: the PC memory model stays off on this PC: the GPU stopped "
+                            "answering with it in an earlier session (delete user\\pc-model-hung or set "
+                            "BB_PC_MODEL_ANY_GPU=1 to try it again)\n");
+                return false;
+            }
         }
         return true;
     }();

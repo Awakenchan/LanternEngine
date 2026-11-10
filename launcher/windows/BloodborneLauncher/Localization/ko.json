@@ -1662,5 +1662,18 @@
   "Hunters": "사냥꾼",
   "No hunters yet: they show up here once the game has saved": "아직 사냥꾼이 없습니다. 게임이 저장되면 여기에 표시됩니다",
   "Level {0}  ·  {1} bosses": "레벨 {0}  ·  보스 {1}",
-  "{0} played": "플레이 시간 {0}"
+  "{0} played": "플레이 시간 {0}",
+  "2K menu detail": "2K 메뉴 디테일",
+  "Jump on its own key": "점프 전용 키",
+  "Dodge": "회피",
+  "Dodges even while the sprint key is held": "달리기 키를 누른 상태에서도 회피합니다",
+  "Backstep": "백스텝",
+  "Steps back at once, also while moving or sprinting": "이동 중이나 달리는 중에도 즉시 뒤로 물러납니다",
+  "Sprint": "달리기",
+  "Sprints at once while held, and never dodges": "누르고 있는 동안 즉시 달리며 회피하지 않습니다",
+  "Jump / left stick click": "점프 / 왼쪽 스틱 누르기",
+  "Jumps when Jump on its own key is on": "'점프 전용 키'가 켜져 있으면 점프합니다",
+  "Toggle": "토글",
+  "Hold": "누르고 있기",
+  "The saves could not be read: ": "세이브를 읽을 수 없습니다: "
 }

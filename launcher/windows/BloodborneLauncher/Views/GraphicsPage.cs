@@ -21,7 +21,7 @@ namespace BloodborneLauncher.Views
                 SmallButton(L.T("Recommend…"), SymbolRegular.Sparkle24, (_, _) => MainWindow.Instance!.OfferBestSettings(firstRun: false)), out _));
 
             Group(L.T("Upscaler"));
-            var fsr411 = Fsr4VkFound() && !Amd();
+            var fsr411 = Fsr4VkFound();
             if (Ini.Get("upscaler") is "fsr3" or "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411")) Ini.Set("upscaler", "fsr");
             IniCombo(SymbolRegular.Sparkle24, L.T("Upscaler"), null,
                 fsr411 ? Choices.Upscalers : Choices.Upscalers.Where(c => c.Value != "fsr411").ToArray(), "upscaler", changed: UpdateUpscaler);
@@ -79,7 +79,7 @@ namespace BloodborneLauncher.Views
                 L.T("Lower input lag on AMD drivers that offer it; does nothing on other GPUs. Turns itself off until the next start if the driver holds the game too long"),
                 "anti_lag");
             IniToggle(SymbolRegular.Timer24, L.T("Frame generation: even pacing (Uncapped)"),
-                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_cap");
+                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_even_pacing");
             _frameGenCapCard = (SettingRow)Body.Children[^1];
 
             // The engine's picture and camera controls (bbport_settings.cpp clamps the same ranges).

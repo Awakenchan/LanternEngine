@@ -1662,5 +1662,18 @@
   "Joining the room of the invite code you pasted": "Приєднання до кімнати за вставленим кодом запрошення",
   "Paste the invite code the host sent you": "Вставте код запрошення, який надіслав хост",
   "That is your own room's code. Friends paste it on their PC to join you.": "Це код вашої власної кімнати. Друзі вставляють його на своєму ПК, щоб приєднатися до вас.",
-  "Invite code pasted: you join that room": "Код запрошення вставлено: ви приєднуєтеся до цієї кімнати"
+  "Invite code pasted: you join that room": "Код запрошення вставлено: ви приєднуєтеся до цієї кімнати",
+  "2K menu detail": "Деталізація меню 2K",
+  "Jump on its own key": "Стрибок на окремій клавіші",
+  "Dodge": "Ухилення",
+  "Dodges even while the sprint key is held": "Ухиляється навіть із затиснутою клавішею бігу",
+  "Backstep": "Відскок назад",
+  "Steps back at once, also while moving or sprinting": "Миттєвий відскок назад, також у русі та на бігу",
+  "Sprint": "Біг",
+  "Sprints at once while held, and never dodges": "Біг одразу під час утримання, без ухилення",
+  "Jump / left stick click": "Стрибок / натискання лівого стика",
+  "Jumps when Jump on its own key is on": "Стрибає, коли ввімкнено «Стрибок на окремій клавіші»",
+  "Toggle": "Перемикання",
+  "Hold": "Утримання",
+  "The saves could not be read: ": "Не вдалося прочитати збереження: "
 }

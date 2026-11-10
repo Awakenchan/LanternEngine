@@ -82,6 +82,9 @@ bool g_turning_hunter = false;
 
 constexpr float kDragStepPixels = 8, kDragStartPixels = 6;
 bool g_dragging_value = false, g_drag_moved = false;
+constexpr std::size_t kSprintHoldAt = 0x5127b48;
+constexpr float kSprintHold = 0.4f;
+std::atomic<float*> g_sprint_hold{nullptr};
 float g_drag_anchor = 0;
 int g_drag_steps = 0;
 bool g_drag_released = true;
@@ -235,6 +238,8 @@ void AddKeyboardAndMouse(PadState& pad, const bool* keys, int nkeys, const Mouse
         pad.rx = StickFromUnit(fx);
         pad.ry = StickFromUnit(fy);
     }
+    const bool sprint_at_once = host_bindings_dodge(now, menu, pad);
+    if (float* hold = g_sprint_hold.load(std::memory_order_relaxed)) *hold = sprint_at_once ? 0.0f : kSprintHold;
     g_last_buttons = pad.buttons;
 }
 }
@@ -264,6 +269,12 @@ bool Install(std::uint8_t* image, std::size_t size) {
     };
     g_saved_serial = host_bindings_serial();
     const bool camera = MouseCamera::Install(image, size);
+    if (size >= kSprintHoldAt + sizeof(float)) {
+        float hold = 0;
+        std::memcpy(&hold, image + kSprintHoldAt, sizeof hold);
+        if (hold == kSprintHold) g_sprint_hold.store(reinterpret_cast<float*>(image + kSprintHoldAt), std::memory_order_relaxed);
+        else host_log("the Sprint key sprints after the game's own wait (not the 1.09 game code)");
+    }
     MenuPointer::Install(image, size);
     g_active.store(true, std::memory_order_relaxed);
     host_log("keyboard and mouse play on, the mouse camera %s", camera ? "ready" : "unavailable");

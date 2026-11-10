@@ -20,6 +20,7 @@ void sys_imports_start(uint64_t flags) {
 
 void sys_report(void) {
     sys_start_report();
+    sys_module_report();
     runtime_thread_report();
     sys_mutex_report();
     sys_rwlock_report();

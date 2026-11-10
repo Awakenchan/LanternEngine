@@ -24,6 +24,12 @@ namespace BloodborneLauncher.Core
             new("paddle2", L.T("Extra button 2 (Edge / Elite paddle, 8BitDo L4 or back button)")),
             new("paddle3", L.T("Extra button 3 (Elite paddle, 8BitDo back button)")),
             new("paddle4", L.T("Extra button 4 (Elite paddle, 8BitDo back button)")),
+            new("misc2", L.T("Right trackpad click (Steam)")),
+            new("leftpad_touch", L.T("Left trackpad touch")), new("rightpad_touch", L.T("Right trackpad touch")),
+            new("leftpad_up", L.T("Left trackpad up")), new("leftpad_down", L.T("Left trackpad down")),
+            new("leftpad_left", L.T("Left trackpad left")), new("leftpad_right", L.T("Left trackpad right")),
+            new("rightpad_up", L.T("Right trackpad up")), new("rightpad_down", L.T("Right trackpad down")),
+            new("rightpad_left", L.T("Right trackpad left")), new("rightpad_right", L.T("Right trackpad right")),
             new("", L.T("Not bound")),
         };
 
@@ -43,7 +49,7 @@ namespace BloodborneLauncher.Core
             ["cross"] = "a", ["circle"] = "b", ["square"] = "x", ["triangle"] = "y",
             ["l1"] = "leftshoulder", ["r1"] = "rightshoulder", ["l2"] = "lefttrigger", ["r2"] = "righttrigger",
             ["l3"] = "leftstick", ["r3"] = "rightstick", ["options"] = "start",
-            ["touchpad"] = "back, touchpad", ["touchpad_right"] = "",
+            ["touchpad"] = "back, touchpad", ["touchpad_right"] = "misc2",
             ["up"] = "dpup", ["down"] = "dpdown", ["left"] = "dpleft", ["right"] = "dpright",
             ["menu_confirm"] = "", ["menu_back"] = "",
         };

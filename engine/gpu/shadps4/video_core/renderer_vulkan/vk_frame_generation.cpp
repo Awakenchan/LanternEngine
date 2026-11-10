@@ -675,9 +675,13 @@ void FrameGenerator::OnRealPresented(Clock::time_point start, bool generated_sho
         }
     }
     last_real = start;
+    static double shown_per_real = 1.0;
+    shown_per_real = shown_per_real * 0.95 + (generated_shown ? 2.0 : 1.0) * 0.05;
     if (interval_ms > 0.0) {
         BbSettings::Get().frame_gen_game_fps.store(float(1000.0 / interval_ms),
                                                    std::memory_order_relaxed);
+        BbSettings::Get().frame_gen_shown_fps.store(float(1000.0 / interval_ms * shown_per_real),
+                                                    std::memory_order_relaxed);
     }
     ++stats_real;
     if (!generated_made) {

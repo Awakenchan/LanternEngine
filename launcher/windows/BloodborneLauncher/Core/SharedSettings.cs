@@ -22,7 +22,7 @@ namespace BloodborneLauncher.Core
         private static readonly string[] IniKeys =
         {
             "upscaler", "preset", "sharpen", "sharpness", "show_fps", "show_fps_rate", "show_fps_frame_time", "show_fps_upscaler", "live_resolution", "model_lod", "object_motion",
-            "frame_gen", "frame_gen_cap",
+            "frame_gen", "frame_gen_even_pacing",
             "jitter", "reactive", "widescreen", "pc_controls", "camera_controls", "graphics_controls",
             "change_appearance", "rebirth", "skip_intro",
         };

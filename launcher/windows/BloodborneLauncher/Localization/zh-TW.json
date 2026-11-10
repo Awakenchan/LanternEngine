@@ -1662,5 +1662,18 @@
   "Joining the room of the invite code you pasted": "正在加入你貼上的邀請碼所對應的房間",
   "Paste the invite code the host sent you": "貼上主機傳給你的邀請碼",
   "That is your own room's code. Friends paste it on their PC to join you.": "這是你自己房間的邀請碼。朋友在自己的電腦上貼上它即可加入你。",
-  "Invite code pasted: you join that room": "邀請碼已貼上：你將加入該房間"
+  "Invite code pasted: you join that room": "邀請碼已貼上：你將加入該房間",
+  "2K menu detail": "2K 選單細節",
+  "Jump on its own key": "跳躍使用獨立按鍵",
+  "Dodge": "閃避",
+  "Dodges even while the sprint key is held": "按住衝刺鍵時也能閃避",
+  "Backstep": "後撤步",
+  "Steps back at once, also while moving or sprinting": "立即後撤，移動或衝刺時同樣有效",
+  "Sprint": "衝刺",
+  "Sprints at once while held, and never dodges": "按住即刻衝刺，不會觸發閃避",
+  "Jump / left stick click": "跳躍 / 按下左搖桿",
+  "Jumps when Jump on its own key is on": "開啟「跳躍使用獨立按鍵」後可跳躍",
+  "Toggle": "切換",
+  "Hold": "按住",
+  "The saves could not be read: ": "無法讀取存檔："
 }

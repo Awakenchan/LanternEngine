@@ -1662,5 +1662,18 @@
   "Hunters": "Caçadores",
   "No hunters yet: they show up here once the game has saved": "Nenhum caçador ainda: eles aparecem aqui depois que o jogo salvar",
   "Level {0}  ·  {1} bosses": "Nível {0}  ·  {1} chefes",
-  "{0} played": "{0} jogados"
+  "{0} played": "{0} jogados",
+  "2K menu detail": "Detalhe dos menus em 2K",
+  "Jump on its own key": "Pulo em tecla própria",
+  "Dodge": "Esquiva",
+  "Dodges even while the sprint key is held": "Esquiva mesmo com a tecla de corrida pressionada",
+  "Backstep": "Passo para trás",
+  "Steps back at once, also while moving or sprinting": "Recua na hora, mesmo andando ou correndo",
+  "Sprint": "Corrida",
+  "Sprints at once while held, and never dodges": "Corre na hora enquanto pressionada e nunca esquiva",
+  "Jump / left stick click": "Pulo / clique do analógico esquerdo",
+  "Jumps when Jump on its own key is on": "Pula quando \"Pulo em tecla própria\" está ativado",
+  "Toggle": "Alternar",
+  "Hold": "Segurar",
+  "The saves could not be read: ": "Não foi possível ler os saves: "
 }

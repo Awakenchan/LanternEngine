@@ -1662,5 +1662,18 @@
   "Hunters": "Cazadores",
   "No hunters yet: they show up here once the game has saved": "Aún no hay cazadores: aparecerán aquí cuando el juego guarde",
   "Level {0}  ·  {1} bosses": "Nivel {0}  ·  {1} jefes",
-  "{0} played": "{0} jugado"
+  "{0} played": "{0} jugado",
+  "2K menu detail": "Detalle de menús 2K",
+  "Jump on its own key": "Salto en su propia tecla",
+  "Dodge": "Esquivar",
+  "Dodges even while the sprint key is held": "Esquiva incluso con la tecla de sprint pulsada",
+  "Backstep": "Paso atrás",
+  "Steps back at once, also while moving or sprinting": "Retrocede al instante, también al moverte o esprintar",
+  "Sprint": "Sprint",
+  "Sprints at once while held, and never dodges": "Esprinta al instante mientras se mantiene, y nunca esquiva",
+  "Jump / left stick click": "Saltar / pulsar stick izquierdo",
+  "Jumps when Jump on its own key is on": "Salta cuando «Salto en su propia tecla» está activado",
+  "Toggle": "Alternar",
+  "Hold": "Mantener",
+  "The saves could not be read: ": "No se pudieron leer las partidas guardadas: "
 }

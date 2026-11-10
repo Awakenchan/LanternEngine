@@ -4,10 +4,12 @@
 #include "menu_pointer.h"
 #include "pad.h"
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -47,7 +49,10 @@ constexpr BindingInfo kActions[kBindCount] = {
     {"confirm", "Menu Confirm", "OK, in menus.", 0, "Return", 0},
     {"back", "Menu Back", "Return, in menus.", 0, "Backspace", 0},
 
-    {"l3", "Left Stick Press", "L3.", kL3, "Left Ctrl", 0},
+    {"l3", "Jump / Left Stick Press", "L3. Jumps when Jump on its own key is on.", kL3, "Left Ctrl", 0},
+    {"dodge", "Dodge", "A tap of Circle, also while the sprint key is held.", 0, nullptr, 0},
+    {"backstep", "Backstep", "Steps back at once, also while moving or sprinting.", 0, nullptr, 0},
+    {"sprint", "Sprint", "Sprints at once while held, and never dodges.", 0, nullptr, 0},
     {"debug_menu", "Debug Menu", "Opens and closes the developers' debug menu (the Debug Menu plugin).", 0, "`", 0},
 };
 
@@ -78,6 +83,7 @@ struct Binding {
 std::mutex g_lock;
 Binding g_bindings[kBindCount];
 std::atomic<std::uint64_t> g_serial{1};
+std::atomic<bool> g_dodge_down{false}, g_backstep_down{false}, g_sprint_down{false};
 
 void Changed() { g_serial.fetch_add(1, std::memory_order_relaxed); }
 
@@ -395,10 +401,50 @@ void host_binding_clear(int action) {
     host_log("keys: %s cleared", kActions[action].key);
 }
 
+namespace {
+bool g_toggles[kBindCount] = {};
+std::atomic<bool> g_toggled[kBindCount] = {};
+
+bool LoadToggles() {
+    const char* env = std::getenv("BB_TOGGLE_KEYS");
+    if (!env) return false;
+    bool any = false;
+    std::string name;
+    for (const char* p = env;; ++p) {
+        if (*p && *p != ',') {
+            if (*p != ' ') name += *p;
+            continue;
+        }
+        const int action = ActionNamed(name.c_str());
+        if (action >= 0 && action != kBindMenu && action != kBindConfirm && action != kBindBack &&
+            action != kBindDebugMenu) {
+            g_toggles[action] = any = true;
+        }
+        name.clear();
+        if (!*p) break;
+    }
+    return any;
+}
+
+void ApplyToggles(bool was[kBindCount], bool held[kBindCount]) {
+    static const bool any = LoadToggles();
+    if (!any) return;
+    const bool menu = menu_pointer_in_menu();
+    for (int a = 0; a < kBindCount; ++a) {
+        if (!g_toggles[a]) continue;
+        if (held[a] && !was[a] && !menu) g_toggled[a].store(!g_toggled[a].load(std::memory_order_relaxed), std::memory_order_relaxed);
+        was[a] = held[a];
+        held[a] = !menu && g_toggled[a].load(std::memory_order_relaxed);
+    }
+}
+}
+
 void host_bindings_keys_held(const bool* keys, int count, bool held[kBindCount]) {
     const std::uint8_t modifiers = ModifiersDown(keys, count);
     g_keyboard_modifiers.store(modifiers, std::memory_order_relaxed);
     HeldOn(false, [&](int sc) { return sc < count && keys[sc]; }, modifiers, held);
+    static bool was[kBindCount] = {};
+    ApplyToggles(was, held);
 
     for (const auto& pair : kOpposites) {
         if (held[pair[0]] && held[pair[1]]) held[pair[0]] = held[pair[1]] = false;
@@ -409,11 +455,63 @@ void host_bindings_keys_held(const bool* keys, int count, bool held[kBindCount])
 void host_bindings_mouse_held(std::uint32_t inputs, bool held[kBindCount]) {
     HeldOn(true, [&](int m) { return m >= 1 && m <= kMouseInputs && (inputs >> (m - 1) & 1); },
            g_keyboard_modifiers.load(std::memory_order_relaxed), held);
+    static bool was[kBindCount] = {};
+    ApplyToggles(was, held);
     g_walk_on_mouse.store(held[kBindWalk], std::memory_order_relaxed);
+}
+
+bool host_bindings_dodge(std::uint64_t now_ms, bool menu, PadState& pad) {
+    constexpr std::uint64_t kShortestStepMs = 20, kLongestStepMs = 67, kSprintTailMs = 150;
+    constexpr int kGaps = 8;
+    static bool was_dodge = false, was_backstep = false, from_sprint = false, still = false;
+    static std::uint64_t began = 0, step_ms = kLongestStepMs, last_read = 0, last_sprint = 0;
+    static std::uint64_t gaps[kGaps] = {};
+    static int gap_at = 0;
+    if (last_read && now_ms > last_read) {
+        gaps[gap_at] = now_ms - last_read;
+        gap_at = (gap_at + 1) % kGaps;
+    }
+    last_read = now_ms;
+    const bool dodge = g_dodge_down.exchange(false, std::memory_order_relaxed);
+    const bool backstep = g_backstep_down.exchange(false, std::memory_order_relaxed);
+    const bool sprint = g_sprint_down.exchange(false, std::memory_order_relaxed);
+    const bool dodge_pressed = dodge && !was_dodge, backstep_pressed = backstep && !was_backstep;
+    was_dodge = dodge;
+    was_backstep = backstep;
+    if (menu) {
+        began = 0;
+        last_sprint = 0;
+        return false;
+    }
+    if (sprint) {
+        last_sprint = std::max<std::uint64_t>(now_ms, 1);
+        pad.buttons |= kCircle;
+    }
+    const bool at_once = last_sprint && now_ms - last_sprint < kSprintTailMs;
+    if ((dodge_pressed || backstep_pressed) && !began) {
+        began = std::max<std::uint64_t>(now_ms, 1);
+        from_sprint = (pad.buttons & kCircle) != 0;
+        still = backstep_pressed;
+        const std::uint64_t frame = *std::max_element(gaps, gaps + kGaps);
+        step_ms = std::clamp<std::uint64_t>(frame + frame / 4, kShortestStepMs, kLongestStepMs);
+    }
+    if (!began) return at_once;
+    const std::uint64_t step = (now_ms - began) / step_ms + (from_sprint ? 0 : 1);
+    if (step > 2) {
+        began = 0;
+        return at_once;
+    }
+    if (step == 1) pad.buttons |= kCircle;
+    else pad.buttons &= ~std::uint32_t(kCircle);
+    if (still) pad.lx = pad.ly = kStickRest;
+    return at_once && step == 0;
 }
 
 void host_bindings_apply(const bool held[kBindCount], bool strong, PadState& pad) {
     const bool menu = menu_pointer_in_menu();
+    if (held[kBindDodge]) g_dodge_down.store(true, std::memory_order_relaxed);
+    if (held[kBindBackstep]) g_backstep_down.store(true, std::memory_order_relaxed);
+    if (held[kBindSprint]) g_sprint_down.store(true, std::memory_order_relaxed);
     for (int a = 0; a < kBindCount; ++a) {
         if (!held[a]) continue;
         if ((a == kBindConfirm || a == kBindBack) && !menu) continue;

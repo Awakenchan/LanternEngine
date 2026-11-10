@@ -123,7 +123,7 @@ struct Values {
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
     std::atomic<int> frame_gen{FrameGenOff};
-    std::atomic<bool> frame_gen_cap{true};
+    std::atomic<bool> frame_gen_cap{false};
     std::atomic<bool> frame_gen_active{false};
     std::atomic<float> frame_gen_shown_fps{0.0f}, frame_gen_game_fps{0.0f};
     std::atomic<int> frame_gen_multiplier{2};

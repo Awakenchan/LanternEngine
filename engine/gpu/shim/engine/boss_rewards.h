@@ -27,6 +27,16 @@ constexpr bool IsBossLot(std::int32_t lot) {
     return std::binary_search(std::begin(kLots), std::end(kLots), lot);
 }
 
+constexpr std::int32_t kInsightEvent = 9350, kMostInsight = 9;
+
+constexpr std::int32_t InsightWord(std::int32_t insight) {
+    return insight >= 1 && insight <= kMostInsight ? -insight : 0;
+}
+
+constexpr std::int32_t InsightOf(std::int32_t word) {
+    return word < 0 && word >= -kMostInsight ? -word : 0;
+}
+
 template <typename Clock> class Given {
 public:
     explicit Given(typename Clock::duration keep) : keep_(keep) {}

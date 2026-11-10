@@ -37,7 +37,7 @@ constexpr unsigned kNgxApiVersion = 0x15;
 constexpr int kFeatureSuperSampling = 1;
 constexpr unsigned long long kApplicationId = 231313132; // NVIDIA's id for unregistered apps
 constexpr const char* kProjectId = "5c1f3a9e-7b42-4d86-9e31-0f6a2b7cd481";
-constexpr const char* kEngineVersion = "0.9.40";
+constexpr const char* kEngineVersion = "0.9.41";
 constexpr int kEngineCustom = 0;
 constexpr unsigned kPresetF = 6;
 

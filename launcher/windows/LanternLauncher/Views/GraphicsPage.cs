@@ -20,7 +20,7 @@ namespace BloodborneLauncher.Views
 
             Group(L.T("Upscaler"));
             var windows = OperatingSystem.IsWindows();
-            var fsr411 = windows ? Fsr4VkFound() && !Amd() : Fsr4VkFound() || Directory.Exists(Fsr411Dir());
+            var fsr411 = windows ? Fsr4VkFound() : Fsr4VkFound() || Directory.Exists(Fsr411Dir());
             if (windows && (Ini.Get("upscaler") is "fsr3" or "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411"))) Ini.Set("upscaler", "fsr");
             if (!windows && Ini.Get("upscaler") is "fsr" or "xess") Ini.Set("upscaler", "fsr4");
             if (!windows && !fsr411 && Ini.Get("upscaler") == "fsr411") Ini.Set("upscaler", "fsr4");
@@ -81,7 +81,7 @@ namespace BloodborneLauncher.Views
                 L.T("Lower input lag on AMD drivers that offer it; does nothing on other GPUs. Turns itself off until the next start if the driver holds the game too long"),
                 "anti_lag");
             IniToggle(SymbolRegular.Timer24, L.T("Frame generation: even pacing (Uncapped)"),
-                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_cap");
+                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_even_pacing");
             _frameGenCapCard = (SettingRow)Body.Children[^1];
 
             Group(L.T("Picture"));
@@ -106,6 +106,9 @@ namespace BloodborneLauncher.Views
                     Ini.Set("ui_4k", v ? "1" : "0");
                     if (v && !UiUpscale.Ready) _ = BuildUi4kAsync();
                 });
+            ToggleRow(SymbolRegular.Image24, L.T("2K menu detail"),
+                L.T("Draws the upscaled menus at half their built size. They use a quarter of the video memory and stay as sharp as a 1440p or smaller screen can show. Turn it on before Build and the built textures take a quarter of the disk space too"),
+                () => Ini.Get("ui_2k", "0") == "1", v => Ini.Set("ui_2k", v ? "1" : "0"));
             _ui4kButton = SmallButton(L.T("Build"), SymbolRegular.ArrowDownload24, async (_, _) => await BuildUi4kAsync());
             _ui4kRemove = SmallButton(L.T("Remove"), SymbolRegular.Delete24, (_, _) => RemoveUi4k());
             var ui4kButtons = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal };
@@ -189,7 +192,7 @@ namespace BloodborneLauncher.Views
             });
             try
             {
-                await UiUpscale.BuildAsync(GameEnvironment.GameDir(S), progress, _ui4kBuild.Token);
+                await UiUpscale.BuildAsync(GameEnvironment.GameDir(S), progress, _ui4kBuild.Token, Ini.Get("ui_2k", "0") == "1");
                 Ini.Set("ui_4k", "1");
                 Ws.SaveSoon();
                 Ws.Log(L.T("4K menus are ready: they show the next time the game starts"), LogLevel.Good);

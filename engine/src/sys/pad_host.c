@@ -29,7 +29,18 @@ static const uint32_t input_buttons[IN_COUNT] = {
 #define MAX_PER_INPUT 4
 #define SPARE_PADS 4
 #define PRESSED 30
-enum { LEFT_TRIGGER = SDL_GAMEPAD_BUTTON_COUNT, RIGHT_TRIGGER };
+enum {
+    LEFT_TRIGGER = SDL_GAMEPAD_BUTTON_COUNT, RIGHT_TRIGGER,
+    LEFT_PAD_UP, LEFT_PAD_DOWN, LEFT_PAD_LEFT, LEFT_PAD_RIGHT, LEFT_PAD_TOUCH,
+    RIGHT_PAD_UP, RIGHT_PAD_DOWN, RIGHT_PAD_LEFT, RIGHT_PAD_RIGHT, RIGHT_PAD_TOUCH
+};
+enum { TRACK_AUTO, TRACK_OFF, TRACK_TOUCH, TRACK_CAMERA, TRACK_MOVE };
+
+typedef struct {
+    int down;
+    float x, y, vx, vy;
+    uint64_t moved;
+} TrackPad;
 
 typedef struct {
     int key_count, pad_count;
@@ -40,6 +51,9 @@ typedef struct {
 static Binding bindings[IN_COUNT];
 static int bindings_loaded;
 static int swap_sticks, invert_look_x, invert_look_y, deadzone_percent;
+static int track_mode[2], track_sensitivity = 100, gyro_camera, gyro_sensitivity = 100;
+static TrackPad track[2];
+static int track_pads;
 
 static SDL_Gamepad *gamepad;
 static SDL_Gamepad *spares[SPARE_PADS];
@@ -131,7 +145,15 @@ static SDL_Gamepad *current_gamepad(void) {
     static int on_choice;
     static uint64_t last_scan;
     static SDL_JoystickID typed_id;
-    if (!sdl_state) sdl_state = SDL_WasInit(SDL_INIT_GAMEPAD) || SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+    if (!sdl_state) {
+        const char *steam = getenv("BB_STEAM_HIDAPI");
+        if (!steam || strcmp(steam, "0")) {
+            SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
+            SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, "1");
+            SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM_HORI, "1");
+        }
+        sdl_state = SDL_WasInit(SDL_INIT_GAMEPAD) || SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+    }
     if (sdl_state < 0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) {
         SDL_CloseGamepad(gamepad);
@@ -158,6 +180,9 @@ static SDL_Gamepad *current_gamepad(void) {
                 ++connections;
                 printf("Runtime: gamepad connected: %s%s\n", SDL_GetGamepadName(gamepad),
                        !choice ? "" : on_choice ? " (the chosen one)" : " (the chosen one is not connected)");
+                printf("Runtime: gamepad has %d touchpad(s), gyro %s, paddles %s\n", SDL_GetNumGamepadTouchpads(gamepad),
+                       SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO) ? "yes" : "no",
+                       SDL_GamepadHasButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1) ? "yes" : "no");
             }
         }
         SDL_free(ids);
@@ -191,6 +216,7 @@ static void default_bindings(void) {
         {IN_L3, SDL_GAMEPAD_BUTTON_LEFT_STICK}, {IN_R3, SDL_GAMEPAD_BUTTON_RIGHT_STICK},
         {IN_OPTIONS, SDL_GAMEPAD_BUTTON_START},
         {IN_TOUCHPAD, SDL_GAMEPAD_BUTTON_BACK}, {IN_TOUCHPAD, SDL_GAMEPAD_BUTTON_TOUCHPAD},
+        {IN_TOUCHPAD_RIGHT, SDL_GAMEPAD_BUTTON_MISC2},
         {IN_UP, SDL_GAMEPAD_BUTTON_DPAD_UP}, {IN_DOWN, SDL_GAMEPAD_BUTTON_DPAD_DOWN},
         {IN_LEFT, SDL_GAMEPAD_BUTTON_DPAD_LEFT}, {IN_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
     };
@@ -208,12 +234,28 @@ static void default_bindings(void) {
 static int gamepad_button_named(const char *name) {
     if (!SDL_strcasecmp(name, "lefttrigger")) return LEFT_TRIGGER;
     if (!SDL_strcasecmp(name, "righttrigger")) return RIGHT_TRIGGER;
+    static const char *const pad_names[] = {"leftpad_up",  "leftpad_down",  "leftpad_left",  "leftpad_right",  "leftpad_touch",
+                                            "rightpad_up", "rightpad_down", "rightpad_left", "rightpad_right", "rightpad_touch"};
+    for (int i = 0; i < 10; ++i)
+        if (!SDL_strcasecmp(name, pad_names[i])) return LEFT_PAD_UP + i;
     SDL_GamepadButton button = SDL_GetGamepadButtonFromString(name);
     return button == SDL_GAMEPAD_BUTTON_INVALID ? -1 : (int)button;
 }
 
+static int track_mode_named(const char *value) {
+    static const char *const names[] = {"auto", "off", "touch", "camera", "move"};
+    for (int i = 0; i < 5; ++i)
+        if (!strncmp(value, names[i], strlen(names[i]))) return i;
+    return TRACK_AUTO;
+}
+
 static int read_option(const char *line, const char *value) {
     int v = atoi(value);
+    if (!strncmp(line, "pad_trackpad_left=", 18)) track_mode[0] = track_mode_named(value);
+    else if (!strncmp(line, "pad_trackpad_right=", 19)) track_mode[1] = track_mode_named(value);
+    else if (!strncmp(line, "pad_trackpad_sensitivity=", 25)) track_sensitivity = v < 10 ? 10 : v > 400 ? 400 : v;
+    else if (!strncmp(line, "pad_gyro_camera=", 16)) gyro_camera = v != 0;
+    else if (!strncmp(line, "pad_gyro_sensitivity=", 21)) gyro_sensitivity = v < 10 ? 10 : v > 400 ? 400 : v;
     if (!strncmp(line, "pad_swap_sticks=", 16)) swap_sticks = v != 0;
     else if (!strncmp(line, "pad_invert_look_x=", 18)) invert_look_x = v != 0;
     else if (!strncmp(line, "pad_invert_look_y=", 18)) invert_look_y = v != 0;
@@ -286,12 +328,109 @@ static int menu_owns(int button) {
     return 0;
 }
 
+static int track_button(int button) {
+    const TrackPad *t = &track[button >= RIGHT_PAD_UP];
+    if (track_pads < 2 || !t->down) return 0;
+    int which = (button - LEFT_PAD_UP) % 5;
+    float dx = t->x - 0.5f, dy = t->y - 0.5f, ax = SDL_fabsf(dx), ay = SDL_fabsf(dy);
+    int on = which == 4   ? 1
+             : which == 0 ? dy < -0.18f && ay >= ax
+             : which == 1 ? dy > 0.18f && ay >= ax
+             : which == 2 ? dx < -0.18f && ax > ay
+                          : dx > 0.18f && ax > ay;
+    return on ? 255 : 0;
+}
+
+static void update_trackpads(SDL_Gamepad *g) {
+    track_pads = SDL_GetNumGamepadTouchpads(g);
+    uint64_t now = pad_now_us();
+    for (int p = 0; p < 2; ++p) {
+        TrackPad *t = &track[p];
+        bool down = false;
+        float x = 0, y = 0;
+        if (track_pads < 2 || !SDL_GetGamepadTouchpadFinger(g, p, 0, &down, &x, &y, NULL) || !down) {
+            t->down = 0;
+            t->vx = t->vy = 0;
+            continue;
+        }
+        if (!t->down) {
+            t->vx = t->vy = 0;
+            t->moved = now;
+        } else if (x != t->x || y != t->y) {
+            float dt = (float)(now - t->moved) / 1000000.0f;
+            if (dt < 0.002f) dt = 0.002f;
+            t->vx = 0.5f * t->vx + 0.5f * (x - t->x) / dt;
+            t->vy = 0.5f * t->vy + 0.5f * (y - t->y) / dt;
+            t->moved = now;
+        } else if (now - t->moved > 40000) {
+            t->vx = t->vy = 0;
+        }
+        t->down = 1;
+        t->x = x;
+        t->y = y;
+    }
+}
+
+static int track_mode_of(int p) {
+    return track_mode[p] != TRACK_AUTO ? track_mode[p] : p ? TRACK_CAMERA : TRACK_TOUCH;
+}
+
+static uint8_t offset_byte(uint8_t value, float offset) {
+    float v = value + offset * 127.0f;
+    return (uint8_t)(v < 0.0f ? 0 : v > 255.0f ? 255 : (int)(v + 0.5f));
+}
+
+static void apply_trackpads(PadData *pad) {
+    for (int p = 0; p < 2 && track_pads >= 2; ++p) {
+        const TrackPad *t = &track[p];
+        int mode = track_mode_of(p);
+        if (!t->down) continue;
+        if (mode == TRACK_CAMERA) {
+            float k = 0.45f * track_sensitivity / 100.0f;
+            pad->right_x = offset_byte(pad->right_x, (invert_look_x ? -t->vx : t->vx) * k);
+            pad->right_y = offset_byte(pad->right_y, (invert_look_y ? -t->vy : t->vy) * k);
+        } else if (mode == TRACK_MOVE) {
+            float x = (t->x - 0.5f) * 2.4f, y = (t->y - 0.5f) * 2.4f, length = SDL_sqrtf(x * x + y * y);
+            if (length < 0.15f) continue;
+            if (length > 1.0f) {
+                x /= length;
+                y /= length;
+            }
+            pad->left_x = offset_byte(128, x);
+            pad->left_y = offset_byte(128, y);
+        } else if (mode == TRACK_TOUCH && pad->touch_count < 2) {
+            pad->touches[pad->touch_count++] =
+                (PadTouch){.x = touch_coordinate((p ? 0.5f : 0.0f) + t->x * 0.5f, PAD_TOUCH_WIDTH - 1),
+                           .y = touch_coordinate(t->y, PAD_TOUCH_HEIGHT - 1),
+                           .id = (uint8_t)p};
+        }
+    }
+}
+
+static void apply_gyro(SDL_Gamepad *g, PadData *pad) {
+    static SDL_JoystickID enabled_on;
+    if (!gyro_camera || !SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO)) return;
+    SDL_JoystickID id = SDL_GetGamepadID(g);
+    if (id != enabled_on) {
+        SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_GYRO, true);
+        enabled_on = id;
+    }
+    float rate[3] = {0};
+    if (!SDL_GetGamepadSensorData(g, SDL_SENSOR_GYRO, rate, 3)) return;
+    float k = 0.6f * gyro_sensitivity / 100.0f, yaw = -rate[1], pitch = -rate[0];
+    if (SDL_fabsf(yaw) < 0.03f) yaw = 0;
+    if (SDL_fabsf(pitch) < 0.03f) pitch = 0;
+    pad->right_x = offset_byte(pad->right_x, (invert_look_x ? -yaw : yaw) * k);
+    pad->right_y = offset_byte(pad->right_y, (invert_look_y ? -pitch : pitch) * k);
+}
+
 static int gamepad_value(SDL_Gamepad *g, int input, int skip_menu_buttons) {
     int value = 0;
     for (int i = 0; i < bindings[input].pad_count; ++i) {
         int b = bindings[input].pad[i];
         if (skip_menu_buttons && menu_owns(b)) continue;
-        int v = b == LEFT_TRIGGER    ? trigger_byte(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))
+        int v = b >= LEFT_PAD_UP     ? track_button(b)
+                : b == LEFT_TRIGGER  ? trigger_byte(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))
                 : b == RIGHT_TRIGGER ? trigger_byte(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))
                 : SDL_GetGamepadButton(g, (SDL_GamepadButton)b) ? 255
                                                                   : 0;
@@ -352,7 +491,7 @@ static void read_sticks(SDL_Gamepad *g, PadData *pad) {
 }
 
 static void read_touchpad(SDL_Gamepad *g, PadData *pad) {
-    if (SDL_GetNumGamepadTouchpads(g) <= 0) return;
+    if (track_pads != 1) return;
     int fingers = SDL_GetNumGamepadTouchpadFingers(g, 0);
     for (int finger = 0; finger < fingers && pad->touch_count < 2; ++finger) {
         bool down = false;
@@ -368,6 +507,7 @@ static void read_gamepad(SDL_Gamepad *g, PadData *pad) {
     static int menu_buttons_held;
     uint32_t menu_confirm = 0, menu_back = 0;
     int in_menu = 0, menu_down = 0, touch_right = 0;
+    update_trackpads(g);
     if (bindings[IN_MENU_CONFIRM].pad_count || bindings[IN_MENU_BACK].pad_count) {
         in_menu = bbgpu_menu_buttons(&menu_confirm, &menu_back);
         menu_down = (gamepad_value(g, IN_MENU_CONFIRM, 0) > PRESSED ? 1 : 0) |
@@ -387,6 +527,8 @@ static void read_gamepad(SDL_Gamepad *g, PadData *pad) {
     }
     read_sticks(g, pad);
     read_touchpad(g, pad);
+    apply_trackpads(pad);
+    apply_gyro(g, pad);
     if ((pad->buttons & PAD_TOUCHPAD) && !pad->touch_count) pad_touch_click(pad, 0);
     if (touch_right) pad_touch_click(pad, 1);
 }
@@ -497,13 +639,15 @@ int sys_pad_button(uint32_t button, int right_side) {
     const Binding *b = &bindings[input];
     for (int i = 0; i < b->pad_count && found < 0; ++i) {
         int p = b->pad[i];
-        int present = !gamepad                ? 1
+        int present = p >= LEFT_PAD_UP        ? 0
+                      : !gamepad              ? 1
                       : p == LEFT_TRIGGER     ? SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)
                       : p == RIGHT_TRIGGER    ? SDL_GamepadHasAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)
                                               : SDL_GamepadHasButton(gamepad, (SDL_GamepadButton)p);
         if (present) found = p;
     }
-    if (found < 0 && b->pad_count) found = b->pad[0];
+    for (int i = 0; i < b->pad_count && found < 0; ++i)
+        if (b->pad[i] < LEFT_PAD_UP) found = b->pad[i];
     sys_pad_unlock();
     return found;
 }

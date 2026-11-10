@@ -96,6 +96,9 @@ namespace BloodborneLauncher.Core
             foreach (var (key, value) in GameEnvironment.SdlHints())
                 SetHint(key, value);
             SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+            SetHint("SDL_JOYSTICK_HIDAPI_STEAM", "1");
+            SetHint("SDL_JOYSTICK_HIDAPI_STEAMDECK", "1");
+            SetHint("SDL_JOYSTICK_HIDAPI_STEAM_HORI", "1");
             _initialised = _init(InitGamepad) != 0;
             return _initialised;
         }

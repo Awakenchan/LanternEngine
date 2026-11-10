@@ -16,7 +16,7 @@ enum BindAction : int {
 
     kBindLookU, kBindLookD, kBindLookL, kBindLookR, kBindMenu, kBindConfirm, kBindBack,
 
-    kBindL3, kBindDebugMenu,
+    kBindL3, kBindDodge, kBindBackstep, kBindSprint, kBindDebugMenu,
     kBindCount,
 };
 constexpr int kBindPages = 5, kBindPerPage = 7;
@@ -53,6 +53,7 @@ void host_bindings_keys_held(const bool* keys, int count, bool held[kBindCount])
 void host_bindings_mouse_held(std::uint32_t inputs, bool held[kBindCount]);
 
 void host_bindings_apply(const bool held[kBindCount], bool strong, PadState& pad);
+bool host_bindings_dodge(std::uint64_t now_ms, bool menu, PadState& pad);
 
 void host_bind_capture_begin(int action);
 int host_bind_capturing();

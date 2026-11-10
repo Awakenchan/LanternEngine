@@ -1037,9 +1037,151 @@ void PrintBufferStats() {
 }
 } // namespace
 
+bool BufferCache::TryCompare() {
+    static const bool on = [] {
+        const char* env = std::getenv("LANTERN_RUN_COMMIT");
+        return env && env[0] ? std::strcmp(env, "compare") == 0 : BbSections::Enabled();
+    }();
+    return on;
+}
+
+BufferCache::TryRead BufferCache::TryObtainRead(VAddr device_addr, u32 size, StreamSlice* slice,
+                                                std::pair<const Buffer*, u64>& out) {
+    static const bool shadows = [] {
+        const char* env = std::getenv("BB_SHADOWS");
+        return env && env[0] == '1';
+    }();
+    if (size == 0 || shadows || hle_obtain || ChunkBuffers() || BufferStatsEnabled()) {
+        return TryRead::Config;
+    }
+    const bool in_place_mode = GuestInPlace();
+    const bool gpu_modified = memory_tracker->IsRegionGpuModified(device_addr, size);
+    if (!gpu_modified && in_place_mode) {
+        const u64 tick = WriteTicks().Newest(device_addr, size);
+        if (tick != 0 && !scheduler.GetWorkSemaphore()->IsFree(tick)) {
+            return TryRead::GpuBusy;
+        }
+    }
+    const u64 first_block = device_addr >> block_shift;
+    const u64 last_block = (device_addr + size - 1) >> block_shift;
+    const auto find_arena = [&]() -> const Buffer* {
+        const u64 first_page = first_block >> blocks_per_arena_page_shift;
+        const u64 last_page = last_block >> blocks_per_arena_page_shift;
+        if (last_page >= address_space.size()) {
+            return nullptr;
+        }
+        const Buffer* arena = address_space[first_page];
+        return arena == address_space[last_page] ? arena : nullptr;
+    };
+    const auto note_use = [&] {
+        const u32 now = BbStats::coarse_second.load(std::memory_order_relaxed);
+        const VAddr address = first_block << block_shift;
+        const u64 bytes = (last_block - first_block + 1) << block_shift;
+        const u64 last =
+            std::min<u64>((address + bytes - 1) >> USE_GROUP_BITS, group_use.size() - 1);
+        for (u64 group = address >> USE_GROUP_BITS; group <= last; ++group) {
+            if (group_demoted[group]) {
+                return false;
+            }
+            if (group_use[group] != now) {
+                group_use[group] = now;
+            }
+        }
+        return true;
+    };
+    const auto resident = [&] {
+        if (!resident_ranges.Contains(first_block, last_block + 1)) {
+            return false;
+        }
+        if (!evicted_blocks.Empty() && block_shift <= USE_GROUP_BITS) {
+            const u64 group_shift = USE_GROUP_BITS - block_shift;
+            const u64 from = (first_block >> group_shift) << group_shift;
+            const u64 to = ((last_block >> group_shift) + 1) << group_shift;
+            if (evicted_blocks.Overlaps(from, to)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (in_place_mode && (size > STREAM_THRESHOLD || gpu_modified)) {
+        const Buffer* arena = find_arena();
+        if (!arena) {
+            return TryRead::NoArena;
+        }
+        if (!note_use()) {
+            return TryRead::Demoted;
+        }
+        if (!resident()) {
+            return TryRead::NotResident;
+        }
+        if (in_place_blocks.Contains(first_block, last_block + 1)) {
+            out = {arena, arena->Offset(device_addr)};
+            return TryRead::Clean;
+        }
+    }
+    if (size <= STREAM_THRESHOLD && !gpu_modified) {
+        if (stream_buffer.mapped_data.empty()) {
+            return TryRead::Config;
+        }
+        if (!slice) {
+            out = {&stream_buffer, 0};
+            return TryRead::Clean;
+        }
+        const u64 at = Common::AlignUp(slice->at, u64(instance.UniformMinAlignment()));
+        if (at + size > slice->end) {
+            return TryRead::SliceFull;
+        }
+        memory->CopySparseMemory(device_addr, stream_buffer.mapped_data.data() + at, size);
+        slice->at = at + size;
+        out = {&stream_buffer, at};
+        return TryRead::Clean;
+    }
+    const Buffer* arena = find_arena();
+    if (!arena) {
+        return TryRead::NoArena;
+    }
+    if (!note_use()) {
+        return TryRead::Demoted;
+    }
+    if (!resident()) {
+        return TryRead::NotResident;
+    }
+    if (in_place_mode && in_place_blocks.Overlaps(first_block, last_block + 1)) {
+        return TryRead::Partial;
+    }
+    if (memory_tracker->IsRegionCpuModifiedRead(device_addr, size)) {
+        return TryRead::CpuModified;
+    }
+    out = {arena, arena->Offset(device_addr)};
+    return TryRead::Clean;
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     BB_SECTION(ObtainBuffer);
+    if (TryCompare() && !is_written && !is_texel_buffer) {
+        thread_local bool comparing = false;
+        if (!comparing) {
+            std::pair<const Buffer*, u64> tried{};
+            const TryRead result = TryObtainRead(device_addr, size, nullptr, tried);
+            const u64 uploads = obtain_paths[5];
+            const u64 residency = ResidencyGeneration();
+            comparing = true;
+            const auto real = ObtainBuffer(device_addr, size, false, false);
+            comparing = false;
+            ++try_read_counts[static_cast<u32>(result)];
+            if (result == TryRead::Clean) {
+                const bool same = tried.first == real.first &&
+                                  (tried.first == &stream_buffer || tried.second == real.second);
+                try_read_differ += !same;
+                try_read_uploaded += obtain_paths[5] != uploads;
+                try_read_rebound += ResidencyGeneration() != residency;
+            } else {
+                try_dirty = true;
+            }
+            return real;
+        }
+    }
     const bool stats = BufferStatsEnabled();
     const auto note_hle = [&](u32 path) {
         if (hle_obtain) {

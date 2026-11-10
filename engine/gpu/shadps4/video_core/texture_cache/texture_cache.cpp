@@ -319,6 +319,8 @@ void TextureCache::ProcessDownloadImages() {
     download_images.clear();
 }
 
+static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size);
+
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
@@ -377,8 +379,12 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         download.Invalidate();
         BbFreeCheck::Check(image.info.guest_address, download_size, download.mapped,
                            BbFreeCheck::ImageDownload);
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
-                                                  download.mapped, download_size);
+        const auto watched = WatchedPart(image, image.info.guest_address, download_size);
+        if (watched.second != 0) {
+            Core::Memory::Instance()->TryWriteBacking(
+                std::bit_cast<u8*>(watched.first),
+                download.mapped + (watched.first - image.info.guest_address), watched.second);
+        }
         if (!WriteTracking()) {
             // bbport: the caches' own thread (stage A drained, or the draw recording thread):
             // a readback the range needs runs here. Sent to the GPU command thread, it waited
@@ -407,6 +413,38 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
 // only texels inside the image's extent (TileImage's extent_only): padding rows and columns, and
 // whatever lies beyond a render target's hinted size, keep the game's bytes. The buffer then
 // replaces the guest surface.
+/// The part of an image's guest memory whose pages the image still watches. A write beside the
+/// image on its first or last page (the game's heap header in front of it) ends the watch of that
+/// page, and later writes there, inside the image too, go unseen: after the game freed the block,
+/// its heap kept the free list in those bytes, and a store of the whole image put pixels over it
+/// (crash in the game's heap after a death and reload, 0.9.40 reports). Those pages are left as
+/// the game has them. BB_STORE_UNWATCHED=1: the whole image, as before.
+static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size) {
+    static const bool whole = [] {
+        const char* env = std::getenv("BB_STORE_UNWATCHED");
+        return env && env[0] == '1';
+    }();
+    if (whole || !image.IsTracked()) {
+        return {address, size};
+    }
+    const VAddr begin = std::max(address, image.track_addr);
+    const VAddr end = std::min(address + size, image.track_addr_end);
+    if (begin >= end) {
+        return {address, 0};
+    }
+    if (end - begin != size) {
+        static std::atomic<u32> said{0};
+        if (said.fetch_add(1, std::memory_order_relaxed) < 6) {
+            std::printf("Texture cache: image at %#llx stored back without %llu bytes on its first "
+                        "or last page (the game wrote beside it there; BB_STORE_UNWATCHED=1: all "
+                        "of it)\n",
+                        static_cast<unsigned long long>(address),
+                        static_cast<unsigned long long>(size - (end - begin)));
+        }
+    }
+    return {begin, end - begin};
+}
+
 bool TextureCache::StoreTiledImage(ImageId image_id) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
@@ -416,6 +454,10 @@ bool TextureCache::StoreTiledImage(ImageId image_id) {
     const VAddr address = info.guest_address;
     const u64 size = info.guest_size;
     if (!info.props.is_tiled || address == 0 || size == 0 || !image.backing) {
+        return false;
+    }
+    const auto watched = WatchedPart(image, address, size);
+    if (watched.second == 0) {
         return false;
     }
 
@@ -508,7 +550,9 @@ bool TextureCache::StoreTiledImage(ImageId image_id) {
     scheduler.Finish();
     host.Invalidate();
     BbFreeCheck::Check(address, size, host.mapped, BbFreeCheck::ImageDownload);
-    const bool stored = memory->TryWriteBacking(std::bit_cast<u8*>(address), host.mapped, size);
+    const bool stored = memory->TryWriteBacking(std::bit_cast<u8*>(watched.first),
+                                                host.mapped + (watched.first - address),
+                                                watched.second);
     image.mip_hashes_current = false;
     // Guest memory changed under the copies made of it (also by a partial store).
     if (!WriteTracking()) {
@@ -861,6 +905,13 @@ Image* TextureCache::UiReplacement(const Image& image) {
         }
     }
     while (u32(w) > kUiLargestSide || u32(h) > kUiLargestSide) {
+        Halve(pixels, w, h, format == vk::Format::eR8G8B8A8Srgb);
+    }
+    static const bool half_detail = [] {
+        const char* env = std::getenv("BB_UI_2K");
+        return env && env[0] == '1';
+    }();
+    if (half_detail && u32(w) >= image.info.size.width * 4 && u32(h) >= image.info.size.height * 4) {
         Halve(pixels, w, h, format == vk::Format::eR8G8B8A8Srgb);
     }
     Image* out = UploadUi(image.ui_key, pixels, w, h, format);

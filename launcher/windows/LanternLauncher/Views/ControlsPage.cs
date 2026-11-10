@@ -56,6 +56,9 @@ namespace BloodborneLauncher.Views
             Group(L.T("Keyboard & mouse"));
             var pc = ToggleRow(SymbolRegular.Keyboard24, L.T("PC controls"), L.T("The keyboard and mouse layout below; off keeps the gamepad-style keys"),
                 () => Ini.Get("pc_controls", "1") != "0", v => Ini.Set("pc_controls", v ? "1" : "0"));
+            ToggleRow(SymbolRegular.ArrowUp24, L.T("Jump on its own key"),
+                L.T("The Jump key (left stick click, L3; Left Ctrl by default) jumps at once, sprinting or not, and the dodge button always dodges. Off: a second press of the dodge button while sprinting jumps, as on PS4. Needs the game's own action script; applied at the next start"),
+                () => Ini.Get("jump_key", "0") == "1", v => Ini.Set("jump_key", v ? "1" : "0"));
             var mouse = new StackPanel();
             ToggleRow(SymbolRegular.CursorClick24, L.T("Mouse camera"), L.T("The mouse turns the game's own camera by raw counts, at any frame rate"),
                 () => Ini.Get("mouse_camera", "1") != "0", v => Ini.Set("mouse_camera", v ? "1" : "0"), mouse);
@@ -112,6 +115,20 @@ namespace BloodborneLauncher.Views
                 () => double.TryParse(Ini.Get("pad_deadzone", "0"), out var v) ? v : 0,
                 v => Ini.Set("pad_deadzone", ((int)Math.Round(v)).ToString()), format: "0'%'");
 
+            ComboRow(SymbolRegular.Games24, L.T("Left trackpad"),
+                L.T("Steam Deck and Steam Controller. Its click and its four directions can also be bound to any action below"),
+                TrackModes(L.T("Automatic (touch surface)")), () => Ini.Get("pad_trackpad_left", "auto"), v => Ini.Set("pad_trackpad_left", v));
+            ComboRow(SymbolRegular.Games24, L.T("Right trackpad"),
+                L.T("Camera turns while your finger moves, like a mouse"),
+                TrackModes(L.T("Automatic (camera)")), () => Ini.Get("pad_trackpad_right", "auto"), v => Ini.Set("pad_trackpad_right", v));
+            SliderRow(SymbolRegular.TopSpeed24, L.T("Trackpad camera speed"), null, 10, 400, 5,
+                () => double.TryParse(Ini.Get("pad_trackpad_sensitivity", "100"), out var v) ? v : 100,
+                v => Ini.Set("pad_trackpad_sensitivity", ((int)Math.Round(v)).ToString()), format: "0'%'");
+            IniToggle(SymbolRegular.ArrowSync24, L.T("Gyro camera"), L.T("Turn the camera by moving the controller (Steam, DualSense, DualShock 4, Switch Pro)"), "pad_gyro_camera");
+            SliderRow(SymbolRegular.TopSpeed24, L.T("Gyro camera speed"), null, 10, 400, 5,
+                () => double.TryParse(Ini.Get("pad_gyro_sensitivity", "100"), out var v) ? v : 100,
+                v => Ini.Set("pad_gyro_sensitivity", ((int)Math.Round(v)).ToString()), format: "0'%'");
+
             // ==================== Bindings ====================
             var header = new Grid { Margin = new Thickness(2, 24, 0, 8), ColumnDefinitions = new ColumnDefinitions("*,Auto") };
             var title = Text(L.T("Actions"), "GroupHeader");
@@ -127,9 +144,12 @@ namespace BloodborneLauncher.Views
             _search.TextChanged += (_, _) => Rebuild();
             var tools = Row(_search, SmallButton(L.T("Reset all"), SymbolRegular.ArrowUndo24, (_, _) =>
             {
-                Bindings.ResetAll(Ini);
+                var chosen = S.Str("controls_profile");
+                var profile = ControlProfiles.BuiltIns.FirstOrDefault(p => p.Name == chosen)
+                              ?? ControlProfiles.BuiltIns.First(p => p.Name == "EldenRingStyle");
+                ControlProfiles.Apply(S, Ini, profile);
                 PadMap.ResetAll(Ini);
-                Ws.Log(L.T("Key and controller bindings reset to the defaults."), LogLevel.Step);
+                Ws.Log(L.F($"Key bindings reset to {profile.Name} as built in, controller bindings to the defaults."), LogLevel.Step);
                 Changed();
             }));
             Grid.SetColumn(tools, 1);
@@ -259,6 +279,13 @@ namespace BloodborneLauncher.Views
             FillProfiles();
         }
 
+
+        private static Choice[] TrackModes(string auto) => new Choice[]
+        {
+            new(auto, "auto"), new(L.T("Camera"), "camera"), new(L.T("Movement"), "move"),
+            new(L.T("PS4 touch surface"), "touch"), new(L.T("Off"), "off"),
+        };
+
         private void UpdatePadStatus()
         {
             // The engine's SDL sees pads exactly as the game will (while the game runs it owns them,
@@ -349,7 +376,35 @@ namespace BloodborneLauncher.Views
 
                     var keys = Cell(control, usage);
                     keys.IsEnabled = pcControls;
-                    _table.Children.Add(TableRow(name, keys, PadCell(control), reset));
+                    var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                    if (!NoToggle.Contains(c.Name))
+                    {
+                        var toggles = Toggles();
+                        var on = toggles.Contains(c.Name);
+                        var mode = new Button
+                        {
+                            Content = new TextBlock { Text = on ? L.T("Toggle") : L.T("Hold"), FontSize = 11.5 },
+                            Padding = new Thickness(8, 3),
+                            MinWidth = 58,
+                            Opacity = on ? 1 : 0.6,
+                            IsEnabled = pcControls,
+                            VerticalAlignment = VerticalAlignment.Center,
+                        };
+                        mode.SetTip(on
+                            ? L.T("Toggle: one press turns this on and the next press turns it off. Click for Hold. Applied at the next start")
+                            : L.T("Hold: active while the key is held. Click for Toggle, where one press turns it on and the next turns it off. Applied at the next start"));
+                        mode.Click += (_, _) =>
+                        {
+                            var set = Toggles();
+                            if (!set.Remove(c.Name)) set.Add(c.Name);
+                            Ini.Set("toggle_keys", string.Join(",", set));
+                            Ini.Set("sprint_toggle", "0");
+                            Changed();
+                        };
+                        actions.Children.Add(mode);
+                    }
+                    actions.Children.Add(reset);
+                    _table.Children.Add(TableRow(name, keys, PadCell(control), actions));
                 }
             }
 
@@ -361,6 +416,15 @@ namespace BloodborneLauncher.Views
             _conflicts.IsOpen = lines.Count > 0;
             _conflicts.Title = shared.Count > 0 ? L.T("Shared inputs") : L.T("Reserved keys");
             _conflicts.Message = string.Join("\n", lines);
+        }
+
+        private static readonly HashSet<string> NoToggle = new() { "menu", "confirm", "back", "dodge", "backstep", "l3" };
+
+        private List<string> Toggles()
+        {
+            var list = Ini.Get("toggle_keys", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct().ToList();
+            if (Ini.Get("sprint_toggle", "0") == "1" && !list.Contains("sprint")) list.Add("sprint");
+            return list;
         }
 
         private static string Show(string value) =>
@@ -387,7 +451,7 @@ namespace BloodborneLauncher.Views
             {
                 Margin = new Thickness(0, header ? 4 : 1, 0, header ? 2 : 1),
                 MinHeight = header ? 0 : 40,
-                ColumnDefinitions = new ColumnDefinitions("240,1.6*,*,40"),
+                ColumnDefinitions = new ColumnDefinitions("240,1.6*,*,112"),
             };
             name.Margin = new Thickness(4, 0, 8, 0);
             Grid.SetColumn(keys, 1);

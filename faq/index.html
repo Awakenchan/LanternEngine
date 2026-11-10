@@ -483,7 +483,7 @@ GPU fault: 3 addresses
 <span class="w">STOP: GPU library assertion failed</span>
 bb-probe exited with code 23
 - the game exited (code 23) -</pre>
-            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.40</span></div>
+            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.41</span></div>
             <div class="ui-back" id="crash-back">
               <div class="ui-modal" role="dialog" aria-label="The game crashed">
                 <h4>The game crashed</h4>
@@ -542,14 +542,14 @@ bb-probe exited with code 23
                   <div class="ui-row3"><span class="ui-btn">Close</span><span class="ui-btn ring">Copy report</span><span class="ui-btn def">Use safe mode</span></div>
                 </div>
               </div>
-              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.40</span></div>
+              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.41</span></div>
             </div>
           </div>
           <div class="shot">
             <div data-ui role="img" aria-label="The launcher's More, Log page with the Copy, Export and Clear buttons">
               <div class="ui-pills sub"><span>Mods</span><span>Cheats</span><span>Engine</span><span class="on">Log</span></div>
               <div class="ui-tools"><span class="ui-tog" aria-pressed="true"></span><span>Follow new output</span><span class="grow"></span><span class="ui-btn">Copy</span><span class="ui-btn ring">Export…</span><span class="ui-btn">Clear</span></div>
-              <pre class="ui-log">Lantern Engine 0.9.40
+              <pre class="ui-log">Lantern Engine 0.9.41
 GPU: NVIDIA GeForce RTX 3070 Ti
 Shaders: 4,812 pipelines ready
 Loading: begins
@@ -1128,6 +1128,81 @@ Loading: begins
     </div>
     <div class="bands">
       <div class="band rv" data-find>
+        <div class="q"><q>Can jump and dodge be on separate keys? Can I dodge without letting go of sprint?</q></div>
+        <div class="answer"><p>Yes. In <span class="k">Controls</span> turn on <b>Jump on its own key</b>, then bind the <b>Dodge</b>, <b>Backstep</b> and <b>Sprint</b> rows. Jump fires at once, Dodge and Backstep work with sprint held, and the Sprint key skips the game's 0.4 s wait. Each row also has a <b>Hold / Toggle</b> button.</p></div>
+        <span class="st fixed">Added in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Frame generation lowers my frame rate, and the counter always says 2x</q><span class="who">40 FPS at 120 Hz with 3x.</span></div>
+        <div class="answer"><p>Up to 0.9.40, with the Uncapped frame rate, the game was held at the refresh rate divided by the multiplier. Since 0.9.41 the game runs at its own rate and frame generation adds frames on top, and the counter shows the frames on screen, the game's rate and the real multiplier. <span class="k">Graphics › Frame generation: even pacing (Uncapped)</span> brings the old pacing back.</p></div>
+        <span class="st tip">Fixed in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The game freezes a few seconds or minutes in and never comes back</q><span class="who">RX 6800, RTX 5070 Ti.</span></div>
+        <div class="answer"><p>In both logs the GPU stopped answering with the PC memory model on. Since 0.9.41 the model is off on AMD and Intel cards, and after one such freeze the engine leaves it off on that PC. On 0.9.40 turn off <span class="k">Engine switches › PC memory model</span>.</p></div>
+        <span class="st tip">Try 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>A whole area has no textures, or a loading screen never ends when I warp there</q><span class="who">Byrgenwerth, Forbidden Woods and others.</span></div>
+        <div class="answer"><p>In the logs we got, the game copy was missing one of its map archives (a <span class="k">.tpfbdt</span> file in <span class="k">dvdroot_ps4\map</span>). Since 0.9.41 the setup guide names game files that are missing, cut short or empty. Copy the game again from your dump, base game and the 1.09 update.</p></div>
+        <span class="st tip">Check your game copy</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Do the Steam Deck and Steam Controller trackpads work?</q></div>
+        <div class="answer"><p>Since 0.9.41. The right trackpad turns the camera and the left one is the PS4 touch surface; <span class="k">Controls › Left trackpad / Right trackpad</span> change that, and trackpad clicks, directions and the back buttons can be bound to any action. There is also a gyro camera switch. We have neither device, so tell us how it plays.</p></div>
+        <span class="st tip">New in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>In seamless co-op we could take turns getting up during a boss fight</q></div>
+        <div class="answer"><p>Since 0.9.41 a fallen hunter stays down while the boss is alive, and when everyone is down the whole party goes back to the lamp. Guests also get window NPC gifts, keep doors and shortcuts they saw opened, and get the host's Insight for a boss.</p></div>
+        <span class="st tip">Changed in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Since 0.9.40 the game crashes right after loading in</q><span class="who">Intel integrated graphics.</span></div>
+        <div class="answer"><p>The new default FSR upscaler crashed inside Intel's graphics driver. On Intel integrated graphics the engine's own FSR 3.1 is used again. On 0.9.40 you can pick <span class="k">Graphics › Upscaler › Off</span> or TAA to get past it.</p></div>
+        <span class="st tip">Try 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>As a guest in seamless co-op my badges and workshop tools disappear in the Hunter's Dream</q></div>
+        <div class="answer"><p>The game gave a summoned guest a temporary key item list and threw it away on the way home. In rooms a guest now keeps its own list. Items lost before 0.9.41 don't come back by themselves.</p></div>
+        <span class="st tip">Try 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The controller camera moves strangely above 60 FPS</q></div>
+        <div class="answer"><p>Try <span class="k">Engine switches › Input › Camera follows the frame time</span>. It is off by default because it changes how the camera feels.</p></div>
+        <span class="st tip">Answered</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The 4K menu build stops at about 90% with an error</q></div>
+        <div class="answer"><p>The upscaler usually ran out of video memory on the large textures. The launcher now tries those again in small tiles. Close other programs that use the GPU and press Build again; it continues where it stopped.</p></div>
+        <span class="st tip">Try 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The game crashes with code 139 while playing, often after dying</q></div>
+        <div class="answer"><p>When video memory ran short, the engine copied freed textures back into the game's memory and could write over the game's own bookkeeping. It no longer touches those parts. We could not reproduce the crash ourselves, so please post your log in #issues if it still happens.</p></div>
+        <span class="st tip">Try 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The game crashes when I use a lamp</q><span class="who">"unsupported PS4 import sceKernelGetModuleInfoFromAddr" in the log.</span></div>
+        <div class="answer"><p>The game raised an internal error and Lantern could not answer a system call its error handling makes. It answers now. The same line at the very start of the game meant a damaged game copy: the log now shows the game's real error.</p></div>
+        <span class="st fixed">Fixed in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Linux, AMD card: "device lost" after some effects</q></div>
+        <div class="answer"><p>Two particle passes could ask the GPU for billions of work groups. A pass with such a count now runs nothing. We could only test this on an NVIDIA card, so please tell us in #issues if it still happens.</p></div>
+        <span class="st tip">Try 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Broken lighting, missing fire, or FPS that falls after a few minutes</q><span class="who">AMD and Intel cards.</span></div>
+        <div class="answer"><p>Players fixed these by turning off <span class="k">Engine › PC memory model</span>. Since 0.9.41 it stays off on AMD and Intel cards on Windows, and on Linux. <code>BB_PC_MODEL_ANY_GPU=1</code> in <span class="k">Settings › Extra variables</span> turns it back on.</p></div>
+        <span class="st fixed">Fixed in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The 4K menus are too big for my 1080p or 1440p screen</q></div>
+        <div class="answer"><p>Turn on <span class="k">Graphics › 2K menu detail</span>. The menus use a quarter of the video memory, and if you turn it on before Build, a quarter of the disk space too.</p></div>
+        <span class="st fixed">Added in 0.9.41</span>
+      </div>
+      <div class="band rv" data-find>
         <div class="q"><q>Is there a guide for graphics settings?</q></div>
         <div class="answer"><p>Yes, see the <a href="#graphics">graphics settings guide</a>. The quickest start is <span class="k">Graphics › Best settings for this PC › Recommend…</span></p></div>
         <span class="st tip">Answered</span>
@@ -1235,17 +1310,18 @@ Loading: begins
           <div data-ui class="upd" id="upd-ui">
             <p class="upd-label">Updates</p>
             <div class="upd-card">
-              <div class="upd-row"><div>Launcher updates<small>You have v0.9.40, the latest (v0.9.40)</small></div>
+              <div class="upd-row"><div>Launcher updates<small>You have v0.9.41, the latest (v0.9.41)</small></div>
                 <span class="upd-ctl"><span class="ui-btn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1M13.5 2.5v3h-3"/></svg>Check now</span></span></div>
               <div class="upd-row col"><div>Update channel</div>
                 <div class="upd-seg" data-on="beta" role="group" aria-label="Update channel"><button type="button" data-ch="stable" aria-pressed="false">Stable</button><button type="button" data-ch="beta" aria-pressed="true">Beta</button></div></div>
               <div class="upd-row"><div>Check for updates at start</div><button type="button" class="ui-tog" aria-pressed="true" aria-label="Check for updates at start"></button></div>
-              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.40. 131 versions to choose from</small></div>
+              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.41. 132 versions to choose from</small></div>
                 <span class="upd-ctl">
-                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.40 · stable (installed)</span><span aria-hidden="true">⌄</span></button>
+                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.41 · stable (installed)</span><span aria-hidden="true">⌄</span></button>
                   <button type="button" class="ui-btn" id="upd-install" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5M3 14h10"/></svg>Install</button>
                   <div class="upd-list" id="upd-list" role="listbox" aria-label="Version">
-                    <button type="button" role="option" aria-selected="true" data-v="v0.9.40 · stable (installed)">v0.9.40 · stable (installed)</button>
+                    <button type="button" role="option" aria-selected="true" data-v="v0.9.41 · stable (installed)">v0.9.41 · stable (installed)</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.40 · stable">v0.9.40 · stable</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 31">v0.9.39 beta 31</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 30">v0.9.39 beta 30</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 29">v0.9.39 beta 29</button>
@@ -1307,7 +1383,7 @@ Loading: begins
   </section>
 
   <section id="beta-current">
-    <div class="sec-head"><h2>No beta right now</h2><p class="lead">The newest version is the stable <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.40</a>, which has everything from the 0.9.39 betas; on the beta channel the launcher installs it too.</p></div>
+    <div class="sec-head"><h2>No beta right now</h2><p class="lead">The newest version is the stable <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.41</a>, which has everything from the 0.9.39 betas and the fixes since 0.9.40; on the beta channel the launcher installs it too.</p></div>
     <div class="qa" id="beta-qa" hidden>
       <div class="qa-list" id="beta-notes"></div>
       <div class="pane" aria-live="polite"></div>
@@ -1357,7 +1433,7 @@ Loading: begins
       </div>
       <div class="tile t-ver">
         <span>Newest version</span>
-        <b id="newest">0.9.40</b>
+        <b id="newest">0.9.41</b>
         <a href="https://github.com/Awakenchan/LanternEngine/releases" id="newest-link">Release notes</a>
       </div>
       <div class="tile t-word">
@@ -1675,7 +1751,7 @@ Loading: begins
       var v = o.getAttribute('data-v');
       document.getElementById('upd-val').textContent = v;
       install.disabled = /installed/.test(v);
-      updSay.textContent = install.disabled ? 'You have v0.9.40. 131 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.40.';
+      updSay.textContent = install.disabled ? 'You have v0.9.41. 132 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.41.';
       openList(false);
     });
   });

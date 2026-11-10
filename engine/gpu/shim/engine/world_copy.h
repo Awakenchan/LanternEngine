@@ -115,6 +115,71 @@ constexpr bool IsNpcGroup(std::uint32_t group) {
     return group == 1 || group / 10000 == 7;
 }
 
+constexpr std::uint32_t kGiftFirst = 9040, kGiftLast = 9079;
+
+constexpr bool IsGiftFlag(std::uint32_t id) {
+    return id >= kGiftFirst && id <= kGiftLast;
+}
+
+inline int CountBits(const Group& bits) {
+    int n = 0;
+    for (std::uint8_t b : bits)
+        for (; b; b &= std::uint8_t(b - 1)) ++n;
+    return n;
+}
+
+inline Group TurnedOn(const Group& was, const Group& now, const Group& mask) {
+    Group out{};
+    for (std::size_t i = 0; i < kGroupBytes; ++i) out[i] = std::uint8_t(now[i] & ~was[i] & mask[i]);
+    return out;
+}
+
+inline int SetBits(std::uint8_t* to, const Group& bits) {
+    int changed = 0;
+    for (std::size_t i = 0; i < kGroupBytes; ++i) {
+        const std::uint8_t next = std::uint8_t(to[i] | bits[i]);
+        if (next != to[i]) ++changed;
+        to[i] = next;
+    }
+    return changed;
+}
+
+class Witness {
+public:
+    static constexpr int kMostAtOnce = 24;
+
+    void Forget() {
+        seen_.clear();
+        ready_ = false;
+    }
+    bool Ready() const { return ready_; }
+    void Start(const Image& now) {
+        seen_ = now;
+        ready_ = true;
+    }
+    Image Step(const Image& now, const std::map<std::uint32_t, Group>& masks, bool& rebuilt) {
+        Image fresh;
+        int bits = 0;
+        for (const auto& [group, value] : now) {
+            const auto mask = masks.find(group);
+            if (mask == masks.end()) continue;
+            const auto was = seen_.find(group);
+            const Group on = TurnedOn(was == seen_.end() ? Group{} : was->second, value, mask->second);
+            if (IsZero(on)) continue;
+            bits += CountBits(on);
+            fresh[group] = on;
+        }
+        seen_ = now;
+        rebuilt = bits > kMostAtOnce;
+        if (rebuilt) fresh.clear();
+        return fresh;
+    }
+
+private:
+    Image seen_;
+    bool ready_ = false;
+};
+
 inline Group RangeBits(std::uint32_t group, std::uint32_t first, std::uint32_t last) {
     Group bits{};
     const std::uint32_t from = group * 1000, to = from + kGroupBytes * 8 - 1;

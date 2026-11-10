@@ -2,7 +2,8 @@
 // bbport: an indirect dispatch's group counts, clamped to what the device runs, read from there
 // instead of the game's memory (vk_rasterizer.cpp ClampDispatchArgs). A count the game's GPU work
 // left wrong (3063677180 groups, RX 9070 XT on RADV, 0.9.37 beta 7) is outside the Vulkan spec and
-// hung the GPU (device lost); clamped, the dispatch runs and the game goes on.
+// hung the GPU (device lost). A count over the limit is not a real one (the game's largest is a
+// few hundred groups): the dispatch then runs no groups at all, and the game goes on.
 #version 450
 
 layout(local_size_x = 1) in;
@@ -11,12 +12,14 @@ layout(std430, binding = 0) readonly buffer Source { uint src[]; };
 layout(std430, binding = 1) writeonly buffer Destination { uint dst[]; };
 
 layout(push_constant) uniform Push {
-    uvec3 limit; // maxComputeWorkGroupCount
+    uvec3 limit; // the largest counts taken as real
     uint first;  // the counts' first dword in the bound source range
 } push;
 
 void main() {
+    const uvec3 count = uvec3(src[push.first], src[push.first + 1], src[push.first + 2]);
+    const uvec3 kept = any(greaterThan(count, push.limit)) ? uvec3(0) : count;
     for (uint i = 0; i < 3; ++i) {
-        dst[i] = min(src[push.first + i], push.limit[i]);
+        dst[i] = kept[i];
     }
 }

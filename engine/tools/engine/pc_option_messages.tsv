@@ -215,8 +215,11 @@
 119125	Menu	Options. Open the menu.	菜单	Options 键。打开菜单。	Меню	Options. Открыть меню
 119126	Menu Confirm	OK, in menus.	菜单确认	在菜单中确认。	Подтверждение в меню	OK в меню
 119127	Menu Back	Return, in menus.	菜单返回	在菜单中返回。	Возврат в меню	Назад в меню
-119128	Left Stick Press	L3.	按下左摇杆	L3。	Нажатие левого стика	L3
-119129	Debug Menu	Opens and closes the developers' debug menu (the Debug Menu plugin).	调试菜单	打开或关闭开发者调试菜单（调试菜单插件）。	Меню отладки	Открывает и закрывает меню отладки разработчиков (плагин Debug Menu)
+119128	Jump / Left Stick Press	L3. Jumps when Jump on its own key is on.	跳跃／按下左摇杆	L3。开启“跳跃使用独立按键”后，按下即可跳跃。	Прыжок / нажатие левого стика	L3. Прыжок, когда включена отдельная клавиша прыжка
+119129	Dodge	A tap of Circle, also while the sprint key is held.	闪避	轻按一次 ○ 键，按住冲刺键时同样有效。	Уклонение	Короткое нажатие круга, работает и при зажатой клавише бега
+119130	Backstep	Steps back at once, also while moving or sprinting.	后撤步	立即后撤，移动或冲刺时同样有效。	Отскок назад	Мгновенный отскок назад, работает и в движении, и на бегу
+119131	Sprint	Sprints at once while held, and never dodges.	冲刺	按住即刻冲刺，不会触发闪避。	Бег	Бег сразу при удержании, без уклонения
+119132	Debug Menu	Opens and closes the developers' debug menu (the Debug Menu plugin).	调试菜单	打开或关闭开发者调试菜单（调试菜单插件）。	Меню отладки	Открывает и закрывает меню отладки разработчиков (плагин Debug Menu)
 
 # Dynamic Key Bindings pages and status text.
 119200	Movement		移动		Движение

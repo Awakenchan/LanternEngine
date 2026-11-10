@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <ranges>
@@ -340,7 +341,19 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
                 // NOTE: these loops may produce a lot of small barriers.
                 // If this becomes a problem, we can optimize it by merging adjacent barriers.
                 const auto subres_idx = mip * info.resources.layers + layer;
-                ASSERT(subres_idx < subresource_states.size());
+                // bbport: a range past the image's own mips or layers (a view of more than the
+                // cached image has; chalice dungeon report on 0.9.39 beta 31) stopped the engine
+                // here. Those subresources do not exist: nothing to transition.
+                if (mip >= info.resources.levels || layer >= info.resources.layers ||
+                    subres_idx >= subresource_states.size()) {
+                    static std::atomic<u32> said{0};
+                    if (said.fetch_add(1, std::memory_order_relaxed) < 4) {
+                        std::printf("Texture cache: a transition of mip %u layer %u of an image "
+                                    "with %u mips and %u layers was left out\n",
+                                    mip, layer, info.resources.levels, info.resources.layers);
+                    }
+                    continue;
+                }
                 auto& state = subresource_states[subres_idx];
 
                 constexpr auto write_flags = vk::AccessFlagBits2::eTransferWrite |

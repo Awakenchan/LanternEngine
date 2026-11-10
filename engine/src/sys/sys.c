@@ -7,7 +7,7 @@ static const SysLibrary *const libraries[] = {
     &sys_rtc, &sys_user_service, &sys_system_service, &sys_np_trophy, &sys_common_dialog, &sys_msg_dialog,
     &sys_save_data_dialog, &sys_np_profile_dialog, &sys_np_commerce, &sys_ime_dialog, &sys_play_go,
     &sys_disc_map, &sys_mouse, &sys_voice, &sys_audio_in, &sys_app_content, &sys_sysmodule, &sys_posix_time, &sys_pad,
-    &sys_audio_out, &sys_ajm, &sys_save_data, &sys_semaphore, &sys_rwlock, &sys_mutex, &sys_posix_mutex, &sys_thread, &sys_posix_thread, &sys_clock, &sys_posix_clock, &sys_libc_time, &sys_process, &sys_file, &sys_posix_file, &sys_memory, &sys_start, &sys_equeue, &sys_video_out, &sys_av_player,
+    &sys_audio_out, &sys_ajm, &sys_save_data, &sys_semaphore, &sys_rwlock, &sys_mutex, &sys_posix_mutex, &sys_thread, &sys_posix_thread, &sys_clock, &sys_posix_clock, &sys_libc_time, &sys_process, &sys_file, &sys_posix_file, &sys_memory, &sys_start, &sys_equeue, &sys_video_out, &sys_av_player, &sys_module_info,
 };
 
 static _Atomic int32_t last_id;

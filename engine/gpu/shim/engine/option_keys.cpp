@@ -20,7 +20,7 @@ constexpr std::uint32_t kPageRow = 119000, kFirstActionRow = 119001;
 constexpr std::uint32_t kActionText = 119100, kPageText = 119200;
 constexpr std::uint32_t kResetArmed = 119210, kResetDone = 119211, kResetIdle = 119212;
 constexpr std::uint32_t kAwaitKey = 119213, kUnbound = 119214, kHowTo = 119215, kResetCaption = 119216;
-static_assert(kBindCount == 30 && kBindPages == 5 && kBindPerPage == 7,
+static_assert(kBindCount == 33 && kBindPages == 5 && kBindPerPage == 7,
               "pc_option_messages.tsv has a caption for each action and page");
 static_assert(kBindDebugMenu == kBindCount - 1);
 constexpr const char* kPageNames[kBindPages] = {"Movement", "Combat", "Items and Gestures", "Camera and Menus", "Other"};

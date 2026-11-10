@@ -100,7 +100,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.frame_gen = value == "dlss"                     ? FrameGenDlss
                       : (value == "fsr3" || value == "1") ? FrameGenFsr3
                                                           : FrameGenOff;
-    } else if (key == "frame_gen_cap") {
+    } else if (key == "frame_gen_even_pacing") {
         v.frame_gen_cap = i != 0;
     } else if (key == "frame_gen_frames") {
         v.frame_gen_frames = std::clamp(i, 1, FrameGenFramesMax);
@@ -538,7 +538,7 @@ void Load() {
         {"BB_HDR", "hdr"},                          {"BB_HDR_PAPER_WHITE", "hdr_paper_white"},
         {"BB_HDR_PEAK", "hdr_peak"},                {"BB_HDR_BOOST", "hdr_boost"},
         {"BB_HDR_MODE", "hdr_mode"},                {"BB_FRAME_GEN", "frame_gen"},
-        {"BB_FRAME_GEN_CAP", "frame_gen_cap"},     {"BB_DLSS_PRESET", "dlss_preset"},
+        {"BB_FRAME_GEN_CAP", "frame_gen_even_pacing"},     {"BB_DLSS_PRESET", "dlss_preset"},
         {"BB_DLSS_MIP_BIAS", "dlss_mip_bias"},   {"BB_FRAME_GEN_FRAMES", "frame_gen_frames"},
         {"BB_REFLEX", "reflex"},                   {"BB_RENDER_SCALE", "render_scale"},
         {"BB_MIP_BIAS", "mip_bias"},               {"BB_DLSS_JITTER_FADE", "dlss_jitter_fade"},
@@ -643,7 +643,7 @@ void Save() {
     put("upscaler", UpscalerName(v.upscaler));
     put("preset", std::to_string(v.preset.load()));
     put("frame_gen", FrameGenNames[std::clamp(v.frame_gen.load(), 0, FrameGenCount - 1)]);
-    put("frame_gen_cap", flag(v.frame_gen_cap));
+    put("frame_gen_even_pacing", flag(v.frame_gen_cap));
     put("frame_gen_frames", std::to_string(std::clamp(v.frame_gen_frames.load(), 1, FrameGenFramesMax)));
     put("reflex", ReflexNames[std::clamp(v.reflex.load(), 0, ReflexCount - 1)]);
     put("anti_lag", flag(v.anti_lag));

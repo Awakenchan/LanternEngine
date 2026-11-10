@@ -124,14 +124,13 @@ vk::ExternalMemoryHandleTypeFlagBits ChunkHandleType() {
 
 bool PcModelGpu(const Vulkan::Instance& instance) {
     static const bool ok = [&] {
-        constexpr std::uint32_t AmdVendor = 0x1002;
         const std::uint32_t vendor = instance.GetVendorID();
         const char* any = std::getenv("BB_PC_MODEL_ANY_GPU");
-        if (vendor == AmdVendor || (any && any[0] == '1')) {
+        if (any && any[0] == '1') {
             return true;
         }
-        std::printf("Guest memory: the new memory model is tested on AMD GPUs only; this GPU "
-                    "(vendor 0x%04x) uses the model of 0.3 (BB_PC_MODEL_ANY_GPU=1: try it)\n",
+        std::printf("Guest memory: the PC memory model stays off on Linux (vendor 0x%04x): players with "
+                    "AMD GPUs reported broken lighting with it (BB_PC_MODEL_ANY_GPU=1 turns it on)\n",
                     vendor);
         return false;
     }();

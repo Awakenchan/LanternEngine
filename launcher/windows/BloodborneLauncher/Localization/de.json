@@ -1662,5 +1662,18 @@
   "Hunters": "Jäger",
   "No hunters yet: they show up here once the game has saved": "Noch keine Jäger: Sie erscheinen hier, sobald das Spiel gespeichert hat",
   "Level {0}  ·  {1} bosses": "Stufe {0}  ·  {1} Bosse",
-  "{0} played": "{0} gespielt"
+  "{0} played": "{0} gespielt",
+  "2K menu detail": "2K-Menüdetails",
+  "Jump on its own key": "Springen auf eigener Taste",
+  "Dodge": "Ausweichen",
+  "Dodges even while the sprint key is held": "Weicht auch bei gehaltener Sprinttaste aus",
+  "Backstep": "Rückwärtsschritt",
+  "Steps back at once, also while moving or sprinting": "Sofortiger Schritt zurück, auch beim Laufen oder Sprinten",
+  "Sprint": "Sprinten",
+  "Sprints at once while held, and never dodges": "Sprintet sofort, solange gehalten, und weicht nie aus",
+  "Jump / left stick click": "Springen / Linker Stick drücken",
+  "Jumps when Jump on its own key is on": "Springt, wenn „Springen auf eigener Taste“ an ist",
+  "Toggle": "Umschalten",
+  "Hold": "Halten",
+  "The saves could not be read: ": "Die Spielstände konnten nicht gelesen werden: "
 }

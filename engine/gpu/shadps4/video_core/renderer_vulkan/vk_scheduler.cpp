@@ -593,7 +593,7 @@ void Scheduler::KickRecording(bool force) {
 }
 
 void Scheduler::MaybeSplit() {
-    if (workers.size() < 2 || current_segment + 1 >= MaxSegments || !IsRecordingDeferred() ||
+    if (fork_open || workers.size() < 2 || current_segment + 1 >= MaxSegments || !IsRecordingDeferred() ||
         BbToggle::Disabled(BbToggle::ParallelRecording)) {
         return;
     }

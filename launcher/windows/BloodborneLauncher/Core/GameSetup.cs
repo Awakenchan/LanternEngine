@@ -255,6 +255,19 @@ namespace BloodborneLauncher.Core
             else if (missing.Count == 0 && ebootOk)
                 Add(Health.Good, L.F($"All the files the engine needs are here (dvdroot_ps4: {count:N0} files, {bytes / (double)(1L << 30):0.0} GB)."));
 
+            if (count > 0)
+            {
+                var files = GameFiles.Check(game, r.UpdateDir, TimeSpan.FromSeconds(20));
+                if (files.Problems.Count > 0)
+                {
+                    var shown = string.Join("; ", files.Problems.Take(6).Select(p => p.File + " " + p.What));
+                    var more = files.Problems.Count > 6 ? L.F($" and {files.Problems.Count - 6} more") : "";
+                    Add(Health.Bad, L.F($"The game copy is damaged or incomplete: {shown}{more}. Areas that use these files load without textures, never finish loading, or crash. Copy the game again from your dump, base game and update."));
+                }
+                else if (!files.Complete)
+                    Add(Health.Warning, L.F($"The game's files were only partly checked ({files.Checked:N0} packed files in 20 seconds; the drive is slow). None of those is damaged."));
+            }
+
             var place = Place(game);
             if (place != null) Add(Health.Warning, place);
         }

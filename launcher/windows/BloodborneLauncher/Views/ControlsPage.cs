@@ -112,6 +112,20 @@ namespace BloodborneLauncher.Views
                 () => double.TryParse(Ini.Get("pad_deadzone", "0"), out var v) ? v : 0,
                 v => Ini.Set("pad_deadzone", ((int)Math.Round(v)).ToString()), format: "0'%'");
 
+            ComboRow(SymbolRegular.Games24, L.T("Left trackpad"),
+                L.T("Steam Deck and Steam Controller. Its click and its four directions can also be bound to any action below"),
+                TrackModes(L.T("Automatic (touch surface)")), () => Ini.Get("pad_trackpad_left", "auto"), v => Ini.Set("pad_trackpad_left", v));
+            ComboRow(SymbolRegular.Games24, L.T("Right trackpad"),
+                L.T("Camera turns while your finger moves, like a mouse"),
+                TrackModes(L.T("Automatic (camera)")), () => Ini.Get("pad_trackpad_right", "auto"), v => Ini.Set("pad_trackpad_right", v));
+            SliderRow(SymbolRegular.TopSpeed24, L.T("Trackpad camera speed"), null, 10, 400, 5,
+                () => double.TryParse(Ini.Get("pad_trackpad_sensitivity", "100"), out var v) ? v : 100,
+                v => Ini.Set("pad_trackpad_sensitivity", ((int)Math.Round(v)).ToString()), format: "0'%'");
+            IniToggle(SymbolRegular.ArrowSync24, L.T("Gyro camera"), L.T("Turn the camera by moving the controller (Steam, DualSense, DualShock 4, Switch Pro)"), "pad_gyro_camera");
+            SliderRow(SymbolRegular.TopSpeed24, L.T("Gyro camera speed"), null, 10, 400, 5,
+                () => double.TryParse(Ini.Get("pad_gyro_sensitivity", "100"), out var v) ? v : 100,
+                v => Ini.Set("pad_gyro_sensitivity", ((int)Math.Round(v)).ToString()), format: "0'%'");
+
             // ==================== Bindings ====================
             var header = new Grid { Margin = new Thickness(2, 24, 0, 8) };
             header.ColumnDefinitions.Add(new ColumnDefinition());
@@ -254,6 +268,13 @@ namespace BloodborneLauncher.Views
             Rebuild();
             FillProfiles();
         }
+
+
+        private static Choice[] TrackModes(string auto) => new Choice[]
+        {
+            new(auto, "auto"), new(L.T("Camera"), "camera"), new(L.T("Movement"), "move"),
+            new(L.T("PS4 touch surface"), "touch"), new(L.T("Off"), "off"),
+        };
 
         private void UpdatePadStatus()
         {

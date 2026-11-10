@@ -1662,5 +1662,18 @@
   "Hunters": "Łowcy",
   "No hunters yet: they show up here once the game has saved": "Brak łowców: pojawią się tutaj, gdy gra zapisze stan",
   "Level {0}  ·  {1} bosses": "Poziom {0}  ·  bossowie: {1}",
-  "{0} played": "czas gry: {0}"
+  "{0} played": "czas gry: {0}",
+  "2K menu detail": "Szczegółowość menu 2K",
+  "Jump on its own key": "Skok na osobnym klawiszu",
+  "Dodge": "Unik",
+  "Dodges even while the sprint key is held": "Unik działa także przy wciśniętym klawiszu sprintu",
+  "Backstep": "Odskok w tył",
+  "Steps back at once, also while moving or sprinting": "Natychmiastowy odskok w tył, także w ruchu i w sprincie",
+  "Sprint": "Sprint",
+  "Sprints at once while held, and never dodges": "Sprint od razu po przytrzymaniu, bez uniku",
+  "Jump / left stick click": "Skok / wciśnięcie lewej gałki",
+  "Jumps when Jump on its own key is on": "Skacze, gdy włączono „Skok na osobnym klawiszu”",
+  "Toggle": "Przełączanie",
+  "Hold": "Przytrzymanie",
+  "The saves could not be read: ": "Nie udało się odczytać zapisów: "
 }

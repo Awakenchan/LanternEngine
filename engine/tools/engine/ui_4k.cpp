@@ -335,7 +335,7 @@ bool PackHud(const fs::path& out) {
     return true;
 }
 
-int Pack(const fs::path& in, const fs::path& out) {
+int Pack(const fs::path& in, const fs::path& out, bool half) {
     std::error_code error;
     fs::create_directories(out, error);
     std::vector<fs::path> pngs;
@@ -358,6 +358,7 @@ int Pack(const fs::path& in, const fs::path& out) {
                 return;
             }
             while (w > kLargestSide || h > kLargestSide) Halve(pixels, w, h);
+            if (half && w >= 8 && h >= 8) Halve(pixels, w, h);
             if (!WriteBbui(target, pixels, w, h)) {
                 std::fprintf(stderr, "could not write %s\n", target.string().c_str());
                 stopped = true;
@@ -386,8 +387,10 @@ int main(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
 #endif
     if (args.size() == 4 && argc == 4 && std::strcmp(argv[1], "export") == 0) return Export(args[2], args[3]);
-    if (args.size() == 4 && argc == 4 && std::strcmp(argv[1], "pack") == 0) return Pack(args[2], args[3]);
+    if (args.size() == 4 && argc == 4 && std::strcmp(argv[1], "pack") == 0) return Pack(args[2], args[3], false);
+    if (args.size() == 5 && argc == 5 && std::strcmp(argv[1], "pack") == 0 && std::strcmp(argv[4], "half") == 0)
+        return Pack(args[2], args[3], true);
     std::fprintf(stderr, "usage: bb-ui-4k export <game menu folder> <png folder>\n"
-                         "       bb-ui-4k pack <upscaled png folder> <ui-4k folder>\n");
+                         "       bb-ui-4k pack <upscaled png folder> <ui-4k folder> [half]\n");
     return 2;
 }

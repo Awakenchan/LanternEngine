@@ -1662,5 +1662,18 @@
   "Hunters": "Охотники",
   "No hunters yet: they show up here once the game has saved": "Охотников пока нет: они появятся здесь, когда игра сохранится",
   "Level {0}  ·  {1} bosses": "Уровень {0}  ·  боссов: {1}",
-  "{0} played": "наиграно {0}"
+  "{0} played": "наиграно {0}",
+  "2K menu detail": "Детализация меню 2K",
+  "Jump on its own key": "Прыжок на отдельной клавише",
+  "Dodge": "Уклонение",
+  "Dodges even while the sprint key is held": "Уклоняется даже при зажатой клавише бега",
+  "Backstep": "Отскок назад",
+  "Steps back at once, also while moving or sprinting": "Мгновенный отскок назад, в том числе в движении и на бегу",
+  "Sprint": "Бег",
+  "Sprints at once while held, and never dodges": "Бег сразу при удержании, без уклонения",
+  "Jump / left stick click": "Прыжок / нажатие левого стика",
+  "Jumps when Jump on its own key is on": "Прыгает, когда включён «Прыжок на отдельной клавише»",
+  "Toggle": "Переключение",
+  "Hold": "Удержание",
+  "The saves could not be read: ": "Не удалось прочитать сохранения: "
 }

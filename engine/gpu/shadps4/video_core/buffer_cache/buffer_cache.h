@@ -140,6 +140,29 @@ public:
                                                              bool is_written,
                                                              bool is_texel_buffer = false);
 
+    struct StreamSlice {
+        u64 at = 0;
+        u64 end = 0;
+    };
+    enum class TryRead : u32 {
+        Clean,
+        Config,
+        GpuBusy,
+        NoArena,
+        Demoted,
+        NotResident,
+        Partial,
+        CpuModified,
+        SliceFull,
+        Count,
+    };
+    [[nodiscard]] TryRead TryObtainRead(VAddr device_addr, u32 size, StreamSlice* slice,
+                                        std::pair<const Buffer*, u64>& out);
+    static bool TryCompare();
+    static inline std::array<u64, static_cast<u32>(TryRead::Count)> try_read_counts{};
+    static inline u64 try_read_differ = 0, try_read_uploaded = 0, try_read_rebound = 0;
+    static inline bool try_dirty = false;
+
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);
 

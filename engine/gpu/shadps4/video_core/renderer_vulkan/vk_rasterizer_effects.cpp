@@ -178,13 +178,14 @@ void Rasterizer::EffectsBeforeResources(const GraphicsPipeline* pipeline) {
 
 void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline,
                                     bool is_indexed, u32 index_offset) {
+    auto& dc = Dc();
     const u32 mode = pipeline->GetGraphicsKey().motion_vectors;
     if (mode == Shader::MotionVectors::VertexBoth) {
-        push_data.motion_param &= 0xffffu;
+        dc.push_data.motion_param &= 0xffffu;
     } else {
-        push_data.motion_param = 0;
+        dc.push_data.motion_param = 0;
     }
-    if (!rt_shadow->Wanted() || !motion_geometry) {
+    if (!rt_shadow->Wanted() || !dc.motion_geometry) {
         return;
     }
     const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -202,7 +203,7 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
     const u32 index_size = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16 ? 2u : 4u;
     RtShadow::Draw draw{
         .shader = vs.pgm_hash,
-        .geometry = motion_geometry,
+        .geometry = dc.motion_geometry,
         .index_size = index_size,
         .index_count = regs.num_indices,
         .first_vertex = first_vertex,
@@ -259,17 +260,18 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
     }
     const u32 param = rt_shadow->PrepareDraw(draw);
     if (mode == Shader::MotionVectors::VertexBoth) {
-        push_data.motion_param |= param << 16;
+        dc.push_data.motion_param |= param << 16;
     } else {
-        push_data.motion_param = param;
+        dc.push_data.motion_param = param;
     }
 }
 
 vk::Rect2D Rasterizer::EffectTile(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline,
                                    bool is_indexed, u32 index_offset, u32 first_vertex) const {
+    auto& dc = Dc();
     const vk::Rect2D scissor = DrawScissor(0);
     const auto& fetch = pipeline->GetFetchShader();
-    const auto& v = vertex_binds;
+    const auto& v = dc.vertex_binds;
     const auto position =
         std::ranges::find(v.attributes, 0u, &vk::VertexInputAttributeDescription2EXT::location);
     if (!fetch || position == v.attributes.end() || position->binding >= v.num_buffers) {
@@ -334,6 +336,7 @@ vk::Rect2D Rasterizer::EffectTile(const AmdGpu::Regs& regs, const GraphicsPipeli
 
 void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline,
                                    bool is_indexed, u32 index_offset, u32 first_vertex) {
+    auto& dc = Dc();
     if (!pipeline->GetGraphicsKey().mrt_mask) {
         return;
     }
@@ -348,21 +351,21 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
         if (EffectShaders::GtaoActive()) {
             const float k = std::clamp(
                 BbSettings::Get().graphics_ao_strength.load(std::memory_order_relaxed), 0.0f, 1.0f);
-            push_data.motion_param = std::bit_cast<u32>(k);
+            dc.push_data.motion_param = std::bit_cast<u32>(k);
         }
     } else if (hash == EffectShaders::SsrHash) {
         if (EffectShaders::SsrActive() && cb_descs[0].first) {
-            push_data.motion_param = ssr_frame;
+            dc.push_data.motion_param = ssr_frame;
             SsrTemporal::TraceInputs inputs{.frame_index = ssr_frame};
-            if (!buffer_infos.empty() && buffer_infos[0].buffer && image_infos.size() == 6) {
-                inputs.constants = buffer_infos[0].buffer;
-                inputs.constants_offset = buffer_infos[0].offset;
-                inputs.constants_range = buffer_infos[0].range;
-                inputs.constants_dword_offset = PackedOffsets(push_data);
-                inputs.normals_view = image_infos[1].imageView;
-                inputs.normals_layout = image_infos[1].imageLayout;
-                inputs.color_view = image_infos[2].imageView;
-                inputs.color_layout = image_infos[2].imageLayout;
+            if (!dc.buffer_infos.empty() && dc.buffer_infos[0].buffer && dc.image_infos.size() == 6) {
+                inputs.constants = dc.buffer_infos[0].buffer;
+                inputs.constants_offset = dc.buffer_infos[0].offset;
+                inputs.constants_range = dc.buffer_infos[0].range;
+                inputs.constants_dword_offset = PackedOffsets(dc.push_data);
+                inputs.normals_view = dc.image_infos[1].imageView;
+                inputs.normals_layout = dc.image_infos[1].imageLayout;
+                inputs.color_view = dc.image_infos[2].imageView;
+                inputs.color_layout = dc.image_infos[2].imageLayout;
             }
             ssr_temporal->OnSsrDraw(cb_descs[0].first, inputs);
             ++ssr_frame;
@@ -374,20 +377,20 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
                 cb_descs[0].first, blur.images.empty() ? 0 : blur.images[0].GetSharp(blur).Address());
         }
     } else if (hash == ShadowResolveHash) {
-        if (cb_descs[0].first && !buffer_infos.empty() && buffer_infos[0].buffer) {
-            const bool has_ubo = buffer_infos.size() > 1 && buffer_infos[1].buffer;
-            const bool has_map = image_infos.size() > 1 && image_infos[1].imageView;
+        if (cb_descs[0].first && !dc.buffer_infos.empty() && dc.buffer_infos[0].buffer) {
+            const bool has_ubo = dc.buffer_infos.size() > 1 && dc.buffer_infos[1].buffer;
+            const bool has_map = dc.image_infos.size() > 1 && dc.image_infos[1].imageView;
             contact_shadow->OnShadowDraw(
                 cb_descs[0].first,
-                {.constants = buffer_infos[0].buffer,
-                 .constants_offset = buffer_infos[0].offset,
-                 .constants_range = buffer_infos[0].range,
-                 .uniforms = has_ubo ? buffer_infos[1].buffer : vk::Buffer{},
-                 .uniforms_offset = has_ubo ? buffer_infos[1].offset : 0,
-                 .uniforms_range = has_ubo ? buffer_infos[1].range : 0,
-                 .shadow_map = has_map ? image_infos[1].imageView : vk::ImageView{},
-                 .shadow_layout = has_map ? image_infos[1].imageLayout : vk::ImageLayout::eUndefined,
-                 .constants_offset_word = PackedOffsets(push_data),
+                {.constants = dc.buffer_infos[0].buffer,
+                 .constants_offset = dc.buffer_infos[0].offset,
+                 .constants_range = dc.buffer_infos[0].range,
+                 .uniforms = has_ubo ? dc.buffer_infos[1].buffer : vk::Buffer{},
+                 .uniforms_offset = has_ubo ? dc.buffer_infos[1].offset : 0,
+                 .uniforms_range = has_ubo ? dc.buffer_infos[1].range : 0,
+                 .shadow_map = has_map ? dc.image_infos[1].imageView : vk::ImageView{},
+                 .shadow_layout = has_map ? dc.image_infos[1].imageLayout : vk::ImageLayout::eUndefined,
+                 .constants_offset_word = PackedOffsets(dc.push_data),
                  .frame_index = shadow_frame++});
         }
     } else if (tile_lights != 0) {
@@ -411,11 +414,11 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
     } else if (hash == EffectShaders::SsrCompositeHash && EffectShaders::SsrCompositeActive()) {
         const float intensity =
             BbSettings::Get().graphics_ssr_intensity.load(std::memory_order_relaxed);
-        push_data.motion_param =
+        dc.push_data.motion_param =
             std::bit_cast<u32>(std::clamp(std::isfinite(intensity) ? intensity : 1.0f, 0.0f, 3.0f));
-        if (const auto full = ssr_temporal->FullResult(); full && image_infos.size() == 12) {
-            image_infos[6].imageView = full;
-            image_infos[6].imageLayout = vk::ImageLayout::eGeneral;
+        if (const auto full = ssr_temporal->FullResult(); full && dc.image_infos.size() == 12) {
+            dc.image_infos[6].imageView = full;
+            dc.image_infos[6].imageLayout = vk::ImageLayout::eGeneral;
         }
     }
 }
@@ -425,6 +428,7 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
 // resolution (R8, sampling the gather and the full-resolution depth), whose output HQ AO
 // recomputed at that resolution replaces.
 void Rasterizer::HqAoAfterDraw(const GraphicsPipeline* pipeline, const RenderState& state) {
+    auto& dc = Dc();
     const auto* ps_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
     const auto& dynamic = scheduler.GetDynamicState();
     const auto draw_region = [&]() -> std::optional<vk::Rect2D> {
@@ -453,11 +457,11 @@ void Rasterizer::HqAoAfterDraw(const GraphicsPipeline* pipeline, const RenderSta
         // bound_images lists the render target first, then the sampled images in binding order.
         if (ps_info && cb_descs[0].first && state.num_color_attachments == 1 &&
             state.num_layers == 1 && ps_info->images.size() == 2 &&
-            ps_info->buffers.size() == 2 && bound_images.size() == 3 &&
-            bound_images[0] == cb_descs[0].first && image_infos.size() >= 2 &&
-            buffer_infos.size() >= 2) {
+            ps_info->buffers.size() == 2 && dc.bound_images.size() == 3 &&
+            dc.bound_images[0] == cb_descs[0].first && dc.image_infos.size() >= 2 &&
+            dc.buffer_infos.size() >= 2) {
             for (s32 i = 0; i < 2; ++i) {
-                const auto id = bound_images[i + 1];
+                const auto id = dc.bound_images[i + 1];
                 if (id == gather) {
                     reads_gather = true;
                 } else if (texture_cache.GetImage(id).info.pixel_format ==
@@ -473,16 +477,16 @@ void Rasterizer::HqAoAfterDraw(const GraphicsPipeline* pipeline, const RenderSta
             const float k = std::clamp(
                 BbSettings::Get().graphics_ao_strength.load(std::memory_order_relaxed), 0.0f,
                 1.0f);
-            const u32 offsets = u32(push_data.buf_offsets[0]) | (u32(push_data.buf_offsets[1]) << 8);
+            const u32 offsets = u32(dc.push_data.buf_offsets[0]) | (u32(dc.push_data.buf_offsets[1]) << 8);
             spatial_ao->FullResolution(cb_descs[0].first, cb_descs[0].second.view_info,
-                                       image_infos[depth_index], buffer_infos[0],
-                                       buffer_infos[1], offsets, k);
+                                       dc.image_infos[depth_index], dc.buffer_infos[0],
+                                       dc.buffer_infos[1], offsets, k);
         } else {
             spatial_ao->SkipUpscale(fmt::format(
                 "next draw: colors={} ps_images={} ps_buffers={} bound={} gather={} depth={} "
                 "region={}",
                 state.num_color_attachments, ps_info ? ps_info->images.size() : 0,
-                ps_info ? ps_info->buffers.size() : 0, bound_images.size(), reads_gather,
+                ps_info ? ps_info->buffers.size() : 0, dc.bound_images.size(), reads_gather,
                 depth_index,
                 region ? fmt::format("{},{} {}x{} of {}x{}", region->offset.x, region->offset.y,
                                      region->extent.width, region->extent.height, state.width,
@@ -497,14 +501,14 @@ void Rasterizer::HqAoAfterDraw(const GraphicsPipeline* pipeline, const RenderSta
     // stay at the front while other stages may append their own buffers.
     if (cb_descs[0].first && state.num_color_attachments == 1 && state.num_layers == 1 &&
         ps_info->buffers.size() == 3 && ps_info->images.size() == 3 &&
-        buffer_infos.size() >= 3 && image_infos.size() >= 6 && dynamic.scissors.size() == 1 &&
+        dc.buffer_infos.size() >= 3 && dc.image_infos.size() >= 6 && dynamic.scissors.size() == 1 &&
         dynamic.viewports.size() == 1) {
         const auto region = *draw_region();
         if (region.extent.width && region.extent.height) {
-            spatial_ao->Filter(cb_descs[0].first, cb_descs[0].second.view_info, image_infos[1],
-                               buffer_infos[0], push_data.buf_offsets[0], push_data.scene_size,
+            spatial_ao->Filter(cb_descs[0].first, cb_descs[0].second.view_info, dc.image_infos[1],
+                               dc.buffer_infos[0], dc.push_data.buf_offsets[0], dc.push_data.scene_size,
                                state.width, state.height, region);
-            spatial_ao->NoteGather(cb_descs[0].first, image_infos[1]);
+            spatial_ao->NoteGather(cb_descs[0].first, dc.image_infos[1]);
         } else {
             spatial_ao->WarnUnsupported(fmt::format("empty region {},{} {}x{}", region.offset.x,
                                                     region.offset.y, region.extent.width,
@@ -515,13 +519,14 @@ void Rasterizer::HqAoAfterDraw(const GraphicsPipeline* pipeline, const RenderSta
             "cb={} colors={} layers={} ps_buffers={} ps_images={} images={} buffers={} "
             "scissors={} viewports={}",
             bool(cb_descs[0].first), state.num_color_attachments, state.num_layers,
-            ps_info->buffers.size(), ps_info->images.size(), image_infos.size(),
-            buffer_infos.size(), dynamic.scissors.size(), dynamic.viewports.size()));
+            ps_info->buffers.size(), ps_info->images.size(), dc.image_infos.size(),
+            dc.buffer_infos.size(), dynamic.scissors.size(), dynamic.viewports.size()));
     }
 }
 
 void Rasterizer::EffectsAfterDraw(const AmdGpu::Regs& regs, const GraphicsPipeline* pipeline, bool is_indexed,
                                   u32 num_indices, u32 num_instances, u32 first_vertex) {
+    auto& dc = Dc();
     if (!effects_wanted) {
         return;
     }
@@ -531,23 +536,23 @@ void Rasterizer::EffectsAfterDraw(const AmdGpu::Regs& regs, const GraphicsPipeli
     }
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const u64 hash = ps_info->pgm_hash;
-    if (hash == ShadowResolveHash && cb_descs[0].first && buffer_infos.size() >= 2 &&
-        image_infos.size() >= 2) {
-        volumetric_light->Integrate(cb_descs[0].first, image_infos[0],
-                                    {.constants = buffer_infos[0].buffer,
-                                     .constants_offset = buffer_infos[0].offset,
-                                     .constants_range = buffer_infos[0].range,
-                                     .uniforms = buffer_infos[1].buffer,
-                                     .uniforms_offset = buffer_infos[1].offset,
-                                     .uniforms_range = buffer_infos[1].range,
-                                     .shadow_map = image_infos[1].imageView,
-                                     .shadow_layout = image_infos[1].imageLayout,
-                                     .constants_offset_word = PackedOffsets(push_data)});
-    } else if (hash == DirectionalTableHash && !buffer_infos.empty()) {
-        volumetric_light->Tint(buffer_infos[0], push_data.buf_offsets[0] & 255u);
+    if (hash == ShadowResolveHash && cb_descs[0].first && dc.buffer_infos.size() >= 2 &&
+        dc.image_infos.size() >= 2) {
+        volumetric_light->Integrate(cb_descs[0].first, dc.image_infos[0],
+                                    {.constants = dc.buffer_infos[0].buffer,
+                                     .constants_offset = dc.buffer_infos[0].offset,
+                                     .constants_range = dc.buffer_infos[0].range,
+                                     .uniforms = dc.buffer_infos[1].buffer,
+                                     .uniforms_offset = dc.buffer_infos[1].offset,
+                                     .uniforms_range = dc.buffer_infos[1].range,
+                                     .shadow_map = dc.image_infos[1].imageView,
+                                     .shadow_layout = dc.image_infos[1].imageLayout,
+                                     .constants_offset_word = PackedOffsets(dc.push_data)});
+    } else if (hash == DirectionalTableHash && !dc.buffer_infos.empty()) {
+        volumetric_light->Tint(dc.buffer_infos[0], dc.push_data.buf_offsets[0] & 255u);
     } else if (const u32 count = PointLightCount(hash);
                count != 0 && (pipeline->GetGraphicsKey().mrt_mask & 3) == 3 && cb_descs[0].first &&
-               cb_descs[1].first && buffer_infos.size() >= 2) {
+               cb_descs[1].first && dc.buffer_infos.size() >= 2) {
         if (vs_info.pgm_hash != PointGridVertexHash || ps_info->buffers.size() < 2 ||
             ps_info->buffers[0].IsSpecial() || ps_info->buffers[1].IsSpecial()) {
             return;

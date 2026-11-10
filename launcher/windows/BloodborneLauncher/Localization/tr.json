@@ -1662,5 +1662,18 @@
   "Hunters": "Avcılar",
   "No hunters yet: they show up here once the game has saved": "Henüz avcı yok: oyun kaydettiğinde burada görünürler",
   "Level {0}  ·  {1} bosses": "Seviye {0}  ·  {1} boss",
-  "{0} played": "{0} oynandı"
+  "{0} played": "{0} oynandı",
+  "2K menu detail": "2K menü ayrıntısı",
+  "Jump on its own key": "Zıplama kendi tuşunda",
+  "Dodge": "Kaçınma",
+  "Dodges even while the sprint key is held": "Koşu tuşu basılıyken de kaçınır",
+  "Backstep": "Geri adım",
+  "Steps back at once, also while moving or sprinting": "Hareket ederken veya koşarken de anında geri adım atar",
+  "Sprint": "Koşu",
+  "Sprints at once while held, and never dodges": "Basılı tutulduğu sürece anında koşar, asla kaçınmaz",
+  "Jump / left stick click": "Zıplama / sol çubuğa basma",
+  "Jumps when Jump on its own key is on": "\"Zıplama kendi tuşunda\" açıkken zıplar",
+  "Toggle": "Aç/kapat",
+  "Hold": "Basılı tut",
+  "The saves could not be read: ": "Kayıtlar okunamadı: "
 }

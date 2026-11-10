@@ -660,6 +660,17 @@ bool Instance::CreateDevice() {
     }
     fsr_sdk = FsrSdk::FilesPresent() && features.shaderStorageImageWriteWithoutFormat &&
               vk13_features.synchronization2;
+    // bbport: Intel's driver for integrated graphics (UHD on driver 101.5522, a 0.9.40 report)
+    // crashes inside igvk64.dll while the SDK prepares its upscaler, right after the first load.
+    // There FSR 3.1 of the engine itself is used. BB_FSR_SDK_INTEL=1: the SDK anyway.
+    if (fsr_sdk && properties.vendorID == 0x8086 && IsIntegrated()) {
+        const char* force = std::getenv("BB_FSR_SDK_INTEL");
+        if (!(force && force[0] == '1')) {
+            fsr_sdk = false;
+            std::printf("Upscaler: AMD FSR SDK left out on Intel integrated graphics (its driver crashes "
+                        "while the SDK prepares; FSR 3.1 is used; BB_FSR_SDK_INTEL=1 uses the SDK)\n");
+        }
+    }
     if (fsr_sdk) {
         std::printf("Upscaler: AMD FSR SDK 2.4 found (%s)\n", FsrSdk::DirectoryUtf8().c_str());
     } else if (FsrSdk::FilesPresent()) {

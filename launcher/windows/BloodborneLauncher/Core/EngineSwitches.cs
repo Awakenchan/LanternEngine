@@ -54,7 +54,7 @@ namespace BloodborneLauncher.Core
         public const string Diagnostics = "Diagnostics and logs";
         public const string DirectVulkan = "Direct rendering";
 
-        public static readonly string[] Groups = { Graphics, Performance, Input, Sound, Fixes };
+        public static readonly string[] Groups = { Graphics, Performance, Input, Online, Sound, Fixes };
 
         // ---------------------------------------------------------------- building the list
 
@@ -144,6 +144,13 @@ namespace BloodborneLauncher.Core
 
 
 
+            OffUnless1("BB_SEAMLESS_DEATHS", Online, L.T("Seamless co-op: spectate and party wipe"),
+                L.T("Experimental, never run with two hunters. In a boss fight a hunter who dies watches the others through a spectator ") +
+                L.T("camera, and a party wipe brings everyone back at the lamp without a loading screen. Off: a fallen hunter stays down ") +
+                L.T("until the boss dies, and a party wipe sends everyone back to the lamp through a loading screen")),
+            OffUnless1("LANTERN_CAMERA_TIMING", Input, L.T("Camera follows the frame time"),
+                L.T("Above 30 FPS the game's camera turns, follows and eases once per frame, so with a controller it moves faster ") +
+                L.T("and less evenly the higher the frame rate. On: those steps follow the frame time. Off: the game's own camera")),
             Text("BB_GAMEPAD", Input, L.T("Preferred gamepad"),
                 L.T("Part of a controller's name (DualSense, Xbox, 8BitDo...) or its SDL GUID: that one is used when several are ") +
                 L.T("connected. Empty: the pad you use takes over"), L.T("DualSense")),

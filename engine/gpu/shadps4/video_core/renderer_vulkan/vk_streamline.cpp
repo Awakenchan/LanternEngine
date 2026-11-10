@@ -325,7 +325,7 @@ PFN_vkGetInstanceProcAddr LoadBeforeVulkan() {
     preferences.engine = sl::EngineType::eCustom;
     preferences.engineVersion = "Lantern Engine";
     if (const char* use_project_id = std::getenv("BB_DLSS_PROJECT_ID"); use_project_id && use_project_id[0] == '1') {
-        preferences.engineVersion = "0.9.40";
+        preferences.engineVersion = "0.9.41";
         preferences.projectId = "5c1f3a9e-7b42-4d86-9e31-0f6a2b7cd481";
     }
     preferences.renderAPI = sl::RenderAPI::eVulkan;
@@ -888,6 +888,20 @@ void DlssFrameGen::BeforePresent(const DlssFrameInfo* info, bool menu_open, bool
     auto& s = BbSettings::Get();
     const bool wanted = s.frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenDlss;
     const bool on = wanted && info->inputs && tag_ui && !menu_open && (!hdr || DlssFrameGenHdr());
+    if (wanted) {
+        // bbport: why no frames are generated right now, said once per change.
+        static const char* said = nullptr;
+        const char* why = on                          ? nullptr
+                          : !info->inputs            ? "no upscaled game frame (menus, movies, loading screens)"
+                          : !tag_ui                  ? "no HUD-less copy of this frame"
+                          : menu_open                ? "the Insert menu is open"
+                                                     : "HDR output is on (BB_DLSSG_HDR=0)";
+        if (why != said) {
+            said = why;
+            std::printf("DLSS Frame Generation: %s%s\n", why ? "waiting: " : "generating frames", why ? why : "");
+            std::fflush(stdout);
+        }
+    }
     if (info->inputs) {
         options_render = {info->render_width, info->render_height};
     }

@@ -1113,6 +1113,16 @@ int main(int argc, char **argv) {
         runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
         runtime_thread_attach_main();
         runtime_set_procparam(image+procparam);
+        {
+            uint64_t main_end=size;
+            for (uint64_t m=0;m<module_count;++m) if (modules[m].base && modules[m].base<main_end) main_end=modules[m].base;
+            sys_module_register(image,main_end,(uint64_t)(uintptr_t)image+entry,"eboot.bin");
+            for (uint64_t m=0;m<module_count;++m) {
+                char module_name[32];
+                snprintf(module_name,sizeof(module_name),m==0 ? "libc.prx" : "module%u.prx",(unsigned)m);
+                sys_module_register(image+modules[m].base,modules[m].size,(uint64_t)(uintptr_t)image+modules[m].init,module_name);
+            }
+        }
         for (uint64_t m=0;m<module_count;++m) {
             printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
             typedef int (ABI *ModuleInit)(uint64_t,void *,void *);

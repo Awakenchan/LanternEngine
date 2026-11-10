@@ -79,13 +79,31 @@ namespace BloodborneLauncher.Views
             var read = ++_hunterReads;
             var places = SaveEditorSession.Places(S);
             List<SaveCharacter> hunters;
-            try { hunters = await Task.Run(() => places.SelectMany(SaveStore.Characters).OrderByDescending(c => c.Saved).ToList()); }
-            catch { hunters = new(); }
+            var unread = new List<string>();
+            try
+            {
+                hunters = await Task.Run(() => places.SelectMany(place =>
+                {
+                    try { return SaveStore.Characters(place).ToList(); }
+                    catch (Exception e)
+                    {
+                        lock (unread) unread.Add(e.Message);
+                        return new List<SaveCharacter>();
+                    }
+                }).OrderByDescending(c => c.Saved).ToList());
+            }
+            catch (Exception e)
+            {
+                hunters = new();
+                unread.Add(e.Message);
+            }
             if (read != _hunterReads) return;
             _hunters.Children.Clear();
             if (hunters.Count == 0)
             {
-                _hunters.Children.Add(Text(L.T("No hunters yet: they show up here once the game has saved"), "Faint"));
+                _hunters.Children.Add(Text(unread.Count > 0
+                    ? L.T("The saves could not be read: ") + string.Join("; ", unread.Distinct())
+                    : L.T("No hunters yet: they show up here once the game has saved"), "Faint"));
                 return;
             }
             var current = PlayerProfiles.Current(S);

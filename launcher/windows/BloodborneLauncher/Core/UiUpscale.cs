@@ -47,7 +47,7 @@ namespace BloodborneLauncher.Core
                 if (Directory.Exists(dir)) Directory.Delete(dir, true);
         }
 
-        public static async Task BuildAsync(string gameDir, IProgress<Step> progress, CancellationToken cancel)
+        public static async Task BuildAsync(string gameDir, IProgress<Step> progress, CancellationToken cancel, bool half = false)
         {
             var menu = Path.Combine(gameDir, "dvdroot_ps4", "menu");
             if (!Directory.Exists(menu))
@@ -70,6 +70,7 @@ namespace BloodborneLauncher.Core
             Directory.CreateDirectory(todo);
             foreach (var name in missing)
                 File.Copy(Path.Combine(source, name!), Path.Combine(todo, name!));
+            var failure = "";
             if (missing.Count > 0)
             {
                 using var watch = new CancellationTokenSource();
@@ -85,7 +86,30 @@ namespace BloodborneLauncher.Core
                 try
                 {
                     var files = Math.Clamp(Environment.ProcessorCount / 2, 2, 8);
-                    await RunAsync(upscaler, new[] { "-i", todo, "-o", upscaled, "-n", Model, "-f", "png", "-j", $"{files}:1:{files}" }, Path.GetDirectoryName(upscaler), cancel);
+                    try
+                    {
+                        await RunAsync(upscaler, new[] { "-i", todo, "-o", upscaled, "-n", Model, "-f", "png", "-j", $"{files}:1:{files}" }, Path.GetDirectoryName(upscaler), cancel);
+                    }
+                    catch (InvalidOperationException e)
+                    {
+                        failure = e.Message;
+                    }
+                    var left = all.Where(name => !File.Exists(Path.Combine(upscaled, name!))).ToList();
+                    if (left.Count > 0)
+                    {
+                        Directory.Delete(todo, true);
+                        Directory.CreateDirectory(todo);
+                        foreach (var name in left)
+                            File.Copy(Path.Combine(source, name!), Path.Combine(todo, name!));
+                        try
+                        {
+                            await RunAsync(upscaler, new[] { "-i", todo, "-o", upscaled, "-n", Model, "-f", "png", "-t", "128", "-j", "1:1:1" }, Path.GetDirectoryName(upscaler), cancel);
+                        }
+                        catch (InvalidOperationException e)
+                        {
+                            failure = e.Message;
+                        }
+                    }
                 }
                 finally
                 {
@@ -95,11 +119,11 @@ namespace BloodborneLauncher.Core
             }
             var still = all.Count(name => !File.Exists(Path.Combine(upscaled, name!)));
             if (still > 0)
-                throw new InvalidOperationException(L.F($"{still} textures were not upscaled. Your GPU driver may not support Vulkan compute; try again after a driver update."));
+                throw new InvalidOperationException(L.F($"{still} textures were not upscaled. Your GPU driver may not support Vulkan compute, or video memory ran out; try again after a driver update, with other programs closed.") + (failure.Length > 0 ? "\n" + failure : ""));
 
             if (Directory.Exists(PackDir)) File.Delete(Marker);
             var packed = new Regex(@"^packed (\d+) of (\d+)$");
-            await RunAsync(Tool, new[] { "pack", upscaled, PackDir }, null, cancel, line =>
+            await RunAsync(Tool, half ? new[] { "pack", upscaled, PackDir, "half" } : new[] { "pack", upscaled, PackDir }, null, cancel, line =>
             {
                 if (packed.Match(line) is { Success: true } m && int.TryParse(m.Groups[1].Value, out var n) && int.TryParse(m.Groups[2].Value, out var total) && total > 0)
                     progress.Report(new Step(L.F($"Packing {n} of {total} textures…"), 0.9 + 0.1 * n / total));

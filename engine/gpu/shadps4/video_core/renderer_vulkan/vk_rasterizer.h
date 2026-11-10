@@ -477,6 +477,7 @@ private:
             CutTarget,
             CutWrite,
             CutOther,
+            CutLookup,
             CutCount,
         };
         std::atomic<u64> draws{0}, clean{0}, streamed{0}, clean_cycles{0}, dirty_cycles{0};
@@ -494,7 +495,6 @@ private:
     void CensusDraw(const CensusMark& mark);
     void CensusEndRun(u32 cut);
     RunCensus census;
-    bool census_other = false;
     /// The registers of the draw being recorded: stage B's copy there, else Liverpool's.
     const AmdGpu::Regs& Regs() const;
     AmdGpu::CbDbExtent CbExtent(u32 index) const;
@@ -573,6 +573,23 @@ private:
     /// Returns true when the stage's images were bound from the memo.
     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                              u32 first_image_idx, bool& barrier, TextureSet*& slot);
+    bool BindTexturesFromSetGeneral(const Shader::Info& stage, const PreparedStage* prepared,
+                                    u32 first_image_idx, bool& barrier, TextureSet*& slot);
+    enum class TrySet : u32 {
+        Clean,
+        Skip,
+        Miss,
+        Check,
+        Proxy,
+        Transit,
+        Count,
+    };
+    using TrySetInfos =
+        boost::container::static_vector<vk::DescriptorImageInfo, TextureSet::MaxImages>;
+    TrySet TryTextureSet(const Shader::Info& stage, const PreparedStage* prepared,
+                         TrySetInfos& infos);
+    std::array<u64, static_cast<u32>(TrySet::Count)> try_set_counts{};
+    u64 try_set_differ = 0;
     /// The prepared sharps of `stage` in the current prepared draw, if they fit it.
     const PreparedStage* FindPreparedStage(const Shader::Info& stage) const;
     /// The same for any prepared draw (the lookahead thread).
@@ -639,14 +656,10 @@ private:
     /// bbport: the scene depth of the frame before (SkipUncompiledDraw).
     VideoCore::ImageId previous_scene_depth{};
     std::unique_ptr<ObjectMotion> object_motion;
-    bool motion_draw = false;
-    bool capture_draw = false;
-    u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
     bool gbuffer_draw = false;
     std::unique_ptr<HdrNative> hdr_native; // bbport: native HDR output (docs/hdr.md); before
                                            // the upscaler, which uses it
     std::unique_ptr<TemporalUpscaler> upscaler; // bbport: FSR (docs/upscaler.md)
-    std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     std::array<float,2> target_offset{};
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
     std::array<u32, 2> ui_full_scissor{}; ///< widened UI pass: a scissor this large (guest) is the whole image
@@ -657,16 +670,12 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
-    boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
-    boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
-    boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
     struct BoundBuffer {
         const VideoCore::Buffer* buffer;
         u64 offset;
         u32 size;
         bool is_written;
     };
-    boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
     /// bbport: uniform buffers bound by BindBuffers outside the constant ring (BB_FRAME_STATS):
     /// at an aligned offset, with an offset in the push data, or copied by the CPU or the GPU to an
     /// aligned place
@@ -680,9 +689,6 @@ private:
     } ubo_stats;
     void ReportUboStats();
 
-    u32 set_write_index{};
-    Pipeline::DescriptorWrites set_writes;
-    Shader::PushData push_data;
 
     // bbport: bindings point at their description instead of copying it (a hot spot): into
     // image_desc_cache for memoized lookups (pinned for the current BindTextures call), else
@@ -712,9 +718,6 @@ private:
     std::array<ImageDescCacheEntry, 4096> image_desc_cache{};
     u64 desc_use_counter = 0;
     /// Entries replacing pinned cache slots during one BindTextures call.
-    boost::container::static_vector<ImageDescCacheEntry, Shader::NUM_IMAGES> image_desc_overflow;
-    boost::container::static_vector<VideoCore::TextureCache::ImageDesc, Shader::NUM_IMAGES * 2>
-        image_desc_storage;
     u64 bind_epoch = 0;
     // bbport: render/depth target lookups memoized by their raw register bytes while image
     // registrations are unchanged (the descriptions depend only on those registers).
@@ -749,7 +752,6 @@ private:
                                           LastTarget& last, auto&& make_desc,
                                           const Parts&... parts);
     /// The prepared draw whose pipeline the current Draw uses (its sharps are valid), or null.
-    const PreparedDraw* bind_prepared = nullptr;
     /// `hash` is ImageDescHash(sharp, res), computed by a draw-preparation worker or here.
     ImageDescCacheEntry& CachedImageDescEntry(const AmdGpu::Image& sharp,
                                               const Shader::ImageResource& res, u64 hash);
@@ -764,7 +766,6 @@ private:
                                                               const Shader::ImageResource& res) {
         return CachedImageDescEntry(sharp, res).desc;
     }
-    boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     struct VertexBinds {
         VertexInputs<vk::VertexInputAttributeDescription2EXT> attributes;
         VertexInputs<vk::VertexInputBindingDescription2EXT> bindings;
@@ -773,12 +774,12 @@ private:
         VertexInputs<vk::DeviceSize> host_sizes;
         VertexInputs<vk::DeviceSize> host_strides;
         u32 num_buffers = 0;
-    } vertex_binds;
+    };
     struct IndexBind {
         vk::Buffer handle;
         u64 offset;
         vk::IndexType type;
-    } index_bind{};
+    };
     /// The direct draw whose vertex/index buffers BindResources may resolve early.
     struct DrawInputs {
         const GraphicsPipeline* pipeline;
@@ -787,7 +788,7 @@ private:
         bool is_indexed;
         bool pending;
         bool resolved;
-    } draw_inputs{};
+    };
     // bbport: textures of a draw bound on the helper thread while this thread binds buffers.
     static bool BindHelperWanted();
     BindHelper bind_helper{BindHelperWanted()};
@@ -806,18 +807,14 @@ private:
     /// Draws whose textures the helper bound completely, partly or not at all (BB_FRAME_STATS).
     u64 helper_full = 0, helper_partial = 0, helper_serial = 0;
     /// The memoized cache entry of each image binding (FindImage memo taken), else null.
-    boost::container::static_vector<ImageDescCacheEntry*, Shader::NUM_IMAGES> image_binding_entries;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
-    bool needs_barrier{};
     // bbport: two-stage draw pipeline (stage B state; the thread is the last member so it
     // stops first).
     static inline thread_local const AmdGpu::Regs* stage_regs = nullptr;
     static inline thread_local const AmdGpu::ComputeProgram* stage_cs = nullptr;
     AmdGpu::Regs pipe_regs{};
     bool pipe_synced = false;
-    std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> pipe_cb_extent{};
-    AmdGpu::CbDbExtent pipe_db_extent{};
     /// Stage A: small read-only guest buffers copied into the constant ring for a packet.
     struct RingBinding {
         u32 index;  ///< buffer resource of the stage
@@ -912,10 +909,6 @@ private:
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
-    float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
-    bool pipeline_is_compute = false; ///< bbport: the bound pipeline of BindResources
-    bool ui_movie_draw = false; ///< a Scaleform draw, or one of the UI pass (SmoothUiSampler)
-    bool ui_additive = false;   ///< ui_movie_draw blends additively (SmoothUiSampler)
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
     u32 preupload_frame = ~0u; ///< bbport: frame of the last background pre-upload
     bool PendingWriteOverlaps(VAddr address, u64 size);
@@ -925,13 +918,7 @@ private:
         const RingBinding* bindings;
         u32 count;
     };
-    std::array<RingStage, Shader::MaxStageTypes> ring_stages{};
-    u32 num_ring_stages = 0;
     /// bbport: the vertex stream V#s of the packet being recorded (stage B; empty elsewhere).
-    std::span<const AmdGpu::Buffer> packet_vsharps;
-    std::span<const u64> packet_vkeys;
-    std::span<const u64> packet_view_keys;
-    u64 packet_index_key = 0;
     struct ObjectBind {
         u64 key;
         VAddr base;
@@ -946,12 +933,53 @@ private:
     std::pair<const VideoCore::Buffer*, u64> BindVertexRange(u64 key, VAddr base, u64 size);
     static constexpr u64 RangeBindKey = 0x52414e4745ull;
     u64 range_binds = 0, range_hits = 0, range_checked = 0, range_differ = 0;
+    struct DrawContext {
+        bool census_other = false;
+        bool motion_draw = false;
+        bool capture_draw = false;
+        u64 motion_geometry{};
+        std::array<float, 2> draw_jitter{};
+        boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+        boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
+        boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
+        boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+        u32 set_write_index{};
+        Pipeline::DescriptorWrites set_writes;
+        Shader::PushData push_data;
+        boost::container::static_vector<ImageDescCacheEntry, Shader::NUM_IMAGES> image_desc_overflow;
+        boost::container::static_vector<VideoCore::TextureCache::ImageDesc, Shader::NUM_IMAGES * 2> image_desc_storage;
+        const PreparedDraw* bind_prepared = nullptr;
+        boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+        boost::container::static_vector<ImageDescCacheEntry*, Shader::NUM_IMAGES> image_binding_entries;
+        bool needs_barrier{};
+        std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> pipe_cb_extent{};
+        AmdGpu::CbDbExtent pipe_db_extent{};
+        float sampler_lod_bias = 0.0f;
+        bool pipeline_is_compute = false;
+        bool ui_movie_draw = false;
+        bool ui_additive = false;
+        std::array<RingStage, Shader::MaxStageTypes> ring_stages{};
+        u32 num_ring_stages = 0;
+        std::span<const AmdGpu::Buffer> packet_vsharps;
+        std::span<const u64> packet_vkeys;
+        std::span<const u64> packet_view_keys;
+        u64 packet_index_key = 0;
+        VertexBinds vertex_binds;
+        IndexBind index_bind{};
+        DrawInputs draw_inputs{};
+    };
+    std::unique_ptr<DrawContext> main_context = std::make_unique<DrawContext>();
+    static inline thread_local DrawContext* thread_context = nullptr;
+    DrawContext& Dc() const {
+        DrawContext* context = thread_context;
+        return context ? *context : *main_context;
+    }
     const RingBinding* FindRingBinding(const Shader::Info& stage, u32 index) const {
-        for (u32 i = 0; i < num_ring_stages; ++i) {
-            if (ring_stages[i].info == &stage) {
-                for (u32 j = 0; j < ring_stages[i].count; ++j) {
-                    if (ring_stages[i].bindings[j].index == index) {
-                        return &ring_stages[i].bindings[j];
+        for (u32 i = 0; i < Dc().num_ring_stages; ++i) {
+            if (Dc().ring_stages[i].info == &stage) {
+                for (u32 j = 0; j < Dc().ring_stages[i].count; ++j) {
+                    if (Dc().ring_stages[i].bindings[j].index == index) {
+                        return &Dc().ring_stages[i].bindings[j];
                     }
                 }
                 return nullptr;

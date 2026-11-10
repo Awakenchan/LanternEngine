@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstring>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -380,6 +382,38 @@ std::vector<std::pair<std::string, fs::path>> PrepareEffectFixes(const fs::path&
         fixed.emplace_back(fix.binder, fs::canonical(destination));
     }
     return fixed;
+}
+
+std::optional<std::pair<std::string, fs::path>> PrepareJumpKey(const fs::path& game, const fs::path& cache,
+                                                              std::string& note) {
+    static const char* const kScript = "dvdroot_ps4/action/script/c0000.hks";
+    static const char* const kInputSha = "335a1af801d4f2108fc77d347593a2ca65a43f5dd6e23348f47d953606d34c59";
+    static const char* const kOutputSha = "026275a6d3fef4830ee765698abb1658a747a0f5c9a0246ffe9ec8b28cef9bdf";
+    constexpr std::size_t kSite = 0x1e450;
+    static constexpr std::uint8_t kOld[8] = {0xb6, 0x00, 0x4d, 0x02, 0x98, 0x00, 0x4e, 0x14};
+    static constexpr std::uint8_t kNew[8] = {0x32, 0x00, 0x1a, 0x02, 0x50, 0x05, 0x26, 0x02};
+    constexpr std::size_t kSprintSite = 0x1e48c;
+    static constexpr std::uint8_t kSprintOld[4] = {0x39, 0x00, 0x0b, 0x00};
+    static constexpr std::uint8_t kSprintNew[4] = {0x38, 0xff, 0xff, 0x00};
+    const fs::path destination = cache / "jump-key" / "c0000.hks";
+    Bytes script = ReadFile(game / Path(kScript));
+    if (Sha256Hex(script) != kInputSha) {
+        note = "the action script is not the 1.09 file (a mod changes it): jump stays on the dodge button";
+        return std::nullopt;
+    }
+    try {
+        if (Sha256Hex(ReadFile(destination)) == kOutputSha) return std::pair{std::string(kScript), fs::canonical(destination)};
+    } catch (const std::exception&) {
+    }
+    if (std::memcmp(script.data() + kSite, kOld, sizeof kOld) != 0 ||
+        std::memcmp(script.data() + kSprintSite, kSprintOld, sizeof kSprintOld) != 0)
+        throw Error("Unexpected action script");
+    std::memcpy(script.data() + kSite, kNew, sizeof kNew);
+    std::memcpy(script.data() + kSprintSite, kSprintNew, sizeof kSprintNew);
+    if (Sha256Hex(script) != kOutputSha) throw Error("The action script does not match the verified result");
+    fs::create_directories(destination.parent_path());
+    WriteFile(destination, script);
+    return std::pair{std::string(kScript), fs::canonical(destination)};
 }
 
 fs::path PrepareMenuAssets(const fs::path& game, const fs::path& elf, const fs::path& cache, const fs::path& tool,
