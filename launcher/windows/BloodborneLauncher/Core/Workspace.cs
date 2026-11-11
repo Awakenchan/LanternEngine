@@ -46,7 +46,10 @@ namespace BloodborneLauncher.Core
         public event Action? SettingsReloaded;
 
         private DispatcherTimer? _saveTimer;
-        private DispatcherTimer? _playBackupTimer;
+        public event Action? BackupsChanged;
+        private string _backupFolder = "";
+        private DateTime _backupWrite;
+        public void NotifyBackupsChanged() => Dispatch(() => BackupsChanged?.Invoke());
         private bool _iniWarned;
 
         /// <summary>The session being played, then the last one played (null before the first).</summary>
@@ -82,12 +85,22 @@ namespace BloodborneLauncher.Core
                     TrophiesChanged?.Invoke();
                 }
                 Announce(Trophies.Poll(readRunLog: !Game.Running));
+                // The engine also creates backups when started directly, without GameRunner.
+                var backupFolder = SaveBackups.Folder(Settings);
+                try
+                {
+                    var written = Directory.GetLastWriteTimeUtc(backupFolder);
+                    if (backupFolder != _backupFolder || written != _backupWrite)
+                    {
+                        _backupFolder = backupFolder;
+                        _backupWrite = written;
+                        BackupsChanged?.Invoke();
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             };
             _trophyTimer.Start();
-
-            _playBackupTimer = new DispatcherTimer { Interval = SaveBackups.PlayEvery };
-            _playBackupTimer.Tick += (_, _) => BackUpDuringPlay();
-            _playBackupTimer.Start();
 
             // Output arrives on the reader threads, often thousands of lines at once (the engine's
             // statistics when it exits): it is queued and handed on in batches, ten times a second.
@@ -266,7 +279,11 @@ namespace BloodborneLauncher.Core
             {
                 Settings.Save();
                 if (Paths.IsPortDir(Paths.PortDir) || Environment.GetEnvironmentVariable("BB_CONFIG") is { Length: > 0 })
+                {
+                    // Direct engine starts read this same preference without needing the launcher.
+                    Ini.Set("save_backups", Settings.Bool("save_backups") ? "1" : "0");
                     Ini.Save();
+                }
                 else if (!_iniWarned)
                 {
                     _iniWarned = true;
@@ -306,13 +323,17 @@ namespace BloodborneLauncher.Core
             {
                 // Copied on a worker thread: the game takes ~20 s to reach its first save, and a
                 // large save folder held the launcher (Play looked stuck) while it was copied here.
-                var settings = Settings;
+                var source = SaveBackups.SaveData(Settings);
+                var folder = SaveBackups.Folder(Settings);
                 System.Threading.Tasks.Task.Run(() =>
                 {
                     try
                     {
-                        if (SaveBackups.Create(settings) != null)
+                        if (SaveBackups.Create(source, folder) != null)
+                        {
                             Log(L.F($"Saves backed up before playing (the newest {SaveBackups.Keep} are kept)."), LogLevel.Step);
+                            NotifyBackupsChanged();
+                        }
                     }
                     catch (Exception e)
                     {
@@ -347,24 +368,6 @@ namespace BloodborneLauncher.Core
             }
             GameStateChanged?.Invoke();
             return null;
-        }
-
-        private void BackUpDuringPlay()
-        {
-            if (!Game.Running || !Settings.Bool("save_backups")) return;
-            var settings = Settings;
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    if (SaveBackups.CreateDuringPlay(settings) != null)
-                        Log(L.F($"Saves backed up while playing (the newest {SaveBackups.PlayKeep} of these are kept)."), LogLevel.Step);
-                }
-                catch (Exception e)
-                {
-                    Log(L.T("Could not back up the saves: ") + e.Message, LogLevel.Warn);
-                }
-            });
         }
 
         public async Task StopGameAsync()
