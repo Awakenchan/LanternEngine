@@ -36,6 +36,9 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
 int bbgpu_window_in_background(void);
+/* Save snapshots follow the actual engine process, including launcher-free starts. */
+int bbgpu_save_backups_start(const char *user);
+void bbgpu_save_backups_write(int begin);
 void bbgpu_anti_lag_before_input(void);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
 void bbgpu_patch_image(unsigned char *image, uint64_t size);

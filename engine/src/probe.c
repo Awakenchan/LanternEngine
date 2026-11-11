@@ -879,6 +879,8 @@ int main(int argc, char **argv) {
     }
     if (app0) {
         sys_file_configure(app0, user_dir ? user_dir : "user");
+        if (bbgpu_save_backups_start(user_dir ? user_dir : "user"))
+            fail("cannot acquire the save profile: close another game or restore and check the saves folder permissions");
         char sfo[4096], id[16]="";
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))

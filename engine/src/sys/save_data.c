@@ -4,6 +4,7 @@
 #endif
 #include "sys.h"
 #include "runtime.h"
+#include "../../gpu/bbgpu.h"
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
@@ -120,6 +121,7 @@ static int initialized;
 static char title_id[16] = "UNKNOWN";
 static struct {
     int used;
+    int backup_write;
     char folder[PATH_SIZE], meta[PATH_SIZE];
 } mounts[MOUNT_SLOTS];
 static char memory_file[720];
@@ -263,8 +265,11 @@ static SYS_ABI int32_t save_mount(const MountRequest *request, MountResult *resu
         host_unlock(&lock);
         return SAVE_ERROR_MOUNT_FULL;
     }
+    const int backup_write = !(request->mode & MOUNT_READ_ONLY) || !exists;
+    if (backup_write) bbgpu_save_backups_write(1);
     if (!exists && (make_folders(folder) || make_folders(meta))) {
         int error = errno;
+        if (backup_write) bbgpu_save_backups_write(0);
         host_unlock(&lock);
         printf("Runtime: save data '%s' cannot be created in %s: %s\n", dir->data, base, strerror(error));
         return SAVE_ERROR_INTERNAL;
@@ -274,6 +279,7 @@ static SYS_ABI int32_t save_mount(const MountRequest *request, MountResult *resu
         store_param(meta, &empty);
     }
     mounts[slot].used = 1;
+    mounts[slot].backup_write = backup_write;
     snprintf(mounts[slot].folder, sizeof(mounts[slot].folder), "%s", folder);
     snprintf(mounts[slot].meta, sizeof(mounts[slot].meta), "%s", meta);
     memset(result, 0, sizeof(*result));
@@ -294,6 +300,7 @@ static SYS_ABI int32_t save_umount(const MountPoint *point) {
     if (slot >= 0) {
         sys_file_unmount(point->data);
         mounts[slot].used = 0;
+        if (mounts[slot].backup_write) bbgpu_save_backups_write(0);
     }
     host_unlock(&lock);
     return slot >= 0 ? 0 : SAVE_ERROR_NOT_FOUND;
@@ -377,10 +384,14 @@ static SYS_ABI int32_t save_delete(const DeleteRequest *request) {
         return SAVE_ERROR_PARAMETER;
     char base[600], folder[640], meta[680];
     save_paths(request->user, request->title ? request->title->data : NULL, request->dir->data, base, folder, meta);
+    host_lock(&lock);
     struct stat info;
-    if (stat(folder, &info)) return SAVE_ERROR_NOT_FOUND;
+    if (stat(folder, &info)) { host_unlock(&lock); return SAVE_ERROR_NOT_FOUND; }
+    bbgpu_save_backups_write(1);
     remove_folder(folder);
     remove_folder(meta);
+    bbgpu_save_backups_write(0);
+    host_unlock(&lock);
     printf("Runtime: save data '%s' deleted\n", request->dir->data);
     return 0;
 }
@@ -462,11 +473,14 @@ static SYS_ABI int32_t save_setup_memory(int32_t user, uint64_t size, const Save
     char base[600], folder[640];
     title_folder(user, NULL, base, sizeof(base));
     snprintf(folder, sizeof(folder), "%s.memory", base);
+    host_lock(&lock);
+    bbgpu_save_backups_write(1);
     if (make_folders(folder)) {
         printf("Runtime: save data memory cannot be created in %s: %s\n", folder, strerror(errno));
+        bbgpu_save_backups_write(0);
+        host_unlock(&lock);
         return SAVE_ERROR_INTERNAL;
     }
-    host_lock(&lock);
     snprintf(memory_file, sizeof(memory_file), "%s/memory.dat", folder);
     FILE *file = fopen(memory_file, "r+b");
     if (!file) file = fopen(memory_file, "w+b");
@@ -481,6 +495,7 @@ static SYS_ABI int32_t save_setup_memory(int32_t user, uint64_t size, const Save
     }
     if (!result && param) store_param(folder, param);
     int error = errno;
+    bbgpu_save_backups_write(0);
     host_unlock(&lock);
     if (!result) printf("Runtime: save data memory ready (%llu bytes)\n", (unsigned long long)size);
     else printf("Runtime: save data memory cannot be written in %s: %s\n", folder, strerror(error));
@@ -491,6 +506,7 @@ static int32_t memory_transfer(void *buffer, uint64_t size, int64_t offset, int 
     if (!initialized) return SAVE_ERROR_NOT_INITIALIZED;
     if (!buffer || offset < 0) return SAVE_ERROR_PARAMETER;
     host_lock(&lock);
+    if (writing) bbgpu_save_backups_write(1);
     int32_t result = SAVE_ERROR_INTERNAL;
     if (!memory_size) {
         result = SAVE_ERROR_MEMORY_NOT_READY;
@@ -504,6 +520,7 @@ static int32_t memory_transfer(void *buffer, uint64_t size, int64_t offset, int 
         if (file) fclose(file);
         if (!result && writing) ++memory_writes;
     }
+    if (writing) bbgpu_save_backups_write(0);
     host_unlock(&lock);
     return result;
 }
