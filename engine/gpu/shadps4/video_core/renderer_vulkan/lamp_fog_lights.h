@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <unordered_set>
 #include <utility>
@@ -182,12 +183,14 @@ public:
     static constexpr float ShortLived = 2.0f, ShortLivedNear = 15.0f, FlashBrightness = 1.4f;
     // The light is judged in the moments after the game drops it, not later when the camera comes by.
     static constexpr float FlashWindow = 0.1f;
-    // A spawned light can jump further in one frame than a light can move (an idle enemy's torch
-    // moved 1.7 m at once), so the game's list has it in a new place as it leaves the old one. The
-    // old entry was left behind as a standing lamp, with the light's colour, when the enemy died.
-    // A spawned light with nothing to match takes over an entry of the same kind that was listed a
-    // moment ago and is within this distance.
-    static constexpr float JumpDistance = 3.0f, JumpWindow = 0.1f;
+    // A spawned light can turn up somewhere else than where it was last listed: an idle enemy's
+    // torch jumped 1.7 m in one frame, and the game leaves enemies' torches out of its list for
+    // seconds at a time (up to 10 s and more) while they walk. A new entry left the old one behind
+    // as a standing lamp at the spawn point or along the way, glowing after the enemy had gone or
+    // died. A spawned light with nothing to match takes over the nearest entry of the same kind
+    // that is not listed this frame, within this distance plus this speed for every second the
+    // entry has gone unlisted, up to the most. It has moved: it counts as carried from then on.
+    static constexpr float JumpDistance = 3.0f, JumpSpeed = 1.5f, JumpMost = 10.0f;
     // Word 7 of a record is 20 or more (20, 50, 1000) on the map's own lights and 1 or less on the
     // lights the game spawns.
     static constexpr float MapLightWord = 5.0f;
@@ -250,20 +253,28 @@ public:
                     nearest_distance = distance;
                 }
             }
+            bool taken_over = false;
             if (nearest == remembered.size() && Spawned(light)) {
-                float jump_distance = JumpDistance * JumpDistance;
+                float best = std::numeric_limits<float>::max();
                 for (size_t i = 0; i < matched.size(); ++i) {
-                    const float distance = DistanceSquared(world, remembered[i].world);
-                    if (!matched[i] && remembered[i].since_seen <= JumpWindow &&
-                        distance <= jump_distance && SameKind(light, remembered[i].record)) {
+                    const auto& candidate = remembered[i];
+                    if (matched[i] || !SameKind(light, candidate.record)) {
+                        continue;
+                    }
+                    const float reach =
+                        std::min(JumpMost, JumpDistance + JumpSpeed * candidate.since_seen);
+                    const float distance = DistanceSquared(world, candidate.world);
+                    if (distance <= reach * reach && distance < best) {
                         nearest = i;
-                        jump_distance = distance;
+                        best = distance;
                     }
                 }
+                taken_over = nearest != remembered.size();
             }
             if (nearest != remembered.size()) {
                 matched[nearest] = true;
                 auto& known = remembered[nearest];
+                const auto left = known.world;
                 // Only while listed: a moving light the game dropped has not come to rest.
                 if (DistanceSquared(world, known.settled) > same * same) {
                     known.settled = world;
@@ -279,9 +290,17 @@ public:
                 // The estimate of where a light is moves by up to `same`, more the further off it
                 // was seen: strayed further than that from where it began, with room to spare.
                 known.slack = std::max(known.slack, same);
-                if (DistanceSquared(world, known.origin) >
-                    CarriedFactor * CarriedFactor * known.slack * known.slack) {
+                if (taken_over) {
                     known.carried = true;
+                    ReleaseTwins(nearest, left, same, matched);
+                } else if (!known.carried &&
+                           DistanceSquared(world, known.origin) >
+                               CarriedFactor * CarriedFactor * known.slack * known.slack) {
+                    known.carried = true;
+                    ReleaseTwins(nearest, known.origin, known.slack, matched);
+                }
+                if (Spawned(light)) {
+                    FollowTwins(nearest, light, same, matched);
                 }
             } else if (remembered.size() < MaxRemembered) {
                 // Long past the hold it would take to count as moving.
@@ -440,18 +459,42 @@ private:
         return std::bit_cast<float>(light[7]) < MapLightWord;
     }
 
-    // The same word 7, about the same reach and about the same colour.
+    // The same word 7 and about the same reach. Not the colour: the game turns a torch's colour
+    // to nothing in about a third of the frames it lists it.
     static bool SameKind(const Light& a, const Light& b) {
-        if (a[7] != b[7] || std::abs(Radius(a) - Radius(b)) > SameRadius * std::max(Radius(a), Radius(b))) {
-            return false;
-        }
-        for (size_t i = 4; i < 7; ++i) {
-            const float x = std::bit_cast<float>(a[i]), y = std::bit_cast<float>(b[i]);
-            if (!(std::abs(x - y) <= 0.25f * std::max(x, y) + 0.05f)) {
-                return false;
+        return a[7] == b[7] &&
+               std::abs(Radius(a) - Radius(b)) <= SameRadius * std::max(Radius(a), Radius(b));
+    }
+
+    // The game can list one torch twice in a frame (0.1 m apart, reaches 1% apart), and the second
+    // copy gets an entry of its own. While one copy is listed, the entries of its kind beside it
+    // that are not take its colour, and go dark with it: the game fades a torch to nothing before
+    // it drops it, its holder dead or not, but a copy dropped earlier, while the torch was lit,
+    // kept glowing where an enemy was killed without moving.
+    void FollowTwins(size_t listed, const Light& light, float within,
+                     const std::vector<bool>& matched) {
+        for (size_t i = 0; i < matched.size(); ++i) {
+            auto& twin = remembered[i];
+            if (i != listed && !matched[i] && SameKind(twin.record, light) &&
+                DistanceSquared(twin.world, remembered[listed].world) <= within * within) {
+                std::copy_n(light.begin() + 4, 3, twin.record.begin() + 4);
             }
         }
-        return true;
+    }
+
+    // And once an entry is found to have moved, the copies of its kind that are not listed this
+    // frame and lie within `within` of where it was go as moving lights do, instead of staying
+    // where the torch stood. Only then: lights of one kind that stand together and do not move
+    // (the five at the Central Yharnam lamp) stay.
+    void ReleaseTwins(size_t moved, const std::array<float, 3>& was, float within,
+                      const std::vector<bool>& matched) {
+        for (size_t i = 0; i < matched.size(); ++i) {
+            auto& twin = remembered[i];
+            if (i != moved && !matched[i] && SameKind(twin.record, remembered[moved].record) &&
+                DistanceSquared(twin.world, was) <= within * within) {
+                twin.carried = true;
+            }
+        }
     }
 
     static float Radius(const Light& light) {

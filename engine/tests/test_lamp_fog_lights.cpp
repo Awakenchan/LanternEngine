@@ -402,14 +402,17 @@ int main() {
             assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
         }
     }
-    // The takeover is for the lights the game spawns, of the same kind, in the same moment: the
-    // map's own lamps, a light of another reach or colour, a jump too far and a light the game
-    // dropped a while ago all stay as they were.
-    for (const int what : {0, 1, 2, 3, 4}) {
+    // The takeover is for the lights the game spawns, of the same kind, within reach: the map's own
+    // lamps, a light of another reach and a jump too far for one frame stay as they were. The
+    // colour does not count (the game turns a torch's colour off in many frames), and a light the
+    // game left out for a moment is taken over too.
+    for (const auto& [what, entries] :
+         {std::pair{0, 2u}, std::pair{1, 2u}, std::pair{2, 1u}, std::pair{3, 2u}, std::pair{4, 1u}}) {
         Memory memory;
         auto first = Make(0, 0, 6, 8.5f, 2.4f, 1.4f, 0.6f);
         first[7] = std::bit_cast<uint32_t>(what == 0 ? 20.0f : 0.5f);
-        auto second = Make(0.4f, -1.7f, 6, what == 1 ? 5.0f : 8.5f, what == 2 ? 0.5f : 2.4f, 1.4f, 0.6f);
+        auto second = Make(0.4f, -1.7f, 6, what == 1 ? 5.0f : 8.5f, what == 2 ? 0.0f : 2.4f,
+                           what == 2 ? 0.0f : 1.4f, what == 2 ? 0.0f : 0.6f);
         if (what == 3) second = Make(0.4f, -3.5f, 6, 8.5f, 2.4f, 1.4f, 0.6f);
         second[7] = first[7];
         std::vector<Light> drawn;
@@ -419,7 +422,103 @@ int main() {
         }
         drawn = memory.Update(std::vector<Light>{second}, At(0), Frame);
         for (int i = 0; i < 60; ++i) drawn = memory.Update(std::vector<Light>{second}, At(0), Frame);
-        assert(drawn.size() == 2);
+        assert(drawn.size() == entries);
+    }
+    // An enemy's torch the game leaves out of its list while the enemy walks, listed again metres
+    // away seconds later, is the same torch: nothing stays at the spawn point, and it goes quickly
+    // once the enemy is dead. Further than it can have walked in that time, it is another light.
+    for (const auto& [unlisted_seconds, moved, entries] :
+         {std::tuple{4.0f, 4.4f, 1u}, std::tuple{8.0f, 2.1f, 1u}, std::tuple{30.0f, 9.5f, 1u},
+          std::tuple{1.0f, 6.0f, 2u}, std::tuple{30.0f, 12.0f, 2u}}) {
+        Memory memory;
+        auto torch = Make(0, 0, 8, 8.5f, 2.4f, 1.35f, 0.6f);
+        torch[7] = std::bit_cast<uint32_t>(0.5f);
+        auto walked = Make(moved, 0, 8, 8.42f, 0.0f, 0.0f, 0.0f);
+        walked[7] = torch[7];
+        for (int i = 0; i < int(10.0f / Frame); ++i) memory.Update(std::vector<Light>{torch}, At(0), Frame);
+        for (int i = 0; i < int(unlisted_seconds / Frame); ++i) memory.Update({}, At(0), Frame);
+        std::vector<Light> drawn;
+        for (int i = 0; i < 60; ++i) drawn = memory.Update(std::vector<Light>{walked}, At(0), Frame);
+        assert(drawn.size() == entries);
+        if (entries == 1) {
+            float time = 0;
+            while (!memory.Update({}, At(0), Frame).empty()) {
+                time += Frame;
+                assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
+            }
+        }
+    }
+    // A torch the game sometimes lists twice in a frame (the copies 0.1 m apart, reaches 1% apart)
+    // leaves no copy behind once it has moved, whether it walked while listed or turned up
+    // elsewhere after a gap.
+    for (const bool walks_listed : {true, false}) {
+        Memory memory;
+        auto torch = Make(0, 0, 8, 8.5f, 2.4f, 1.35f, 0.6f);
+        auto twin = Make(0.1f, 0, 8, 8.42f, 2.4f, 1.35f, 0.6f);
+        torch[7] = twin[7] = std::bit_cast<uint32_t>(0.5f);
+        for (int i = 0; i < int(10.0f / Frame); ++i) {
+            memory.Update(i % 7 ? std::vector<Light>{torch} : std::vector<Light>{torch, twin}, At(0),
+                          Frame);
+        }
+        assert(memory.Update(std::vector<Light>{torch, twin}, At(0), Frame).size() == 2);
+        if (walks_listed) {
+            for (int i = 0; i < 60; ++i) {
+                auto step = torch;
+                step[0] = std::bit_cast<uint32_t>(float(i) * 0.1f);
+                memory.Update(std::vector<Light>{step}, At(0), Frame);
+            }
+        } else {
+            for (int i = 0; i < int(3.0f / Frame); ++i) memory.Update({}, At(0), Frame);
+            auto walked = torch;
+            walked[0] = std::bit_cast<uint32_t>(2.0f);
+            for (int i = 0; i < 60; ++i) memory.Update(std::vector<Light>{walked}, At(0), Frame);
+        }
+        float time = 0;
+        while (!memory.Update({}, At(0), Frame).empty()) {
+            time += Frame;
+            assert(time < Memory::HoldMoving + Memory::FadeOutMoving + 0.1f);
+        }
+    }
+    // An idle torch listed twice at times, killed without moving: the game fades the copy it still
+    // lists to nothing and drops it. The copy it stopped listing earlier, while lit, goes dark with
+    // it instead of glowing where the enemy stood.
+    {
+        Memory memory;
+        auto torch = Make(0, 0, 8, 8.5f, 2.4f, 1.35f, 0.6f);
+        auto twin = Make(0.1f, 0, 8, 8.42f, 2.4f, 1.35f, 0.6f);
+        torch[7] = twin[7] = std::bit_cast<uint32_t>(0.5f);
+        // Listed often enough (over 2 s in all) not to be taken for a flash.
+        for (int i = 0; i < int(10.0f / Frame); ++i) {
+            memory.Update(i % 2 ? std::vector<Light>{torch} : std::vector<Light>{torch, twin}, At(0),
+                          Frame);
+        }
+        for (int i = 0; i < 20; ++i) {
+            auto fading = torch;
+            for (size_t c = 4; c < 7; ++c) {
+                fading[c] = std::bit_cast<uint32_t>(Word(torch, c) * std::pow(0.7f, float(i + 1)));
+            }
+            memory.Update(std::vector<Light>{fading}, At(0), Frame);
+        }
+        std::vector<Light> drawn;
+        for (int i = 0; i < int(3.0f / Frame); ++i) drawn = memory.Update({}, At(0), Frame);
+        for (const auto& light : drawn) {
+            assert(std::max({Word(light, 4), Word(light, 5), Word(light, 6)}) < 0.01f);
+        }
+    }
+    // Lights of one kind that stand together and never move (five at one lamp) all stay when the
+    // game leaves them out.
+    {
+        Memory memory;
+        std::vector<Light> lamp;
+        for (int i = 0; i < 5; ++i) {
+            lamp.push_back(Make(0, 0, 8, 2, 0.9f + 0.01f * float(i), 0.9f, 1.2f));
+            lamp.back()[7] = std::bit_cast<uint32_t>(2.0f);
+        }
+        std::vector<Light> drawn;
+        for (int i = 0; i < 2 * FadedIn; ++i) drawn = memory.Update(lamp, At(0), Frame);
+        assert(drawn.size() == 5);
+        for (int i = 0; i < int(5.0f / Frame); ++i) drawn = memory.Update({}, At(0), Frame);
+        assert(drawn.size() == 5);
     }
     // A lamp prop the game spawns (colour about 1.2), listed for a moment close by and left out for
     // a second, is a lamp, not a flash: held, and back at full when listed again. Not judged late
@@ -690,5 +789,5 @@ int main() {
               "lights the shader skips left out, bounded; remembered through the hold, moved with "
               "the camera, faded in and out at any frame rate, forgotten on a warp; neighbours with "
               "other reaches kept apart, the game's colour followed over the fades, faded at the "
-              "light limit)");
+              "light limit; torches followed across the game's gaps, their twins not left behind)");
 }
