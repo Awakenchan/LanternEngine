@@ -17,6 +17,7 @@
 
 #include <SDL3/SDL.h>
 #include "../bbnet/room/room_service.h"
+#include "../bbnet/thd/thd.h"
 #include "bbport_menu_i18n.h"
 #include "bbport_settings.h"
 #include "bbport_usage.h"
@@ -2242,6 +2243,27 @@ void RelayNote() {
     ImGui::End();
 }
 
+bool RefusalNoteActive() {
+    std::string text;
+    return BbThd::RefusalNotice(text);
+}
+
+void RefusalNote() {
+    std::string text;
+    if (!BbThd::RefusalNotice(text)) return;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 24.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f, viewport->WorkPos.y + pad),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##refusal_note", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::End();
+}
+
 bool SummonNoteActive() {
     std::string text;
     return BbRoom::CurrentNotice(text);
@@ -3121,7 +3143,7 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps || CompileNoteActive() || RelayNoteActive() || SummonNoteActive() || AnnouncementActive() || ReconnectNoteActive() || !ShownPartyLines().empty() || coop_open ||
+    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps || CompileNoteActive() || RelayNoteActive() || RefusalNoteActive() || SummonNoteActive() || AnnouncementActive() || ReconnectNoteActive() || !ShownPartyLines().empty() || coop_open ||
                            !BbEngine::OnlineFixes::PartyRows().empty() || BbEngine::OnlineFixes::Spectating() || BbFaceShot::JustTaken());
 }
 
@@ -3530,6 +3552,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (!menu_open && RelayNoteActive()) {
         RelayNote();
+    }
+    if (!menu_open && RefusalNoteActive()) {
+        RefusalNote();
     }
     if (!menu_open) {
         SummonNote();

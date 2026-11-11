@@ -70,6 +70,25 @@ static int Check(string[] saves)
     Require(slot.Name == "Fixture" && slot.Level == 155 && slot.Echoes == 12345 && slot.Insight == 40, "Fields of the fixture");
     Require(slot.Items.Count == 3, "Fixture items");
 
+    Require(SaveStore.Title("Hunter", "test", true) == "Hunter (test)", "A hunter title names its profile when profiles are shown");
+    Require(SaveStore.Title("Hunter", "Main", false) == "Hunter", "A hunter title is the name alone with one profile");
+    Require(SaveStore.Title("", "test", true) == "? (test)" && SaveStore.Title("", "Main", false) == "?", "A nameless hunter shows a question mark");
+    Require(SaveStore.Title("Hunter", "", true) == "Hunter", "A hunter title skips an empty profile");
+    Require(SaveStore.Title("Hunter", "test", true) != SaveStore.Title("Hunter", "Main", true), "Same names in two profiles read differently");
+
+    SaveCharacter H(string profile, int slot, string name, int level) => new(profile, slot, name, level, "", DateTime.MinValue, 0, 0);
+    var titles = SaveStore.Titles(new[] { H("test", 0, "Hunter", 22), H("Main", 0, "Hunter", 10), H("Main", 1, "Hunter", 155) }, true);
+    Require(titles.SequenceEqual(new[] { "Hunter (test)", "Hunter (Main, level 10)", "Hunter (Main, level 155)" }), "Only clashing titles get the level: " + string.Join(" | ", titles));
+    titles = SaveStore.Titles(new[] { H("Main", 0, "Hunter", 10), H("Main", 1, "Hunter", 155) }, false);
+    Require(titles.SequenceEqual(new[] { "Hunter (level 10)", "Hunter (level 155)" }), "Clashing titles with one profile get the level: " + string.Join(" | ", titles));
+    titles = SaveStore.Titles(new[] { H("Main", 0, "Hunter", 10), H("Main", 1, "Eileen", 10) }, false);
+    Require(titles.SequenceEqual(new[] { "Hunter", "Eileen" }), "Unique titles stay as they are: " + string.Join(" | ", titles));
+    titles = SaveStore.Titles(new[] { H("Main", 0, "Hunter", 10), H("Main", 3, "Hunter", 10), H("Main", 1, "Hunter", 155) }, false);
+    Require(titles.SequenceEqual(new[] { "Hunter (level 10, slot 1)", "Hunter (level 10, slot 4)", "Hunter (level 155)" }), "Same name and level fall back to the slot: " + string.Join(" | ", titles));
+    titles = SaveStore.Titles(new[] { H("Main", 0, "hunter", 10), H("Main", 1, "Hunter", 155) }, false);
+    Require(titles.SequenceEqual(new[] { "hunter (level 10)", "Hunter (level 155)" }), "Titles differing only in case clash: " + string.Join(" | ", titles));
+    Require(SaveStore.Titles(Array.Empty<SaveCharacter>(), true).Count == 0, "No hunters give no titles");
+
     Require(SaveSlot.FlagBlock(9456) == 45 && SaveSlot.FlagBlock(12401800) == 169 && SaveSlot.FlagBlock(2410) == 10, "Flag blocks");
     Require(SaveSlot.FlagBlock(72410100) == 119 + 5 && SaveSlot.FlagBlock(11100000) == null, "Flag areas");
     var flagged = SaveSlot.Parse(fixture);

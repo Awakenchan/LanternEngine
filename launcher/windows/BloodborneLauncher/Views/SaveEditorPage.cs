@@ -112,13 +112,17 @@ namespace BloodborneLauncher.Views
         {
             var before = _session?.Character;
             _found = SaveEditorSession.Places(S)
-                .SelectMany(place => SaveStore.Characters(place).Select(character => (place, character)))
+                .SelectMany(place =>
+                {
+                    try { return SaveStore.Characters(place).Select(character => (place, character)).ToList(); }
+                    catch (IOException e) { Report(e); return new List<(SavePlace place, SaveCharacter character)>(); }
+                })
                 .OrderByDescending(f => f.character.Saved)
                 .ToList();
             _filling = true;
             _characters.Items.Clear();
             foreach (var (_, character) in _found)
-                _characters.Items.Add(L.F($"{character.Profile}: {character.Name}, level {character.Level}, {character.BossesDefeated} bosses, {character.PlayHours:0.#} h, saved {character.Saved:d} (slot {character.Slot + 1})"));
+                _characters.Items.Add(SaveStore.Title(character.Name, character.Profile, true) + L.F($", level {character.Level}, {character.BossesDefeated} bosses, {character.PlayHours:0.#} h, saved {character.Saved:d} (slot {character.Slot + 1})"));
             var index = before == null ? -1 : _found.FindIndex(f => f.Character.File == before.File);
             _filling = false;
             if (index < 0) index = SaveStore.DefaultCharacter(_found.Select(f => f.Character).ToList(), PlayerProfiles.Current(S));

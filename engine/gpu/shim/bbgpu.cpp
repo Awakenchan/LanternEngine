@@ -1,4 +1,6 @@
+#include "../bbnet/room/room_service.h"
 #include "bbport_write_log.h"
+#include <memory>
 #include "bbport_gnm_hooks.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
@@ -12,6 +14,7 @@
 #include "bbport_platform.h"
 #include "bbport_toggles.h"
 #include "engine/engine_hooks.h"
+#include "engine/batch.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -280,6 +283,14 @@ long EnvMs(const char* name, long fallback) {
 }
 
 [[noreturn]] void TerminateNow(int code) {
+    if (BbRoom::Active()) {
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        std::thread([done] {
+            BbRoom::Shutdown();
+            done->store(true);
+        }).detach();
+        for (int i = 0; i < 150 && !done->load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     std::fflush(stdout);
     const char* mode = std::getenv("BB_EXIT_MODE");
     if (mode && std::strcmp(mode, "exit") == 0) {
@@ -381,6 +392,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             cache_saved.wait(false, std::memory_order_acquire);
             saved = cache_saved.load(std::memory_order_acquire);
         }
+        BbEngine::Batch::Report("exit");
         std::printf("Exit: clean shutdown in %lld ms\n",
                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - exit_started)

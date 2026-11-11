@@ -369,6 +369,7 @@ static const HostOverrideState& GetHostOverrideState() {
 // bbport: The Hunter's Dream backend (gpu/bbnet/thd).
 extern "C" bool bbthd_enabled();
 extern "C" void bbthd_add_game_headers(std::vector<std::pair<std::string, std::string>>* headers);
+extern "C" void bbthd_game_reply(int status, const std::string* body);
 
 bool ApplyHostOverride(std::string& scheme, std::string& host, u16& port, bool& is_secure) {
     const auto& state = GetHostOverrideState();
@@ -957,6 +958,9 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
 
         // Populate response (overwrites any prior-iteration 3xx).
         out_res.status_code = result->status;
+        if (result->status == 401 && bbthd_enabled()) {
+            bbthd_game_reply(result->status, &result->body);
+        }
         out_res.content_length_result = 0;
         out_res.read_cursor = 0;
 

@@ -50,6 +50,8 @@ constexpr auto kGaveUpShown = std::chrono::seconds(12);
 constexpr int kSlowPingMs = 250;
 constexpr std::size_t kMostLines = 4;
 
+std::vector<int> StaleTwins(const std::map<int, std::string>& names, const std::vector<int>& members, int joining);
+
 class PartyStatus {
 public:
     using Time = std::chrono::steady_clock::time_point;
@@ -60,6 +62,7 @@ public:
     void Rtt(int slot, int ms);
     void Vitals(int slot, std::int32_t hp, std::int32_t hp_max, std::uint32_t map, Time now);
     void Left(int slot, Time now);
+    void Away(int slot, Time now);
     void OwnConnected(Time now);
     void OwnLost(Time now);
     void OwnGaveUp(Time now);

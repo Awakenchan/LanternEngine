@@ -115,7 +115,7 @@ namespace BloodborneLauncher.Core
                 var process = new Process { StartInfo = info, EnableRaisingEvents = true };
                 OpenLog();
                 // The first line of every log, the Output page's export included: which build ran.
-                Emit($"Lantern Engine {Updater.CurrentLabel}, engine {Updater.LocalEngine() ?? "unknown"}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                Emit($"Lantern Engine {Updater.CurrentLabel}, engine {Updater.LocalEngine() ?? "unknown"}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}, saves {SavesFolder.ForLog(GameEnvironment.SavesRoot(s))}");
                 process.OutputDataReceived += (_, e) => { if (e.Data != null && !LiveGame.Take(e.Data)) Emit(e.Data); };
                 process.ErrorDataReceived += (_, e) => { if (e.Data != null) Emit(e.Data); };
                 process.Exited += (_, _) =>

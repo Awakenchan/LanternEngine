@@ -8,9 +8,11 @@
 #include "thd_internal.h"
 #include "windows_trust.h"
 #include "../room/room_service.h"
+#include "../../shim/engine/online_gate.h"
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
@@ -107,6 +109,8 @@ namespace {
 std::mutex g_account_mu;
 std::string g_name, g_token;
 bool g_refused = false;
+std::string g_refusal_banner;
+std::chrono::steady_clock::time_point g_refusal_at;
 // Read on first use: the game may ask for its NP state before the online start.
 void LoadAccountLocked() {
     static bool loaded = false;
@@ -134,7 +138,7 @@ std::string AccountToken() {
 bool SignedIn() {
     std::lock_guard lk(g_account_mu);
     LoadAccountLocked();
-    return !g_name.empty() && !g_token.empty();
+    return !g_name.empty() && !g_token.empty() && !g_refused;
 }
 bool Refused() {
     std::lock_guard lk(g_account_mu);
@@ -151,11 +155,28 @@ void MarkRefused(const std::string& reason) {
     Log("the server refused this PC's sign-in as %s (%s): sign in again on the launcher's Online "
         "page; until then nobody can summon or invite this player",
         name.c_str(), reason.c_str());
+    std::string banner = "Sign-in expired: sign in again on the launcher's Online page";
+    if (name.empty()) banner = "Online play needs a sign-in: the launcher's Online page";
+    if (reason.find("banned") != std::string::npos) {
+        banner = reason;
+        banner[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(banner[0])));
+    }
+    std::lock_guard lk(g_account_mu);
+    g_refusal_banner = banner;
+    g_refusal_at = std::chrono::steady_clock::now();
+}
+bool RefusalNotice(std::string& text) {
+    std::lock_guard lk(g_account_mu);
+    if (g_refusal_banner.empty() || std::chrono::steady_clock::now() - g_refusal_at > std::chrono::seconds(15)) return false;
+    text = g_refusal_banner;
+    return true;
 }
 std::string OnlineId() {
     const std::string name = AccountName();
     return name.empty() ? "Player" : name;
 }
+
+void SignInCheck();
 
 void Initialize() {
     const Config& c = Cfg();
@@ -167,6 +188,7 @@ void Initialize() {
     if (SignedIn()) {
         Log("The Hunter's Dream as %s: session service %s, P2P port %d", AccountName().c_str(),
             c.np_base.c_str(), c.p2p_port);
+        std::thread(SignInCheck).detach();
     } else {
         Log("not signed in to The Hunter's Dream (the launcher's Online page): the game stays offline");
     }
@@ -204,6 +226,10 @@ struct HttpResult {
 };
 
 // One keep-alive connection per thread and server: the poller asks four times a second.
+std::mutex g_poll_client_mu;
+httplib::Client* g_poll_client = nullptr;
+std::atomic<bool> g_pollrun{false};
+
 HttpResult Perform(const std::string& base, const std::string& path, const std::string* post,
                    int timeout_ms) {
     thread_local std::map<std::string, std::unique_ptr<httplib::Client>> clients;
@@ -234,10 +260,24 @@ HttpResult Perform(const std::string& base, const std::string& path, const std::
         return post ? cli->Post(path, headers, *post, "application/json") : cli->Get(path, headers);
     };
     HttpResult r;
+    const bool poll = path == "/np/events/poll";
+    if (poll) {
+        std::lock_guard lk(g_poll_client_mu);
+        g_poll_client = cli.get();
+    }
+    const auto sent_at = std::chrono::steady_clock::now();
     httplib::Result res = send();
+    if (poll) {
+        std::lock_guard lk(g_poll_client_mu);
+        g_poll_client = nullptr;
+    }
+    const bool quick = std::chrono::steady_clock::now() - sent_at < std::chrono::milliseconds(1000);
     // A kept-alive connection the server closed meanwhile fails on its first read or write
     // ("Failed to read connection"): once more on a new one, as bbhost's fresh request would.
-    if (!res && reused && (res.error() == httplib::Error::Read || res.error() == httplib::Error::Write)) {
+    // A read that ran into its timeout is not that: the server had the request.
+    const bool kept = path == "/np/events/poll" || path == "/np/events/ack";
+    if (!res && kept && reused && quick && (!poll || g_pollrun.load()) &&
+        (res.error() == httplib::Error::Read || res.error() == httplib::Error::Write)) {
         open();
         res = send();
     }
@@ -568,10 +608,12 @@ void StunServer(std::string* host, std::uint16_t* port) {
 
 // At context_start, then when the answer is over two minutes old (the keepalive asks every 15 s).
 void MappedRefresh(bool force) {
-    std::lock_guard lk(g_mapped.mu);
-    if (!force && g_mapped.asked && NowMs() - g_mapped.at_ms < 120000) return;
-    g_mapped.asked = true;
-    g_mapped.at_ms = NowMs();
+    {
+        std::lock_guard lk(g_mapped.mu);
+        if (!force && g_mapped.asked && NowMs() - g_mapped.at_ms < 120000) return;
+        g_mapped.asked = true;
+        g_mapped.at_ms = NowMs();
+    }
     if (Cfg().stun == "off") return;
     std::string host;
     std::uint16_t sport = 0;
@@ -589,6 +631,7 @@ void MappedRefresh(bool force) {
                 std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
         }
     }
+    std::lock_guard lk(g_mapped.mu);
     if (!ok) {
         if (!g_mapped.addr.empty()) return; // keep the last answer
         Log("stun: no answer from %s:%u; the server gets the LAN address only", host.c_str(), sport);
@@ -646,7 +689,43 @@ bool ServerSignalingResolve(const std::string& id, std::uint32_t* addr, std::uin
     return true;
 }
 
+void SignInCheck() {
+    static std::atomic<bool> checked{false};
+    if (checked.exchange(true)) return;
+    const std::string token = AccountToken();
+    if (token.empty() || AccountName().empty()) return;
+    const std::string body = Json{{"Token", token}}.dump();
+    const HttpResult r = Perform(Cfg().auth_base, "/auth/whoami", &body, 5000);
+    const long status = r.error.empty() ? r.status : 0;
+    if (!r.error.empty() || status <= 0) {
+        Log("account: the sign-in could not be checked: %s", r.error.empty() ? "no answer" : r.error.c_str());
+        return;
+    }
+    const Json v = Json::parse(r.body, nullptr, false);
+    const auto kind = v.is_object() ? v.find("ResKind") : v.end();
+    if (!v.is_object() || kind == v.end() || !kind->is_number()) {
+        Log("account: the sign-in could not be checked: HTTP %ld without ResKind", status);
+        return;
+    }
+    if (kind->get<double>() != 0) {
+        if (status != 200 && status != 401) {
+            Log("account: the sign-in could not be checked: HTTP %ld", status);
+            return;
+        }
+        const std::string why = StrOf(v, "Message");
+        MarkRefused(why.empty() ? "refused" : why);
+        return;
+    }
+    const std::string id = StrOf(v, "OnlineId");
+    if (status < 200 || status >= 300 || id.empty()) {
+        Log("account: the sign-in could not be checked: HTTP %ld without OnlineId", status);
+        return;
+    }
+    Log("account: sign-in checked: the server knows this PC as %s", id.c_str());
+}
+
 bool ServerContextStart(Json& reply, std::string& error) {
+    BbOnlineGate::MarkLive("The Hunter's Dream");
     MappedRefresh(true);
     Json body = Json::object();
     body["OnlineId"] = OnlineId();
@@ -725,8 +804,8 @@ void RoomClear() {
 
 namespace {
 std::mutex g_pollmu;
+std::mutex g_pollflight;
 std::condition_variable g_pollcv;
-std::atomic<bool> g_pollrun{false};
 std::function<void(const Json&)> g_handler;
 long long g_cursor = 0;
 
@@ -756,8 +835,17 @@ void PollerMain(unsigned gen) {
         Json reply;
         std::string err;
         int pause_ms = 0;
-        // The read timeout sits above the wait, or every empty poll would end as an error.
-        if (NpPost("/np/events/poll", body, reply, err, wait_ms > 0 ? wait_ms + 5000 : 4000)) {
+        bool answered = false;
+        std::int64_t took_ms = 0;
+        {
+            std::lock_guard flight(g_pollflight);
+            if (!running()) break;
+            const std::int64_t asked_at = NowMs();
+            answered = NpPost("/np/events/poll", body, reply, err, wait_ms > 0 ? wait_ms + 5000 : 4000);
+            took_ms = NowMs() - asked_at;
+        }
+        if (!running()) break;
+        if (answered) {
             backoff_ms = 0;
             const long long max_wait = IntOf(reply, "WaitMaxMs", 0);
             wait_ms = max_wait > 0 ? static_cast<int>(std::min<long long>(25000, max_wait)) : 0;
@@ -784,8 +872,8 @@ void PollerMain(unsigned gen) {
                 continue; // drain without waiting while there are events
             }
             g_cursor = std::max(g_cursor, next);
-            if (wait_ms > 0) continue; // the server did the waiting: poll again now
-            pause_ms = 250;            // a server without long polling answers at once
+            pause_ms = wait_ms > 0 ? static_cast<int>(std::max<std::int64_t>(0, 250 - took_ms)) : 250;
+            if (pause_ms == 0) continue;
         } else if (Refused()) {
             pause_ms = 60000; // nothing arrives until this PC signs in again
         } else {
@@ -799,6 +887,7 @@ void PollerMain(unsigned gen) {
 }
 
 std::atomic<bool> g_keeprun{false};
+std::atomic<unsigned> g_keepgen{0};
 std::mutex g_keepmu;
 std::condition_variable g_keepcv;
 
@@ -823,18 +912,19 @@ void ServerSignalingUpdate() {
 
 // The STUN binding every 15 s while the context runs: it keeps our NAT's mapping to the server
 // open (routers forget an idle UDP mapping in 30 s to a few minutes) and the relay port alive.
-void KeepaliveMain() {
+void KeepaliveMain(unsigned gen) {
+    const auto running = [gen] { return g_keeprun.load() && g_keepgen.load() == gen; };
     std::string last;
     {
         std::lock_guard lk(g_mapped.mu);
         last = g_mapped.addr + ":" + std::to_string(g_mapped.port);
     }
-    while (g_keeprun.load()) {
+    while (running()) {
         {
             std::unique_lock lk(g_keepmu);
-            g_keepcv.wait_for(lk, std::chrono::seconds(15), [] { return !g_keeprun.load(); });
+            g_keepcv.wait_for(lk, std::chrono::seconds(15), [&] { return !running(); });
         }
-        if (!g_keeprun.load()) break;
+        if (!running()) break;
         MappedRefresh(true);
         std::string now;
         {
@@ -857,7 +947,7 @@ void PollerStart(std::function<void(const Json&)> handler) {
     if (g_pollrun.exchange(true)) return;
     g_cursor = 0;
     std::thread(PollerMain, g_pollgen.fetch_add(1) + 1).detach();
-    if (!g_keeprun.exchange(true)) std::thread(KeepaliveMain).detach();
+    if (!g_keeprun.exchange(true)) std::thread(KeepaliveMain, g_keepgen.fetch_add(1) + 1).detach();
 }
 
 void PollerStop() {
@@ -869,6 +959,8 @@ void PollerStop() {
     std::lock_guard lk(g_pollmu);
     g_pollrun.store(false);
     g_pollcv.notify_all();
+    std::lock_guard client(g_poll_client_mu);
+    if (g_poll_client) g_poll_client->stop();
 }
 
 // ---- game memory: 1.09's addresses (Binary Ninja, image base 0x400000) -------------------------------
@@ -956,4 +1048,11 @@ extern "C" bool bbthd_enabled() {
 }
 extern "C" void bbthd_add_game_headers(std::vector<std::pair<std::string, std::string>>* headers) {
     if (headers) BbThd::AddGameHeaders(*headers);
+}
+extern "C" void bbthd_game_reply(int status, const std::string* body) {
+    if (status != 401 || !body || BbRoom::Active()) return;
+    const BbThd::Json reply = BbThd::Json::parse(*body, nullptr, false);
+    if (!reply.is_object() || !reply.contains("ResKind")) return;
+    const std::string why = BbThd::StrOf(reply, "Message");
+    BbThd::MarkRefused(why.empty() ? "HTTP 401" : why);
 }

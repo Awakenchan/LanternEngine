@@ -10,7 +10,7 @@
 namespace BbRoom {
 
 constexpr int kLossyTarget = 0x80;
-constexpr std::size_t kMostGameBacklog = 8 * 1024;
+constexpr std::size_t kMostGameBacklog = 128 * 1024;
 
 std::string RoomUrl(const std::string& server, const std::string& room_id, const std::string& path) {
     std::string base = server;
@@ -224,8 +224,11 @@ bool Link::Session() {
     const bool opened = socket->Connect(url_, 10, error);
     if (!opened) {
         last_error_ = error;
+        if (socket->VersionRefused() && !stop_) Push({Event::Kind::Refused, 0, {error.begin(), error.end()}});
         return false;
     }
+    full_ = false;
+    full_most_ = kMaxMembers;
     {
         std::lock_guard lock(socket_mutex_);
         if (stop_) return false;
@@ -268,7 +271,8 @@ bool Link::Session() {
         open_listed_ = false;
         Push({Event::Kind::Disconnected, 0, {}});
     } else if (!welcomed && !stop_) {
-        Push({Event::Kind::Refused, 0, {}});
+        const std::string reason = full_ || socket->CloseCode() == kCloseFull ? FullRefusal(full_most_.load()) : std::string();
+        Push({Event::Kind::Refused, 0, {reason.begin(), reason.end()}});
     }
     return welcomed;
 }
@@ -278,7 +282,11 @@ void Link::Handle(const std::string& text) {
     if (!message.is_object()) return;
     const std::string type = message.value("t", "");
     const int slot = message.value("slot", 0);
-    if (type == "welcome") {
+    if (type == "full") {
+        full_ = true;
+        const int most = message.value("most", 0);
+        if (most > 0 && most < 128) full_most_ = most;
+    } else if (type == "welcome") {
         std::vector<int> members;
         if (message.contains("members") && message["members"].is_array()) {
             for (const auto& m : message["members"]) {
@@ -325,6 +333,8 @@ void Link::Handle(const std::string& text) {
             visitors_.erase(std::remove(visitors_.begin(), visitors_.end(), slot), visitors_.end());
         }
         Push({Event::Kind::Left, slot, {}});
+    } else if (type == "away") {
+        if (slot > 0) Push({Event::Kind::Away, slot, {}});
     } else if (type == "visitor") {
         {
             std::lock_guard lock(mutex_);

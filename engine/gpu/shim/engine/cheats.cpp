@@ -3,6 +3,7 @@
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include "bbport_settings.h"
+#include "online_gate.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -460,13 +461,15 @@ void Disable(Extra& e, const char* why) {
 }
 
 bool SharedWorld() {
-    static const bool shared = [] {
+    const char* why = BbOnlineGate::Reason();
+    if (!why) return false;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
         const char* online = std::getenv("BB_ONLINE");
-        const bool on = online && online[0] == '1';
-        if (on) std::printf("Cheats: off while playing online\n");
-        return on;
-    }();
-    return shared;
+        if (online && online[0] == '1') std::printf("Cheats: off while playing online\n");
+        else std::printf("Cheats: off while playing online: BB_ONLINE is not 1 but %s is on\n", why);
+    }
+    return true;
 }
 
 int SettingOf(const Extra& e, const BbSettings::Values& s) {
@@ -855,9 +858,11 @@ const char* Unavailable(Which which) {
 }
 
 void AddEchoes(int amount) {
+    if (SharedWorld()) return;
     if (amount > 0 && g_installed && !g_echoes_unavailable.load()) g_add_echoes.fetch_add(std::min(amount, int(kEchoCap)));
 }
 void AddInsight(int amount) {
+    if (SharedWorld()) return;
     if (amount > 0 && g_installed && !g_echoes_unavailable.load()) g_add_insight.fetch_add(std::min(amount, int(kInsightCap)));
 }
 
@@ -869,8 +874,9 @@ void Tick() {
         g_add_echoes.store(0, std::memory_order_relaxed);
         g_add_insight.store(0, std::memory_order_relaxed);
     }
-    const int settings[2] = {shared ? BbSettings::CheatOff : s.cheat_vials.load(std::memory_order_relaxed),
-                             shared ? BbSettings::CheatOff : s.cheat_bullets.load(std::memory_order_relaxed)};
+    const char* gate = shared ? "online" : nullptr;
+    const int settings[2] = {BbOnlineGate::Allowed(s.cheat_vials.load(std::memory_order_relaxed), BbSettings::CheatOff, gate),
+                             BbOnlineGate::Allowed(s.cheat_bullets.load(std::memory_order_relaxed), BbSettings::CheatOff, gate)};
     bool idle = g_add_echoes.load(std::memory_order_relaxed) <= 0 && g_add_insight.load(std::memory_order_relaxed) <= 0;
     for (int i = 0; i < 2; ++i) {
         const Cheat& c = g_cheats[i];
@@ -886,16 +892,16 @@ void Tick() {
         int value = settings[i];
         if (value != BbSettings::CheatInfinite && (value < 0 || value > BbSettings::CheatMaxAmount)) value = BbSettings::CheatOff;
         if (value != c.pending) { c.pending = value; c.pending_since = now; }
-        if (c.pending != c.active && now - c.pending_since >= kDebounce) Switch(c, c.pending);
+        if (c.pending != c.active && (shared || now - c.pending_since >= kDebounce)) Switch(c, c.pending);
     }
     for (Extra& e : g_extras) {
         if (e.disabled) continue;
-        const int value = shared ? 0 : SettingOf(e, s);
+        const int value = BbOnlineGate::Allowed(SettingOf(e, s), 0, gate);
         if (value != e.pending) { e.pending = value; e.pending_since = now; }
-        if (e.pending != e.active && now - e.pending_since >= kDebounce) Switch(e, e.pending);
+        if (e.pending != e.active && (shared || now - e.pending_since >= kDebounce)) Switch(e, e.pending);
     }
     Extra& stamina = ExtraOf(Stamina);
-    if (g_settled && !stamina.disabled && stamina.active) RefillStamina();
+    if (!shared && g_settled && !stamina.disabled && stamina.active) RefillStamina();
     if (now < g_check) return;
     g_check = now + kInterval;
     const std::uint64_t record = player_record();
@@ -916,6 +922,7 @@ void Tick() {
     }
     if (now - g_since < kSettle) return;
     g_settled = true;
+    if (shared) return;
     for (Cheat& c : g_cheats) {
         if (!c.disabled && c.active != BbSettings::CheatOff) Run(c, record + kEquipGameData);
     }

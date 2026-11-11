@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "room_service.h"
 #include "room_host.h"
+#include "../../shim/engine/online_gate.h"
 
 #include <random>
 #include <atomic>
@@ -43,6 +44,7 @@ inline void CloseSocket(SocketHandle s) { close(s); }
 
 #include "room_announce.h"
 #include "room_link.h"
+#include "../thd/thd_signal.h"
 
 namespace BbRoom {
 namespace {
@@ -54,6 +56,8 @@ enum : std::uint8_t { kRequest = 1, kReply = 2, kEvent = 3, kDatagram = 4, kBatc
 constexpr std::size_t kVitalsFixed = 1 + 1 + 4 * 4 + 2 + 3 * 4 + 4;
 constexpr std::size_t kBatchBytes = 16000;
 constexpr std::size_t kBundleBytes = 60000;
+constexpr std::size_t kSlotBundleBytes = 65500;
+constexpr int kResolveWaitMs = 1500;
 constexpr std::size_t kLargestPortrait = 128 * 1024;
 constexpr std::size_t kPieceBytes = 1200;
 constexpr std::size_t kPieceHead = 4;
@@ -115,7 +119,7 @@ struct Member {
 
 struct MatchRoom {
     std::string session_id;
-    int max_members = 4;
+    int max_members = kMaxMembers;
     std::vector<Member> members;
 };
 
@@ -469,7 +473,7 @@ Json HandleSession(int slot, const std::string& path, const Json& body) {
         const std::uint64_t id = S().next_room++;
         MatchRoom room;
         room.session_id = "room-" + std::to_string(id);
-        room.max_members = static_cast<int>(std::clamp<long long>(IntOf(body, "MaxMembers", 5), 2, 5));
+        room.max_members = kMaxMembers;
         room.members.push_back({1, slot});
         S().rooms[id] = room;
         return {{"ResKind", 0}, {"RoomId", static_cast<long long>(id)}, {"SessionId", room.session_id},
@@ -492,6 +496,13 @@ Json HandleSession(int slot, const std::string& path, const Json& body) {
                 return {{"ResKind", 0}, {"SessionId", room.session_id}, {"MemberId", m.member_id},
                         {"OwnerMemberId", 1}, {"MaxMembers", room.max_members}, {"Members", members}};
             }
+        }
+        std::vector<int> present;
+        for (const Member& m : room.members)
+            if (m.member_id != 1) present.push_back(m.slot);
+        for (const int stale : StaleTwins(S().names, present, slot)) {
+            Log("slot %d is %s again: the old entry in slot %d leaves the party", slot, S().names[slot].c_str(), stale);
+            LeaveLocked(id, stale, "disconnected");
         }
         if (static_cast<int>(room.members.size()) >= room.max_members) return {{"ResKind", 1}, {"Message", "room full"}};
         int free_member = 2;
@@ -613,7 +624,7 @@ Json HandleSummon(int slot, const std::string& api, const Json& body) {
     }
     if (api == "request") {
         const int target = static_cast<int>(IntOf(body, "TargetUserId") - 1000);
-        if (target >= 1 && target <= 5 && target != slot && S().signs.count(target)) {
+        if (target >= 1 && target <= kMaxMembers && target != slot && S().signs.count(target)) {
             Json ev = {{"Name", "guest_invite"}, {"HostSlot", slot}};
             const auto name = S().names.find(slot);
             ev["HostOnlineId"] = name == S().names.end() ? "" : name->second;
@@ -832,6 +843,8 @@ int HostSlotWait(int timeout_ms) {
 }
 
 bool Rpc(const Json& request, Json& reply, std::string& error, int timeout_ms) {
+    const bool resolve = StrOf(request, "p") == "/np/signaling/resolve";
+    if (resolve) timeout_ms = std::min(timeout_ms, kResolveWaitMs);
     if (S().host) {
         const auto end = Clock::now() + std::chrono::milliseconds(std::min(timeout_ms, 10000));
         while (!S().own_slot.load() && Clock::now() < end) std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -850,7 +863,7 @@ bool Rpc(const Json& request, Json& reply, std::string& error, int timeout_ms) {
         if (!started_as.empty()) S().online_id = started_as;
     }
     const bool start = StrOf(request, "p") == "/mp/matching2/context_start" && Env("BB_ROOM_START_WAITS_HOST") != "1";
-    const int host = HostSlotWait(start ? 0 : std::min(timeout_ms, 10000));
+    const int host = HostSlotWait(start || resolve ? 0 : std::min(timeout_ms, 10000));
     if (!host) {
         error = start ? "no host in the room yet; this hunter is introduced when the host comes" : "no host in the room";
         return false;
@@ -991,7 +1004,21 @@ void BridgeLoop() {
                         const int n = ::recvfrom(s, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
                                                  reinterpret_cast<sockaddr*>(&from), &len);
                         if (n <= 0) break;
+                        if (BbThd::Signal::IsSignal(buffer.data(), static_cast<std::size_t>(n))) {
+                            std::vector<std::uint8_t> frame(1 + static_cast<std::size_t>(n));
+                            frame[0] = kDatagram;
+                            std::memcpy(frame.data() + 1, buffer.data(), static_cast<std::size_t>(n));
+                            S().link.Send(slot, frame.data(), frame.size());
+                            continue;
+                        }
                         auto& out = pending[slot];
+                        if (!out.empty() && out.size() + 2 + static_cast<std::size_t>(n) > kSlotBundleBytes) {
+                            held -= out.size();
+                            std::map<int, std::vector<std::uint8_t>> full;
+                            full[slot] = std::move(out);
+                            out.clear();
+                            SendBundle(full);
+                        }
                         out.push_back(static_cast<std::uint8_t>(n));
                         out.push_back(static_cast<std::uint8_t>(n >> 8));
                         out.insert(out.end(), buffer.begin(), buffer.begin() + n);
@@ -1341,11 +1368,13 @@ void StatusTick() {
 
 void LinkLoop() {
     int last_host = 0;
+    std::string refused;
     for (;;) {
         S().link.WaitEvent(500);
         for (auto& e : S().link.Drain()) {
             switch (e.kind) {
             case Event::Kind::Connected:
+                refused.clear();
                 if (S().own_slot.load() && S().own_slot.load() != e.slot)
                     Log("came back as slot %d (was %d)", e.slot, S().own_slot.load());
                 S().own_slot = e.slot;
@@ -1365,6 +1394,8 @@ void LinkLoop() {
                 {
                     std::lock_guard lock(S().vitals_mu);
                     S().vitals.erase(e.slot);
+                    S().pieces.erase(e.slot);
+                    S().portraits.erase(e.slot);
                 }
                 {
                     std::lock_guard lock(S().status_mu);
@@ -1373,6 +1404,13 @@ void LinkLoop() {
                 if (S().host) {
                     std::lock_guard lock(S().host_mu);
                     ForgetSlotLocked(e.slot);
+                }
+                break;
+            case Event::Kind::Away:
+                Log("slot %d dropped without a leave: the room holds its slot for a reconnect", e.slot);
+                {
+                    std::lock_guard lock(S().status_mu);
+                    S().status.Away(e.slot, Clock::now());
                 }
                 break;
             case Event::Kind::Host:
@@ -1385,11 +1423,7 @@ void LinkLoop() {
                 }
                 last_host = e.slot;
                 if (e.slot && !S().host && !S().player.empty()) {
-                    std::string introduce;
-                    {
-                        std::lock_guard lock(S().mu);
-                        introduce = S().online_id.empty() ? S().player : S().online_id;
-                    }
+                    const std::string introduce = NetworkId();
                     SendJson(e.slot, kRequest,
                              Json{{"p", "/mp/matching2/context_start"}, {"b", {{"OnlineId", introduce}}}}, 0, true);
                 }
@@ -1416,6 +1450,12 @@ void LinkLoop() {
                 Log("the room could not be reached for 2 minutes: seamless co-op is off until the next start");
                 break;
             case Event::Kind::Refused:
+                if (!e.data.empty()) {
+                    const std::string reason(e.data.begin(), e.data.end());
+                    if (reason != refused) Log("Refused: %s", reason.c_str());
+                    refused = reason;
+                    break;
+                }
                 Log("could not join the room (%s): it may be full (5 players), or your connection already has another "
                     "room open (one room per player); retrying",
                     S().link.LastError().empty() ? "refused" : S().link.LastError().c_str());
@@ -1867,8 +1907,18 @@ std::string PlainName(const std::string& network_id) {
     return network_id.substr(0, n - 5);
 }
 
+void Shutdown() {
+    static std::atomic<bool> done{false};
+    if (!S().started.load() || done.exchange(true)) return;
+    if (S().link.Connected()) Log("leaving the room: this game is closing");
+    S().link.Stop();
+    SetVoice(false);
+}
+
 void Start(int game_p2p_port) {
+    BbOnlineGate::MarkLive("seamless co-op");
     if (S().started.exchange(true)) return;
+    std::atexit(Shutdown);
     if (!S().game_port) S().game_port = game_p2p_port;
     S().host = IsHost();
     S().player = PlayerName();

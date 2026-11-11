@@ -11,6 +11,8 @@
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
+#include <cstring>
+extern "C" int runtime_memory_vma_info(std::uintptr_t address, int* prot, int* type, std::uintptr_t* end);
 #endif
 
 namespace BbPlatform {
@@ -73,7 +75,17 @@ inline std::size_t CaptureStack(void** frames, std::size_t count) {
 
 inline bool ReadProcessMemory(const void* source, void* destination, std::size_t size) {
     iovec local{destination, size}, remote{const_cast<void*>(source), size};
-    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size);
+    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size)) {
+        return true;
+    }
+    int prot = 0, type = 0;
+    std::uintptr_t end = 0;
+    const auto at = reinterpret_cast<std::uintptr_t>(source);
+    if (!at || !runtime_memory_vma_info(at, &prot, &type, &end) || end < at + size) {
+        return false;
+    }
+    std::memcpy(destination, source, size);
+    return true;
 }
 
 inline int ThreadCpuClock() {

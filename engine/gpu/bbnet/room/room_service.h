@@ -68,6 +68,7 @@ bool Kick(int slot);
 std::string NetworkId();
 std::string PlainName(const std::string& network_id);
 bool LeaveParty();
+void Shutdown();
 bool IsDevSlot(int slot);
 void SetOpenRoom(bool on);
 bool OpenRoomAllowed();

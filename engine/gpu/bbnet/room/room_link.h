@@ -17,7 +17,7 @@
 namespace BbRoom {
 
 struct Event {
-    enum class Kind { Connected, Joined, Left, Host, Data, Disconnected, Refused, GaveUp, Announcement, Visitor };
+    enum class Kind { Connected, Joined, Left, Host, Data, Disconnected, Refused, GaveUp, Announcement, Visitor, Away };
     Kind kind = Kind::Data;
     int slot = 0;
     std::vector<std::uint8_t> data;
@@ -74,6 +74,8 @@ private:
     std::atomic<bool> visitor_{false};
     std::atomic<bool> want_open_{false};
     std::atomic<bool> open_listed_{false};
+    std::atomic<bool> full_{false};
+    std::atomic<int> full_most_{kMaxMembers};
     std::string name_;
     std::string password_;
     mutable std::mutex mutex_;

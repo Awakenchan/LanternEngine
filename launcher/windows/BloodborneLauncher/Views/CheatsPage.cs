@@ -37,9 +37,9 @@ namespace BloodborneLauncher.Views
                 IsClosable = false,
                 Severity = InfoBarSeverity.Informational,
                 Margin = new Thickness(0, 14, 0, 0),
-                Title = L.T("Off while playing online"),
-                Message = L.T("Play online is on: every cheat stays off in online sessions, so other players never meet them. ") +
-                          L.T("Turn Play online off and they work again; what you pick here is kept."),
+                Title = L.T("Off while Play online or seamless co-op is on"),
+                Message = L.T("Play online or seamless co-op is on: every cheat stays off in online and seamless co-op sessions, so other players never meet them. ") +
+                          L.T("Turn both off and they work again; what you pick here is kept."),
             };
             Body.Children.Add(_online);
 
@@ -111,7 +111,7 @@ namespace BloodborneLauncher.Views
         public override void OnShown()
         {
             _engine.IsOpen = !Supported;
-            _online.IsOpen = Ini.Get("online_enabled") == "1" && !HuntersDream.OnlinePaused;
+            _online.IsOpen = Ini.Get("seamless_enabled") == "1" || (Ini.Get("online_enabled") == "1" && !HuntersDream.OnlinePaused);
         }
     }
 }

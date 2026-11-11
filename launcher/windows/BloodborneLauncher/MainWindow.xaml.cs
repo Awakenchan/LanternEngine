@@ -32,12 +32,14 @@ namespace BloodborneLauncher
             ws.GameStateChanged += UpdateDiscord;
             ws.GameCrashed += OnGameCrashed;
             ws.SignInRefused += OnSignInRefused;
+            ws.SeamlessRefused += reason => Prompt.Tell(L.T("Seamless co-op"), reason);
             ws.Initialise();
             // The settings are read by Initialise: the saved window placement comes after it.
             RestoreWindowPlacement(ws.Settings);
             KeyDown += Window_KeyDown;
             PreviewMouseDown += Window_PreviewMouseDown;
             Deactivated += (_, _) => SearchResults.Visibility = Visibility.Collapsed;
+            Activated += (_, _) => { if (ws.SettingsChangedOutside()) ReloadPages(); };
 
             // Layout, read once at start (Settings › Layout restarts the launcher to switch).
             var args = Environment.GetCommandLineArgs();
@@ -1160,7 +1162,22 @@ namespace BloodborneLauncher
                 Show("online");
                 return;
             }
-            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1" && !SuperMedo.Selected(ini) && ini.Get("online_pool") != "huntersdream")
+            var seamlessRoom = ini.Get("seamless_enabled") == "1";
+            if (seamlessRoom)
+            {
+                var host = ini.Get("seamless_role", "guest") == "host";
+                var direct = ini.Get("seamless_direct") == "1";
+                var missing = direct ? !host && ini.Get("seamless_direct_host").Length == 0 : ini.Get("seamless_room").Length == 0;
+                if (missing)
+                {
+                    Prompt.Tell(L.T("Seamless co-op"), host
+                        ? L.T("Open the Online page once so the launcher makes your room's invite code, then press Play.")
+                        : L.T("Paste the host's invite code on the Online page, then press Play."));
+                    Show("online");
+                    return;
+                }
+            }
+            if (!HuntersDream.OnlinePaused && !seamlessRoom && ini.Get("online_enabled") == "1" && !SuperMedo.Selected(ini) && ini.Get("online_pool") != "huntersdream")
             {
                 // Online play is The Hunter's Dream's: without its account the engine stays offline.
                 Prompt.Tell(L.T("Online"), L.T("Connect your Hunter's Dream account on the Online page first (with Discord, or without it).") +
@@ -1323,9 +1340,29 @@ namespace BloodborneLauncher
             // bbport: the current profile has no saves, but saves were found elsewhere (a folder used
             // before, or SaveGuard's safety copies): asked before the game starts a new one.
             var savesRoot = GameEnvironment.SavesRoot(s);
+            var asked = false;
+            if (SavesFolder.Moved(s.Str("user_dir"), s.Str(SavesFolder.LastRootKey), savesRoot) is { } lastRoot)
+            {
+                asked = true;
+                var here = SavesFolder.Full(savesRoot);
+                var choice = Prompt.Choose(L.T("A different saves folder"),
+                    L.F($"The last start played with the saves in {lastRoot}.\n\n") +
+                    L.F($"This start would use {here}: this copy of Lantern Engine's own folder, because the Saves page names no folder.\n\n") +
+                    L.T("\"Use the last folder\" keeps playing with the saves from the last start and sets it on the Saves page. \"Use this copy's folder\" plays with the saves here; the other folder stays as it is."),
+                    L.T("Cancel"), L.T("Use this copy's folder"), L.T("Use the last folder"));
+                if (choice <= 0) return;
+                if (choice == 2)
+                {
+                    s.Set("user_dir", lastRoot);
+                    ws.SaveNow();
+                    ws.Log(L.F($"Saves folder: {lastRoot}"), LogLevel.Good);
+                    ReloadPages();
+                    savesRoot = GameEnvironment.SavesRoot(s);
+                }
+            }
             var savesProfile = PlayerProfiles.Current(s);
             var packageSaves = System.IO.Path.Combine(Paths.DataDir, "user");
-            var lost = await System.Threading.Tasks.Task.Run(() => SaveGuard.Elsewhere(savesRoot, savesProfile, new[] { packageSaves }));
+            var lost = asked ? new List<SaveGuard.Found>() : await System.Threading.Tasks.Task.Run(() => SaveGuard.Elsewhere(savesRoot, savesProfile, new[] { packageSaves }));
             if (lost.FirstOrDefault() is { } foundSaves)
             {
                 var (start, changed) = SaveGuard.Ask(s, foundSaves, Prompt.Choose, Prompt.Tell);

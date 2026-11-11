@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "patches.h"
+#include "online_rules.h"
 #include "elf.h"
 #include "toml_patch.h"
 #include "xml.h"
@@ -468,6 +469,14 @@ bool BreaksOnline(const Writes& writes) {
                        [](const Write& w) { return w.first < end && start < w.first + w.second.size(); });
 }
 
+bool CheatOnline(const std::string& name) {
+    if (Env("BB_ONLINE", "") != "1" && Env("BB_NET_BACKEND", "").empty()) return false;
+    const std::string bare = name.rfind('/') == std::string::npos ? name : name.substr(name.rfind('/') + 1);
+    if (!OnlineRules::CheatLike(bare)) return false;
+    Log("Patches: skipped %s while playing online or in seamless co-op: cheats are off online", name.c_str());
+    return true;
+}
+
 void SkipForOnline(const std::string& key) {
     Log("Patches: skipped %s while online is on: it moves the game to a region with no Bloodborne server (Play "
         "online would fail); it applies again with online off",
@@ -613,6 +622,7 @@ Writes CompileExternal(const std::vector<External>& selected, const Segments& se
             Log("Patches: skipped %s: %s", patch.key.c_str(), error.what());
             continue;
         }
+        if (CheatOnline(patch.key)) continue;
         if (BreaksOnline(ours)) {
             SkipForOnline(patch.key);
             continue;
@@ -761,6 +771,7 @@ PatchResult CompilePatches(const PatchRequest& request) {
     {
         std::vector<std::string> kept;
         for (const std::string& n : names) {
+            if (CheatOnline(n)) continue;
             if (BreaksOnline(xml.Compile({n}, app_version, segments))) {
                 SkipForOnline(n);
                 continue;
@@ -813,7 +824,9 @@ PatchResult CompilePatches(const PatchRequest& request) {
     }
     {
         const bool large_scene = size && std::int64_t(size->w) * size->h > std::int64_t(kOutput.w) * kOutput.h;
-        const bool needs = large_scene || std::find(names.begin(), names.end(), "Model LOD -2 (Highest)") != names.end() ||
+        const bool mod_models = std::strtoull(Env("BB_MOD_MODELS", "0").c_str(), nullptr, 10) > 0;
+        const bool needs = large_scene || mod_models ||
+                           std::find(names.begin(), names.end(), "Model LOD -2 (Highest)") != names.end() ||
                            std::find(names.begin(), names.end(), "Enable Screen Space Reflections (READ NOTE)") != names.end();
         const std::uint64_t commit = CommitLimitMb();
         const auto dmem = Env("BB_DMEM_MB");
@@ -821,8 +834,8 @@ PatchResult CompilePatches(const PatchRequest& request) {
         if (Env("BB_GAME_HEAPS", "") == "0")
             keep = "BB_GAME_HEAPS=0";
         else if (!needs && Env("BB_GAME_HEAPS", "") != "1")
-            keep = "a 1080p or smaller scene without highest model detail or screen space reflections fits them; "
-                   "BB_GAME_HEAPS=1 enlarges them";
+            keep = "a 1080p or smaller scene without highest model detail, screen space reflections or mod models fits "
+                   "them; BB_GAME_HEAPS=1 enlarges them";
         else if (dmem && std::strtoull(dmem->c_str(), nullptr, 10) < 9152)
             keep = "BB_DMEM_MB=" + *dmem;
         else if (commit && commit < 16384)

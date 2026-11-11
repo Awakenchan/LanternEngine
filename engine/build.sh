@@ -99,7 +99,9 @@ if [[ ! -f out/gpu/build.ninja || $(cat out/gpu/bb-configure.txt 2>/dev/null) !=
 fi
 echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}, march ${BB_MARCH:-default}"
 # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
-if ! ninja -C out/gpu ${BB_JOBS:+-j "$BB_JOBS"} bbgpu bb-engine-assets bb-ui-4k bb-shader-lab > out/gpu-build.log 2>&1; then
+lab_target=
+if [[ ${BB_SHADER_LAB:-} == 1 || ! -f out/gpu/bb-shader-lab.exe && ! -f out/gpu/bb-shader-lab ]]; then lab_target=bb-shader-lab; fi
+if ! ninja -C out/gpu ${BB_JOBS:+-j "$BB_JOBS"} bbgpu bb-engine-assets bb-ui-4k $lab_target > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
 fi
@@ -128,6 +130,7 @@ gpu_cache_sources | grep -v -E 'vk_(graphics|compute)_pipeline\.cpp$|vk_pipeline
 # The identity as earlier engines computed it (whole files): a cache stamped with it for these same
 # sources is kept and stamped again with the new one.
 gpu_cache_sources | xargs cat | sha256sum | cut -c1-16 > out/gpu-cache.legacy.id
+cp -f gpu-cache.accepted.id out/gpu-cache.accepted.id
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/host.c src/wait_stats.c src/blocked.c src/sys/*.c)
@@ -215,6 +218,22 @@ if [[ ${1:-} == --test ]]; then
     out/gx-records-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_draw_tokens.cpp -o out/draw-tokens-test
     out/draw-tokens-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_const_census.cpp -o out/const-census-test
+    out/const-census-test
+    "${CXX:-clang++}" -std=c++20 -O2 -Wall -Wextra -Werror -I. tests/test_ring_constants.cpp -o out/ring-constants-test
+    out/ring-constants-test --bench
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_batch.cpp -o out/batch-test
+    out/batch-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_frame_gen_cap.cpp -o out/frame-gen-cap-test
+    out/frame-gen-cap-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror "${threads[@]}" -I. tests/test_gx_sealed.cpp -o out/gx-sealed-test
+    out/gx-sealed-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Wno-unused-parameter -I. -iquote gpu/bbnet/vendor/bbhost_shim tests/test_thd_signal.cpp gpu/bbnet/vendor/bbhost/np_signaling.cpp $([[ -n $windows ]] && echo -lws2_32) -o out/thd-signal-test
+    out/thd-signal-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_online_gate.cpp -o out/online-gate-test
+    out/online-gate-test
+    "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_gpu_cache_stamp.cpp -o out/gpu-cache-stamp-test
+    out/gpu-cache-stamp-test
     "${CXX:-clang++}" -std=c++20 -O1 -Wall -Wextra -Werror "${threads[@]}" -I. tests/test_scene_proxy_release.cpp "${test_link[@]}" -o out/scene-proxy-release-test
     out/scene-proxy-release-test
     "$CC" "${cstd[@]}" -O2 -g -Wall -Wextra -Werror "${threads[@]}" "${includes[@]}" -I. -Isrc tests/test_sys_mutex.c "${sys_tests[@]}" out/libatrac9.a -lm "${libraries[@]}" "${test_link[@]}" -o out/sys-mutex-test

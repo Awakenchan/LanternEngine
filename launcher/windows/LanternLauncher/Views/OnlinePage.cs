@@ -24,6 +24,8 @@ namespace BloodborneLauncher.Views
             Group(L.T("Play"));
             _online = ToggleRow(SymbolRegular.Globe24, L.T("Play online"), L.T("Off: the game stays offline"),
                 () => Ini.Get("online_enabled") == "1", v => Ini.Set("online_enabled", v ? "1" : "0"));
+            Add(Card(SymbolRegular.Info24, L.T("Online rules"), OnlineStatus.RulesNote, null, out _rulesHint));
+            ShowRules();
 
             Group(L.T("Seamless co-op"));
             Body.Children.Add(Text(L.T("Seamless co-op is still being worked on: expect bugs, and report them in #issues on our Discord."), "Faint"));
@@ -90,6 +92,8 @@ namespace BloodborneLauncher.Views
             Group(L.T("The Hunter's Dream account"));
             _hdButton = SmallButton(L.T("Connect"), SymbolRegular.Person24, async (_, _) => await LinkAsync());
             Add(Card(SymbolRegular.PersonAccounts24, L.T("Hunter's Dream account"), null, _hdButton, out _hdHint));
+            _signInRetry = SmallButton(L.T("Retry"), SymbolRegular.ArrowClockwise24, async (_, _) => await CheckSignInAsync());
+            _signInRow = Add(Card(SymbolRegular.ShieldCheckmark24, L.T("Sign-in"), null, _signInRetry, out _signInHint));
             ShowLink();
             for (var i = hdFrom; i < Body.Children.Count; i++) _hdOnly.Add(Body.Children[i]);
 
@@ -129,6 +133,7 @@ namespace BloodborneLauncher.Views
             var medo = SuperMedo.Selected(Ini);
             foreach (var element in _hdOnly) element.IsVisible = !medo;
             foreach (var element in _smOnly) element.IsVisible = medo;
+            _signInRow.IsVisible = !medo && Linked;
             foreach (var frame in Body.Children.OfType<Border>())
                 if (frame.Child is Panel box && box.Children.Count > 0)
                     frame.IsVisible = box.Children.Any(c => c.IsVisible);
@@ -289,10 +294,47 @@ namespace BloodborneLauncher.Views
         private readonly TextBlock _hdHint;
         private CancellationTokenSource? _linking;
 
+        private readonly TextBlock _rulesHint;
+        private readonly AppButton _signInRetry;
+        private readonly SettingRow _signInRow;
+        private readonly TextBlock _signInHint;
+        private int _signInCheck;
+
+        private bool Linked => S.Str("hd_name").Length > 0 && S.HuntersDreamToken.Length > 0;
+
+        private void ShowRules() => SetHint(_rulesHint, OnlineStatus.RulesLine());
+
+        private static bool _signInChecked;
+
+        private async Task CheckSignInAsync()
+        {
+            var check = ++_signInCheck;
+            ShowSignIn(null);
+            var token = S.HuntersDreamToken;
+            if (!Linked || SuperMedo.Selected(Ini))
+            {
+                _signInRetry.IsEnabled = true;
+                return;
+            }
+            _signInRetry.IsEnabled = false;
+            var state = await HuntersDream.WhoAmIAsync(token, CancellationToken.None);
+            if (check != _signInCheck) return;
+            _signInRetry.IsEnabled = true;
+            ShowSignIn(state);
+        }
+
+        private void ShowSignIn(OnlineStatus.SignInState? state)
+        {
+            SetHint(_signInHint, OnlineStatus.SignInLine(state));
+            _signInHint.SetResourceReference(TextBlock.ForegroundProperty,
+                state?.State == OnlineStatus.SignIn.Expired ? "WarningTextBrush" : "TextFillColorTertiaryBrush");
+        }
+
         private void ShowLink()
         {
             var name = S.Str("hd_name");
             var linked = name.Length > 0 && S.HuntersDreamToken.Length > 0;
+            _signInRow.IsVisible = linked && !SuperMedo.Selected(Ini);
             var refused = linked ? S.HuntersDreamRefused : "";
             SetHint(_hdHint, !linked ? L.T("Not connected. Connect with Discord, or create an account here without it")
                 : refused.Length > 0 ? L.F($"The Hunter's Dream refused the sign-in as {name} ({refused}). Sign in again: until then nobody can summon or invite you")
@@ -335,6 +377,7 @@ namespace BloodborneLauncher.Views
             finally
             {
                 ShowLink();
+                _ = CheckSignInAsync();
             }
         }
 
@@ -354,6 +397,7 @@ namespace BloodborneLauncher.Views
                 Ws.SaveNow();
                 Ws.Log(L.T("The Hunter's Dream: disconnected"), LogLevel.Info);
                 ShowLink();
+                _ = CheckSignInAsync();
                 return;
             }
             var how = Prompt.Choose(L.T("The Hunter's Dream account"),
@@ -391,6 +435,7 @@ namespace BloodborneLauncher.Views
                 _linking.Dispose();
                 _linking = null;
                 ShowLink();
+                _ = CheckSignInAsync();
             }
         }
 
@@ -401,6 +446,8 @@ namespace BloodborneLauncher.Views
         {
             _online.IsChecked = Ini.Get("online_enabled") == "1";
             if (_linking is null) ShowLink();
+            ShowRules();
+            if (_linking is null && !_signInChecked) { _signInChecked = true; _ = CheckSignInAsync(); }
             ShowRoom();
         }
 

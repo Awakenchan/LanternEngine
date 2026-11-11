@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "online_fixes.h"
+#include "seamless_party.h"
 #include "engine_hooks.h"
 #include "shared_progress.h"
 #include "boss_rewards.h"
@@ -81,6 +82,24 @@ std::int64_t __attribute__((sysv_abi)) BeforeCharacterStep(std::uint64_t, const 
         Say("character id %llu", static_cast<unsigned long long>(id));
     }
     return 0;
+}
+
+constexpr std::size_t kMatchingRegion = 0x1c8af63;
+constexpr std::uint8_t kMatchingRegionGame[] = {0xc6, 0x43, 0x0f, 0x00};
+constexpr std::uint8_t kMatchingRegionWorldwide[] = {0xc6, 0x43, 0x0f, 0x01};
+
+bool MatchingWorldwide(std::uint8_t* image, std::size_t size) {
+    if (const char* e = std::getenv("BB_MATCHING_REGION"); e && std::strcmp(e, "game") == 0) {
+        Say("network: Matching Regions starts where the game has it (BB_MATCHING_REGION=game)");
+        return false;
+    }
+    if (!Matches(image, size, kMatchingRegion, kMatchingRegionGame, sizeof kMatchingRegionGame)) {
+        Say("network: Matching Regions' default is not the expected code; left as it is");
+        return false;
+    }
+    WriteCode(image + kMatchingRegion, kMatchingRegionWorldwide, sizeof kMatchingRegionWorldwide);
+    Say("network: Matching Regions starts at Worldwide, as bbhost 0.2.31 (BB_MATCHING_REGION=game keeps the game's)");
+    return true;
 }
 
 bool FixCharacterId(std::uint8_t* image, std::size_t size) {
@@ -212,8 +231,10 @@ constexpr std::uint8_t kBossCountCallBytes[] = {0xe8, 0x94, 0xea, 0xdf, 0xff};
 constexpr std::size_t kDopingBranch = 0x138bcbf;
 constexpr std::uint8_t kDopingOriginal[] = {0x83, 0xf8, 0x02, 0x75, 0x32};
 constexpr std::uint8_t kDopingPatched[] = {0x83, 0xf8, 0x02, 0x7c, 0x32};
+constexpr std::size_t kSignCoopCap = 0x1871259;
+constexpr std::uint8_t kSignCoopCapOriginal[] = {0x41, 0xc7, 0x86, 0xfc, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00};
+constexpr std::uint8_t kSignCoopCapPatched[] = {0x41, 0xc7, 0x86, 0xfc, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00};
 constexpr int kCoopKinds[] = {7, 1, 0x15, 0x16, 0x17};
-constexpr int kMaxCooperators = 3;
 
 std::uint8_t* g_image = nullptr;
 thread_local bool g_in_summary = false;
@@ -230,10 +251,41 @@ std::int64_t __attribute__((sysv_abi)) OnSlotSummary(std::uint64_t, const std::u
         int cooperators = 0;
         for (const int kind : kCoopKinds)
             cooperators += static_cast<std::int32_t>(Call(reinterpret_cast<std::uint64_t>(g_image + kKindCount), selector, kind));
-        if (cooperators < kMaxCooperators) *reinterpret_cast<std::int32_t*>(out + 4) = 0;
+        if (BbParty::SlotOpen(cooperators)) *reinterpret_cast<std::int32_t*>(out + 4) = 0;
     }
     const_cast<std::uint64_t*>(saved)[-1] = static_cast<std::uint64_t>(result);
     return 1;
+}
+
+constexpr std::size_t kApplySpEffect = 0x18c6db0;
+constexpr std::uint8_t kApplySpEffectEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
+                                                0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28};
+constexpr std::size_t kEventSpEffectReturn = 0x17bcaea;
+constexpr std::uint8_t kEventSpEffectCall[] = {0xff, 0x93, 0xf0, 0x03, 0x00, 0x00};
+constexpr std::size_t kSpEffectRowLookup = 0x1f28aa0;
+std::atomic<int> g_real_cooperators{0};
+thread_local bool g_in_apply = false;
+
+bool SpEffectRowPresent(int id) {
+    alignas(16) std::uint64_t out[2] = {};
+    Call(reinterpret_cast<std::uint64_t>(g_image + kSpEffectRowLookup), reinterpret_cast<std::uint64_t>(out),
+         static_cast<std::uint64_t>(id));
+    return out[1] != 0;
+}
+
+std::int64_t __attribute__((sysv_abi)) OnApplySpEffect(std::uint64_t, const std::uint64_t* saved) {
+    if (g_in_apply || saved[6] != reinterpret_cast<std::uint64_t>(g_image + kEventSpEffectReturn)) return 0;
+    if (static_cast<std::int32_t>(saved[1]) != 0 || static_cast<std::int32_t>(saved[4]) != BbParty::kDopingTwo) return 0;
+    const int cooperators = g_real_cooperators.load();
+    if (cooperators <= 2) return 0;
+    g_in_apply = true;
+    const bool rows = SpEffectRowPresent(BbParty::kDopingOne + 2) && SpEffectRowPresent(BbParty::kDopingMax);
+    g_in_apply = false;
+    const int row = BbParty::DopingRow(cooperators, rows);
+    Say("seamless: boss scaling: %d cooperators, row %d%s", cooperators, row,
+        rows ? "" : " (the game's 3 and 4 cooperator rows are missing: kept the 2 row)");
+    const_cast<std::uint64_t*>(saved)[4] = static_cast<std::uint64_t>(row);
+    return 0;
 }
 
 std::int64_t __attribute__((sysv_abi)) OnCoopCount(std::uint64_t, const std::uint64_t* saved) {
@@ -243,15 +295,17 @@ std::int64_t __attribute__((sysv_abi)) OnCoopCount(std::uint64_t, const std::uin
     const std::int64_t count = static_cast<std::int32_t>(
         Call(reinterpret_cast<std::uint64_t>(g_image + kCoopCount), saved[5], saved[4], saved[3]));
     g_in_coop_count = false;
-    const_cast<std::uint64_t*>(saved)[-1] = static_cast<std::uint64_t>(std::min<std::int64_t>(count, 2));
+    g_real_cooperators.store(static_cast<int>(count));
+    const_cast<std::uint64_t*>(saved)[-1] = static_cast<std::uint64_t>(BbParty::BossCount(count));
     return 1;
 }
 
-bool FourPlayers(std::uint8_t* image, std::size_t size) {
+bool FivePlayers(std::uint8_t* image, std::size_t size) {
     if (!Matches(image, size, kKindCount, kKindCountEntry, sizeof kKindCountEntry) ||
         !Matches(image, size, kBossCountCall, kBossCountCallBytes, sizeof kBossCountCallBytes) ||
-        !Matches(image, size, kDopingBranch, kDopingOriginal, sizeof kDopingOriginal)) {
-        Say("seamless: 4 players in one world left off: the game's code there is not 1.09's");
+        !Matches(image, size, kDopingBranch, kDopingOriginal, sizeof kDopingOriginal) ||
+        !Matches(image, size, kSignCoopCap, kSignCoopCapOriginal, sizeof kSignCoopCapOriginal)) {
+        Say("seamless: 5 players in one world left off: the game's code there is not 1.09's");
         return false;
     }
     g_image = image;
@@ -260,12 +314,22 @@ bool FourPlayers(std::uint8_t* image, std::size_t size) {
         !Prepare(hooks[1], image, size, kCoopCount, kCoopCountEntry, OnCoopCount)) {
         Discard(hooks[0]);
         Discard(hooks[1]);
-        Say("seamless: 4 players in one world left off: the game's code there is not 1.09's");
+        Say("seamless: 5 players in one world left off: the game's code there is not 1.09's");
         return false;
     }
     Commit(std::span(hooks, 2));
+    Hook scaling{};
+    if (Matches(image, size, kEventSpEffectReturn - sizeof kEventSpEffectCall, kEventSpEffectCall, sizeof kEventSpEffectCall) &&
+        Prepare(scaling, image, size, kApplySpEffect, kApplySpEffectEntry, OnApplySpEffect)) {
+        Commit(std::span(&scaling, 1));
+        Say("seamless: bosses scale with the game's own rows for 3 and 4 cooperators (2.5x and 3.0x health)");
+    } else {
+        Discard(scaling);
+        Say("seamless: boss scaling for 3 and 4 cooperators left off: the game's code there is not 1.09's");
+    }
     WriteCode(image + kDopingBranch, kDopingPatched, sizeof kDopingPatched);
-    Say("seamless: up to 4 players in one world (host and 3 cooperators); bosses scale as for 2 cooperators beyond 2");
+    WriteCode(image + kSignCoopCap, kSignCoopCapPatched, sizeof kSignCoopCapPatched);
+    Say("seamless: up to 5 players in one world (host and 4 cooperators); bosses scale as for 2 cooperators beyond 2");
     return true;
 }
 
@@ -2410,11 +2474,13 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const char* online = std::getenv("BB_ONLINE");
     if (!online || std::strcmp(online, "1") != 0) return false;
     bool any = FixCharacterId(image, size);
+    if (const char* backend = std::getenv("BB_NET_BACKEND"); backend && std::strcmp(backend, "thd") == 0)
+        any = MatchingWorldwide(image, size) || any;
     if (const char* backend = std::getenv("BB_NET_BACKEND"); backend && std::strcmp(backend, "room") == 0) {
         g_image = image;
         any = BellRules(image, size) || any;
         BellTrace(image, size);
-        any = FourPlayers(image, size) || any;
+        any = FivePlayers(image, size) || any;
         any = DeathRules(image, size) || any;
         any = LampTravel(image, size) || any;
         any = PersonalWorld(image, size) || any;
@@ -3609,9 +3675,9 @@ void SummonTick(int role) {
     }
     if (!g_summon.load()) return;
     if (BbRoom::IsHost()) {
-        if (InWorld().size() >= 3) {
+        if (BbParty::Full(InWorld().size())) {
             g_summon = false;
-            Say("seamless: the party is full (4 hunters): summoning stopped");
+            Say("seamless: the party is full (5 hunters): summoning stopped");
             return;
         }
         if (role != kRoleClient && Settled(settled, now, kPanelSettle) && now - rang >= kPanelRingEvery) {

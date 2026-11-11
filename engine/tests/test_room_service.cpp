@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -268,8 +269,9 @@ int Host(int game_port, int http_port) {
     if (!BbRoom::Call("/mp/matching2/create_room", {{"OnlineId", "HostHunter"}, {"MaxMembers", 4}}, reply, error, 8000) ||
         reply.value("ResKind", -1) != 0)
         return Fail("create_room");
+    if (reply.value("MaxMembers", 0) != 5) return Fail("the room should hold the host and four cooperators");
     const long long room = reply.value("RoomId", 0LL);
-    std::printf("host: room %lld\n", room);
+    std::printf("host: room %lld for 5 hunters\n", room);
     Json list;
     for (int i = 0; i < 60; ++i) {
         list = Game(http_port, "/summon_messenger/get", {{"SummonTypeList", Json::array({{{"SummonType", 7}}})}});
@@ -302,6 +304,19 @@ int Host(int game_port, int http_port) {
     if (ntohs(from.sin_port) != ev.value("Port", 0LL)) return Fail("datagram came from another port than the member's");
     ::sendto(udp, "back!", 5, 0, reinterpret_cast<sockaddr*>(&from), len);
     std::printf("host: P2P ok\n");
+    {
+        std::vector<char> big(65536);
+        bool signal = false, largest = false;
+        for (int i = 0; i < 40 && !(signal && largest); ++i) {
+            const int got = ::recvfrom(udp, big.data(), static_cast<int>(big.size()), 0, nullptr, nullptr);
+            if (got <= 0) break;
+            signal = signal || (got == 8 && std::memcmp(big.data(), "\xfe" "bbs" "sig!", 8) == 0);
+            largest = largest || (got == 65507 && big[0] == 'L' && big[65506] == 'L');
+        }
+        if (!signal) return Fail("no signaling datagram from the guest");
+        if (!largest) return Fail("no 65507-byte datagram from the guest");
+        std::printf("host: signaling datagram and a 65507-byte datagram arrived\n");
+    }
     if (!SwapVitals("HostHunter", "GuestHunter")) return Fail("no vitals from the guest");
     const Json found = Game(http_port, "/channel/search", FixedSearch());
     if (!found.is_object() || found["ChannelList"].size() != 1) return Fail("no fixed dungeon on the board");
@@ -365,6 +380,12 @@ int Guest(int game_port, int http_port, bool early) {
         socklen_t len = sizeof(from);
         const int n = ::recvfrom(udp, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&from), &len);
         if (n == 5 && std::string(buffer, 5) == "back!") {
+            ::sendto(udp, "\xfe" "bbs" "sig!", 8, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+            const std::vector<char> largest(65507, 'L');
+            for (int k = 0; k < 3; ++k) {
+                ::sendto(udp, largest.data(), static_cast<int>(largest.size()), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
             if (!SwapVitals("GuestHunter", "HostHunter")) return Fail("no vitals from the host");
             std::uint32_t lamp = 0;
             std::vector<std::uint8_t> world_flags;

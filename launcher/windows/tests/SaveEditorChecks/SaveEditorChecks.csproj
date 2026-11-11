@@ -11,5 +11,6 @@
     <Compile Include="../../BloodborneLauncher/Core/SaveWorld.cs" Link="SaveWorld.cs" />
     <Compile Include="../../BloodborneLauncher/Core/SaveCatalog.cs" Link="SaveCatalog.cs" />
     <Compile Include="../../BloodborneLauncher/Core/SaveStore.cs" Link="SaveStore.cs" />
+    <Compile Include="../../BloodborneLauncher/Core/SavesFolder.cs" Link="SavesFolder.cs" />
   </ItemGroup>
 </Project>

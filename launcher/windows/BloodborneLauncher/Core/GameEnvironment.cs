@@ -12,7 +12,7 @@ namespace BloodborneLauncher.Core
 
         /// <summary>The saves folder the player chose (or the package's user folder): the Main profile.</summary>
         public static string SavesRoot(LauncherSettings s) =>
-            s.Str("user_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : Path.Combine(Paths.DataDir, "user");
+            SavesFolder.Absolute(s.Str("user_dir") is { Length: > 0 } dir ? Paths.Expand(dir) : Path.Combine(Paths.DataDir, "user"));
 
         /// <summary>Where the game keeps saves and trophies: the current player profile's folder.</summary>
         public static string UserDir(LauncherSettings s) =>

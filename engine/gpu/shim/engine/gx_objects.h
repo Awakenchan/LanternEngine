@@ -62,5 +62,13 @@ std::uint32_t BufferVersion(std::uint64_t object);
 void TouchBuffer(std::uint64_t object);
 bool BuffersOwned();
 bool TakeUploadArena(std::uint64_t* base, std::uint64_t* bytes);
+bool UploadArena(std::uint64_t* base, std::uint64_t* bytes);
+bool BufferAt(std::uint64_t address);
+bool SealingOn();
+bool SealedFind(std::uint64_t address, std::uint64_t size, std::uint32_t* id, std::uint32_t* generation, std::uint64_t* base);
+bool SealedValid(std::uint32_t id, std::uint32_t generation);
+void NoteCpuWrite(std::uint64_t address, std::uint64_t size);
+void NoteGpuWrite(std::uint64_t address, std::uint64_t size);
+void RetireSealed(std::uint64_t address, std::uint64_t size);
 void Report();
 }

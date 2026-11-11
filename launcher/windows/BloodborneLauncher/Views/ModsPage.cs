@@ -39,6 +39,7 @@ namespace BloodborneLauncher.Views
             Body.Children.Add(Text(L.T("shadPS4-format XML patches for version 01.09 from the patches folder, and the port's built-in ") +
                                    L.T("ones (Bloodborne.xml, off until you switch them on; frame rate, effects and resolution have their own ") +
                                    L.T("settings). Put your own patches in a file of their own: Bloodborne.xml is replaced on every update."), "Faint"));
+            Body.Children.Add(Text(L.T("Player No Dead, Player Stealth, Player Silent, Enemy Control and Restore Debug Menu are off while Play online or seamless co-op is on."), "Faint"));
             Add(Card(SymbolRegular.Folder24, L.T("Patches folder"), "", Row(
                 SmallButton(L.T("Browse"), SymbolRegular.FolderOpen24, (_, _) =>
                 {
@@ -156,7 +157,8 @@ namespace BloodborneLauncher.Views
             if (read != _patchReads) return;
             _patches = patches;
             SetHint(_patchesHint, _patches.Count == 0 ? L.F($"{dir} — no patches") : dir);
-            var shown = string.Join("\u0001", _patches.Select(p => $"{p.Patch.Key}|{p.Patch.Name}|{p.Patch.File}|{p.Patch.Author}|{p.Patch.Note}={p.On}"));
+            var cheatsOff = Ini.Get("seamless_enabled") == "1" || (Ini.Get("online_enabled") == "1" && !HuntersDream.OnlinePaused);
+            var shown = string.Join("\u0001", _patches.Select(p => $"{p.Patch.Key}|{p.Patch.Name}|{p.Patch.File}|{p.Patch.Author}|{p.Patch.Note}={p.On}")) + (cheatsOff ? "\u0002" : "");
             if (shown == _patchesShown) return;
             _patchesShown = shown;
 
@@ -180,7 +182,8 @@ namespace BloodborneLauncher.Views
                 };
                 var source = patch.File + (patch.Author.Length > 0 ? L.F($" · by {patch.Author}") : "");
                 var hint = patch.Note.Length > 0 ? patch.Note + "\n\n" + source : source;
-                var card = Card(SymbolRegular.DocumentText24, patch.Name, hint, toggle, out _);
+                var card = Card(SymbolRegular.DocumentText24, patch.Name, hint, toggle, out var note);
+                if (cheatsOff && OnlineStatus.CheatLike(patch.Key)) SetHint(note, OnlineStatus.CheatLikeNote);
                 card.Margin = new Thickness(24, 0, 0, 4);
                 if (patch.Note.Length > 0)
                     card.ToolTip = patch.Note;

@@ -23,6 +23,7 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/platform.h"
 #include "imgui/renderer/imgui_core.h"
+#include "lantern_frame_gen_cap.h"
 #include "lantern_frame_report.h"
 #include "lantern_pacing.h"
 #include "sdl_window.h"
@@ -198,18 +199,23 @@ private:
             const char* fps = std::getenv("BB_FPS");
             return fps && std::string_view{fps} == "uncap";
         }();
+        static int delivered = 0;
         const auto& settings = BbSettings::Get();
         if (!variable_timestep || !settings.frame_gen_active.load(std::memory_order_relaxed)) {
+            delivered = 0;
             return base;
         }
-        const u32 shown = u32(std::clamp(settings.frame_gen_multiplier.load(std::memory_order_relaxed), 2,
-                                         BbSettings::FrameGenFramesMax + 1));
-        u32 limit = base / shown;
-        const u32 refresh_share = Frontend::DisplayRefreshHz() / shown;
-        if (refresh_share >= 20 && settings.frame_gen_cap.load(std::memory_order_relaxed)) {
-            limit = limit == 0 ? refresh_share : std::min(limit, refresh_share);
-        }
-        return limit == 0 ? base : limit;
+        const int asked = std::clamp(settings.frame_gen_multiplier.load(std::memory_order_relaxed), 2,
+                                     BbSettings::FrameGenFramesMax + 1);
+        const bool dynamic = settings.frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenDlss &&
+                             settings.frame_gen_dynamic.load(std::memory_order_relaxed) &&
+                             settings.dlss_fg_dynamic_supported.load(std::memory_order_relaxed) &&
+                             settings.frame_gen_frames.load(std::memory_order_relaxed) > 1;
+        delivered = LanternFrameGenCap::DeliveredMultiplier(
+            asked, dynamic, settings.frame_gen_game_fps.load(std::memory_order_relaxed),
+            settings.frame_gen_shown_fps.load(std::memory_order_relaxed), delivered);
+        return LanternFrameGenCap::Limit(base, true, delivered, Frontend::DisplayRefreshHz(),
+                                         settings.frame_gen_cap.load(std::memory_order_relaxed));
     }
 
     static std::chrono::nanoseconds PeriodOf(u32 limit) {
@@ -277,7 +283,7 @@ private:
             const u32 wanted = LimitWithFrameGeneration(base_limit);
             if (wanted != limit) {
                 std::printf("VideoOut: frame limit %u FPS%s\n", wanted,
-                            wanted != base_limit ? " (frame generation: half the frames shown)" : "");
+                            wanted != base_limit ? " (frame generation: the delivered multiplier's share)" : "");
                 limit = wanted;
                 flips.SetPeriod(pace());
             }

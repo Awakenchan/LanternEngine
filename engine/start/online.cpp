@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "online.h"
+#include "online_rules.h"
 
 #include <nlohmann/json.hpp>
 
@@ -135,10 +136,22 @@ bool ConfigureHuntersDream(const std::map<std::string, std::string>& settings, c
         UnsetEnv(key);
     SetEnv("BB_ONLINE", "1");
     SetEnv("BB_NET_BACKEND", "thd");
+    if (Env("BB_THD_TRACE", "") == "1") SetEnv("BBHOST_NP_TRACE", "1");
     SetEnv("BB_THD_SERVER", base + ":" + std::to_string(kGameApiPort));
     SetEnv("BB_THD_AUTH", base);
-    const std::string ruleset = Trim(Setting(settings, "online_thd_ruleset").value_or(""));
-    SetEnv("BB_THD_RULESET", ruleset.empty() ? "vanilla" : ruleset);
+    std::vector<std::string> enabled;
+    try {
+        const auto chosen = nlohmann::json::parse(ReadText(Path(Env("BB_PATCHES_CONFIG", Utf8(data / "patches.json")))));
+        if (chosen.contains("enabled"))
+            for (const auto& key : chosen.at("enabled"))
+                if (key.is_string()) enabled.push_back(key.get<std::string>());
+    } catch (const std::exception&) {
+    }
+    const std::string typed = Trim(Setting(settings, "online_thd_ruleset").value_or(""));
+    const std::string ruleset = OnlineRules::Valid(typed) ? typed : OnlineRules::Ruleset(enabled, false);
+    SetEnv("BB_THD_RULESET", ruleset);
+    if (OnlineRules::Valid(typed)) Log("Online rules: %s (set by hand)", ruleset.c_str());
+    else Log("Online rules: %s (X-BBHost-Ruleset: %s); other rules share fewer bloodstains and messages", OnlineRules::Describe(enabled, false).c_str(), ruleset.c_str());
     SetEnv("BB_P2P_PORT", P2pPort(settings));
     SetEnv("SHADPS4_HTTP_HOST_OVERRIDES_JSON", Utf8(destination));
     SetSignTimeout(settings);

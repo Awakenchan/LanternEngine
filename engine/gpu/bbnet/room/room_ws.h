@@ -11,7 +11,12 @@
 
 namespace BbRoom {
 
-constexpr int kRoomProtocol = 16;
+constexpr int kRoomProtocol = 17;
+constexpr int kMaxMembers = 5;
+constexpr int kCloseFull = 4003;
+
+std::string VersionRefusal(int room, int own);
+std::string FullRefusal(int most = kMaxMembers);
 
 class WebSocket {
 public:
@@ -31,6 +36,8 @@ public:
     void WatchClosely() { watch_closely_ = true; }
     void Close();
     bool Open() const { return open_.load(); }
+    int CloseCode() const { return close_code_.load(); }
+    bool VersionRefused() const { return version_refused_; }
 
 private:
     struct Impl;
@@ -38,6 +45,8 @@ private:
     std::atomic<bool> open_{false};
     std::atomic<bool> closing_{false};
     std::atomic<bool> watch_closely_{false};
+    std::atomic<int> close_code_{0};
+    bool version_refused_ = false;
     std::mutex queue_mutex_;
     std::deque<std::vector<std::uint8_t>> queue_;
     std::deque<std::vector<std::uint8_t>> paced_;

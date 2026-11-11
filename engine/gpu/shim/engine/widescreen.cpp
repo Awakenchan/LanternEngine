@@ -135,13 +135,18 @@ bool Install(std::uint8_t* image, std::size_t size) {
         }
     }
     const float scales[] = {0.5f, -0.5f}, bounds[] = {float(kStageWidth), float(kStageHeight)};
+    const auto off = [](const char* what, std::size_t at) {
+        std::printf("Engine: widescreen off: %s at %zx is not 1.09's\n", what, at);
+        return false;
+    };
     for (const std::size_t at : kPlates)
-        if (!Matches(at, scales, sizeof scales)) return false;
-    if (!Matches(kBounds, bounds, sizeof bounds)) return false;
-    for (const auto& c : kLeftClips) if (!Matches(c.at, c.game.data(), c.n)) return false;
-    for (const auto& c : kTopClips) if (!Matches(c.at, c.game.data(), c.n)) return false;
+        if (!Matches(at, scales, sizeof scales)) return off("a UI plate scale", at);
+    if (!Matches(kBounds, bounds, sizeof bounds)) return off("the UI stage bounds", kBounds);
+    for (const auto& c : kLeftClips) if (!Matches(c.at, c.game.data(), c.n)) return off("a left clip", c.at);
+    for (const auto& c : kTopClips) if (!Matches(c.at, c.game.data(), c.n)) return off("a top clip", c.at);
     Hook hook;
-    if (!Prepare(hook, image, size, kCameraBlend, kCameraBlendEntry, BeforeCameraBlend)) return false;
+    if (!Prepare(hook, image, size, kCameraBlend, kCameraBlendEntry, BeforeCameraBlend))
+        return off("the camera blend entry", kCameraBlend);
     for (const auto& r : kStageReads) std::memcpy(image + r.at, Pinned(r, Native(r)).data(), 9);
     Commit(std::span(&hook, 1));
     g_installed = true;

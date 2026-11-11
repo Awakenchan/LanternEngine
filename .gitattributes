@@ -1,1 +1,2 @@
 *.patch -text
+engine/gpu/bbnet/vendor/bbhost/** -text

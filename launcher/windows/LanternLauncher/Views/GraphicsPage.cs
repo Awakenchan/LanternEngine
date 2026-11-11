@@ -21,7 +21,7 @@ namespace BloodborneLauncher.Views
             Group(L.T("Upscaler"));
             var windows = OperatingSystem.IsWindows();
             var fsr411 = windows ? Fsr4VkFound() : Fsr4VkFound() || Directory.Exists(Fsr411Dir());
-            if (windows && (Ini.Get("upscaler") is "fsr3" or "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411"))) Ini.Set("upscaler", "fsr");
+            if (windows && (Ini.Get("upscaler") is "fsr4" || (!fsr411 && Ini.Get("upscaler") == "fsr411"))) Ini.Set("upscaler", "fsr");
             if (!windows && Ini.Get("upscaler") is "fsr" or "xess") Ini.Set("upscaler", "fsr4");
             if (!windows && !fsr411 && Ini.Get("upscaler") == "fsr411") Ini.Set("upscaler", "fsr4");
             IniCombo(SymbolRegular.Sparkle24, L.T("Upscaler"), null,

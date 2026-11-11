@@ -3,6 +3,7 @@
 // the dispatcher that runs the game's callbacks, the peer table and the P2P port's STUN, relay
 // and hole punching. Adapted from droogie/bbhost src/net/{http,account,session,stun}.h (566184a).
 #pragma once
+#include "thd_signal.h"
 
 #include <cstdint>
 #include <functional>
@@ -56,8 +57,8 @@ long long IntOf(const Json& o, const char* key, long long dflt = 0);
 
 std::string NpBase();
 bool NpPost(const std::string& path, const Json& body, Json& out, std::string& error,
-            int timeout_ms = 8000);
-bool NpGet(const std::string& path, Json& out, std::string& error, int timeout_ms = 8000);
+            int timeout_ms = 5000);
+bool NpGet(const std::string& path, Json& out, std::string& error, int timeout_ms = 5000);
 
 // ---- the dispatcher: one guest thread, so the callbacks run where the game expects them.
 enum class Prio { Context = 0, Request = 1, Signaling = 2, RoomEvent = 3 };
@@ -144,6 +145,9 @@ std::string NpIdText(const void* npid);
 void SignalingPeerKnown(std::uint16_t member_id);
 void SignalingPeerDead(const std::string& online_id);
 void SignalingReset();
+void SignalingControl(const std::uint8_t* data, std::size_t len, std::uint32_t addr, std::uint16_t port_nbo);
+void P2pSignalSend(std::uint32_t addr, std::uint16_t port_host, const void* data, std::size_t len);
+void RegisterVendoredSignaling(Core::Loader::SymbolsResolver* sym);
 
 void RegisterNet(Core::Loader::SymbolsResolver* sym);
 void RegisterMatching2(Core::Loader::SymbolsResolver* sym);

@@ -7,6 +7,18 @@
 
 namespace BbRoom {
 
+std::vector<int> StaleTwins(const std::map<int, std::string>& names, const std::vector<int>& members, int joining) {
+    std::vector<int> out;
+    const auto own = names.find(joining);
+    if (own == names.end() || own->second.empty()) return out;
+    for (const int slot : members) {
+        if (slot == joining) continue;
+        const auto other = names.find(slot);
+        if (other != names.end() && other->second == own->second) out.push_back(slot);
+    }
+    return out;
+}
+
 void PartyStatus::Heard(int slot, Time now) {
     Peer& peer = peers_[slot];
     peer.heard = now;
@@ -18,6 +30,17 @@ void PartyStatus::Heard(int slot, Time now) {
 void PartyStatus::Named(int slot, const std::string& name, Time now) {
     const std::string clean = CleanAnnouncement(name);
     if (clean.empty()) return;
+    for (auto it = peers_.begin(); it != peers_.end();) {
+        const Peer& other = it->second;
+        const bool stale = other.silent || now - other.heard >= kSilentAfter;
+        if (it->first == slot || other.name != clean || !stale) {
+            ++it;
+            continue;
+        }
+        asks_.erase(it->first);
+        if (it->first == lamp_slot_) LampAskDone();
+        it = peers_.erase(it);
+    }
     Peer& peer = peers_[slot];
     const bool first = peer.name.empty();
     peer.name = clean;
@@ -51,6 +74,13 @@ void PartyStatus::Left(int slot, Time now) {
     const std::string name = it->second.name;
     peers_.erase(it);
     if (!name.empty()) AddLine(PartyLineKind::Left, name, now);
+}
+
+void PartyStatus::Away(int slot, Time now) {
+    const auto it = peers_.find(slot);
+    if (it == peers_.end() || it->second.silent) return;
+    it->second.silent = true;
+    it->second.heard = now - kSilentAfter;
 }
 
 void PartyStatus::OwnConnected(Time now) {

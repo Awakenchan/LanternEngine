@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -54,14 +55,13 @@ int Poll(pollfd* fds, std::size_t count, int timeout_ms) { return ::poll(fds, st
 
 using Clock = std::chrono::steady_clock;
 
-constexpr int kMaxMembers = 5;
-constexpr std::size_t kMaxFrame = 65536;
+constexpr std::size_t kMaxFrame = 65545;
 constexpr std::size_t kMaxPayload = 1 << 20;
 constexpr std::size_t kMaxHead = 8192;
 constexpr std::size_t kMaxSockets = 32;
 constexpr std::size_t kMaxQueued = 32u << 20;
 constexpr std::size_t kVoiceBacklog = 32768;
-constexpr std::size_t kLossyBacklog = 16384;
+constexpr std::size_t kLossyBacklog = 128 * 1024;
 constexpr std::uint8_t kLossyTarget = 0x80;
 constexpr auto kHandshakeTime = std::chrono::seconds(5);
 constexpr auto kAwayTime = std::chrono::seconds(120);
@@ -104,8 +104,30 @@ struct Peer {
 
 struct Away {
     std::string token;
-    Clock::time_point until{};
+    Clock::time_point since{}, until{};
 };
+
+const char* CloseReason(int code) {
+    switch (code) {
+    case kCloseFull: return "the room is full";
+    case 4004: return "voice for a room nobody is in";
+    case 4008: return "it sent too much for too long";
+    case 1002: return "a broken websocket frame";
+    case 1009: return "a message over the size limit";
+    default: return "closed by the room";
+    }
+}
+
+void Note(const char* format, ...) __attribute__((format(printf, 1, 2)));
+void Note(const char* format, ...) {
+    char text[512];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof text, format, args);
+    va_end(args);
+    std::printf("Seamless: room: %s\n", text);
+    std::fflush(stdout);
+}
 
 std::string AcceptKey(const std::string& key) {
     const std::string joined = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -143,6 +165,7 @@ struct LocalRoom::Impl {
     std::map<int, Peer*> members, voices;
     std::map<int, Away> away;
     int host = 0;
+    int most = kMaxMembers;
 
     bool Alive() const { return !members.empty() || !away.empty(); }
 
@@ -198,6 +221,8 @@ struct LocalRoom::Impl {
     }
 
     void CloseWith(Peer& peer, int code) {
+        if (peer.slot) Note("slot %d closed (%d): %s", peer.slot, code, CloseReason(code));
+        else Note("a hunter was closed before joining (%d): %s", code, CloseReason(code));
         const std::uint8_t body[2] = {static_cast<std::uint8_t>(code >> 8), static_cast<std::uint8_t>(code)};
         Queue(peer, 8, body, sizeof body);
         Drop(peer);
@@ -224,9 +249,14 @@ struct LocalRoom::Impl {
         const auto it = members.find(slot);
         if (it != members.end() && it->second == &peer) members.erase(it);
         if (!peer.token.empty()) {
-            away[slot] = {peer.token, Clock::now() + kAwayTime};
+            const auto now = Clock::now();
+            away[slot] = {peer.token, now, now + kAwayTime};
+            Note("slot %d dropped without a leave: held %lld s for its reconnect", slot,
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(kAwayTime).count()));
+            Broadcast({{"t", "away"}, {"slot", slot}}, slot);
             return;
         }
+        Note("slot %d left", slot);
         Gone(slot);
     }
 
@@ -237,7 +267,7 @@ struct LocalRoom::Impl {
     }
 
     int FreeSlot(bool voice) const {
-        for (int slot = 1; slot <= kMaxMembers; ++slot) {
+        for (int slot = 1; slot <= most; ++slot) {
             if (voice ? voices.count(slot) != 0 : (members.count(slot) != 0 || away.count(slot) != 0)) continue;
             return slot;
         }
@@ -246,13 +276,14 @@ struct LocalRoom::Impl {
 
     void Join(Peer& peer) {
         int slot = 0;
-        bool back = false;
+        bool back = false, returned = false;
         if (!peer.token.empty()) {
             for (auto it = away.begin(); it != away.end(); ++it) {
                 if (it->second.token == peer.token) {
                     slot = it->first;
-                    back = true;
+                    returned = true;
                     away.erase(it);
+                    Note("slot %d came back within its hold", slot);
                     break;
                 }
             }
@@ -264,24 +295,33 @@ struct LocalRoom::Impl {
                 old.slot = 0;
                 members.erase(it);
                 Drop(old);
+                Note("slot %d reconnected over its old socket", slot);
                 break;
             }
         }
         if (!slot) slot = FreeSlot(false);
+        if (!slot && !away.empty()) {
+            const auto oldest = std::min_element(away.begin(), away.end(), [](const auto& a, const auto& b) { return a.second.since < b.second.since; });
+            slot = oldest->first;
+            away.erase(oldest);
+            Note("slot %d was held for a hunter who dropped: given to a new hunter, leave sent first", slot);
+            Gone(slot);
+        }
         if (!slot) {
-            CloseWith(peer, 4003);
+            Note("a hunter was turned away: the room is full (%d of %d hunters)", most, most);
+            Text(peer, {{"t", "full"}, {"most", most}});
+            CloseWith(peer, kCloseFull);
             return;
         }
         std::vector<int> others;
         for (const auto& [other, member] : members) others.push_back(other);
-        for (const auto& [other, entry] : away) others.push_back(other);
-        std::sort(others.begin(), others.end());
         peer.slot = slot;
         members[slot] = &peer;
         peer.messages.Set(400, 800);
         peer.bytes.Set(4 << 20, 8 << 20);
         Text(peer, {{"t", "welcome"}, {"slot", slot}, {"host", host}, {"members", others}, {"lossy", true}});
         if (!back) Broadcast({{"t", "join"}, {"slot", slot}}, slot);
+        if (!back && !returned) Note("slot %d joined", slot);
     }
 
     void JoinVoice(Peer& peer) {
@@ -313,8 +353,8 @@ struct LocalRoom::Impl {
         Text(peer, {{"t", "welcome"}, {"slot", slot}, {"host", 0}, {"members", others}});
     }
 
-    void Refuse(Peer& peer, const char* status) {
-        const std::string answer = std::string("HTTP/1.1 ") + status + "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+    void Refuse(Peer& peer, const char* status, const std::string& extra = {}) {
+        const std::string answer = std::string("HTTP/1.1 ") + status + "\r\n" + extra + "Connection: close\r\nContent-Length: 0\r\n\r\n";
         peer.out += answer;
         Flush(peer);
         Drop(peer);
@@ -349,8 +389,11 @@ struct LocalRoom::Impl {
             Refuse(peer, "404 Not Found");
             return;
         }
-        if (std::atoi(Header(head, "x-lantern-room").c_str()) < kRoomProtocol) {
-            Refuse(peer, "426 Upgrade Required");
+        const int protocol = std::atoi(Header(head, "x-lantern-room").c_str());
+        if (protocol != kRoomProtocol) {
+            std::printf("Seamless: a hunter was turned away: their Lantern speaks room protocol %d, this room %d\n", protocol, kRoomProtocol);
+            std::fflush(stdout);
+            Refuse(peer, "426 Upgrade Required", "X-Lantern-Room: " + std::to_string(kRoomProtocol) + "\r\n");
             return;
         }
         const std::string key = Header(head, "sec-websocket-key");
@@ -508,6 +551,7 @@ struct LocalRoom::Impl {
             }
             const int slot = it->first;
             it = away.erase(it);
+            Note("slot %d did not come back within its hold: leave sent", slot);
             Gone(slot);
         }
         for (Peer& peer : peers) {
@@ -579,7 +623,7 @@ LocalRoom::LocalRoom() = default;
 
 LocalRoom::~LocalRoom() { Stop(); }
 
-bool LocalRoom::Start(int port, const std::string& room_id, std::string& error) {
+bool LocalRoom::Start(int port, const std::string& room_id, std::string& error, int most) {
     Stop();
 #ifdef _WIN32
     WSADATA wsa;
@@ -587,6 +631,7 @@ bool LocalRoom::Start(int port, const std::string& room_id, std::string& error) 
 #endif
     auto impl = std::make_unique<Impl>();
     impl->room_id = room_id;
+    impl->most = std::clamp(most, 1, 127);
     impl->listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (impl->listener == kBad) {
         error = "no socket";

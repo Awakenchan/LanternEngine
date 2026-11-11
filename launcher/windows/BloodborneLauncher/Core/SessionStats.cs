@@ -33,6 +33,7 @@ namespace BloodborneLauncher.Core
         /// <summary>The Hunter's Dream refused this PC's sign-in during the session: the account name and
         /// the server's reason ("HTTP 401" when it gave none). Null when it did not.</summary>
         public (string Name, string Reason)? SignInRefused { get; private set; }
+        public string? RoomFull { get; private set; }
 
         public void Observe(string line)
         {
@@ -50,6 +51,10 @@ namespace BloodborneLauncher.Core
             {
                 Stutters++;
                 WorstFrameMs = Math.Max(WorstFrameMs, Parse(s.Groups[1].Value));
+            }
+            else if (line.Contains("This room is full", StringComparison.Ordinal) && OnlineStatus.RoomFull(line) is { } full)
+            {
+                RoomFull = full;
             }
             // Anywhere in the line, should a wrapper ever put something before the engine's "THD: ".
             else if (line.Contains(RefusedText, StringComparison.Ordinal))

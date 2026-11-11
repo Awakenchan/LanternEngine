@@ -15,6 +15,10 @@
 #include <unistd.h>
 #endif
 #include "bbport_heap_sites.h"
+#include "engine/const_census.h"
+#include "engine/gx_objects.h"
+#include "engine/ring_constants.h"
+#include "engine/batch.h"
 #include "bbport_platform.h"
 #include "bbport_toggles.h"
 #include "bbport_wait_trace.h"
@@ -441,6 +445,42 @@ void OnFlip() {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            BbEngine::Batch::Report("5 s");
+            if (BbEngine::RingConstants::g_mode == BbEngine::RingConstants::Compare) {
+                namespace Ring = BbEngine::RingConstants;
+                static Ring::Window last;
+                const Ring::Window w = Ring::Take(last);
+                std::printf("Ring constants (compare): %.0f/frame", w.counts[Ring::Compared] / (frames ? double(frames) : 1.0));
+                for (int c = Ring::Clamped; c < Ring::kCounters; ++c) {
+                    std::printf(", %s %llu", Ring::kCounterNames[c], static_cast<unsigned long long>(w.counts[c]));
+                }
+                std::printf("\n");
+            }
+            if (BbEngine::ConstCensus::g_on) {
+                namespace Census = BbEngine::ConstCensus;
+                static Census::Window last;
+                const Census::Window w = Census::Take(last);
+                const double f = frames ? double(frames) : 1.0;
+                std::uint64_t all = 0, all_bytes = 0;
+                for (int c = 0; c < Census::kClasses; ++c) {
+                    all += w.copies[c];
+                    all_bytes += w.bytes[c];
+                }
+                std::uint64_t ring_base = 0, ring_bytes = 0;
+                const bool ring = BbEngine::GxObjects::UploadArena(&ring_base, &ring_bytes);
+                std::printf("Constant copies: %.0f/frame, %.1f KiB/frame (%.0f/s, %.1f MiB/s)",
+                            all / f, all_bytes / (f * 1024.0), all / window, all_bytes / (window * 1048576.0));
+                for (int c = 0; c < Census::kClasses; ++c) {
+                    std::printf("; %s %.0f/frame %.1f KiB/frame (%.1f%%)", Census::kClassNames[c], w.copies[c] / f,
+                                w.bytes[c] / (f * 1024.0), all ? 100.0 * w.copies[c] / all : 0.0);
+                }
+                if (ring) {
+                    std::printf("; upload ring %#llx, %llu MiB\n", static_cast<unsigned long long>(ring_base),
+                                static_cast<unsigned long long>(ring_bytes >> 20));
+                } else {
+                    std::printf("; upload ring not seen\n");
+                }
+            }
             {
                 const double f = frames ? double(frames) : 1.0;
                 const auto per_frame = [&](std::atomic<u64>& counter) {

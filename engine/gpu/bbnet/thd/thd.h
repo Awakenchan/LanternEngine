@@ -29,5 +29,6 @@ void Register(Core::Loader::SymbolsResolver* sym);
 void SetImage(std::uint8_t* image, std::uint64_t size);
 // sceHttp: the headers the game server binds a request to the account and ruleset with.
 void AddGameHeaders(std::vector<std::pair<std::string, std::string>>& headers);
+bool RefusalNotice(std::string& text);
 
 } // namespace BbThd

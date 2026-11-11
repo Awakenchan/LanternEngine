@@ -43,6 +43,7 @@ namespace BloodborneLauncher.Core
         public event Action? OutputCleared;
         /// <summary>The port folder changed: pages that show paths or files reload.</summary>
         public event Action? PortChanged;
+        public event Action? SettingsReloaded;
 
         private DispatcherTimer? _saveTimer;
         private DispatcherTimer? _playBackupTimer;
@@ -54,6 +55,7 @@ namespace BloodborneLauncher.Core
         public event Action<int, SessionStats>? GameCrashed;
         /// <summary>The game ended after The Hunter's Dream refused this PC's sign-in: account name and reason.</summary>
         public event Action<string, string>? SignInRefused;
+        public event Action<string>? SeamlessRefused;
         private bool _stopping;
 
         public void Initialise()
@@ -68,6 +70,11 @@ namespace BloodborneLauncher.Core
             _trophyTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _trophyTimer.Tick += (_, _) =>
             {
+                if (Settings.ReloadIfChanged())
+                {
+                    _settingsRedraw = true;
+                    SettingsReloaded?.Invoke();
+                }
                 var userDir = GameEnvironment.UserDir(Settings);
                 if (!string.Equals(Trophies.LogPath, System.IO.Path.Combine(userDir, TrophyTracker.LogName), StringComparison.OrdinalIgnoreCase))
                 {
@@ -110,7 +117,9 @@ namespace BloodborneLauncher.Core
                         SaveSoon();
                         Log(L.T("Session: ") + session.Summary, LogLevel.Info);
                     }
-                    if (code != 0 && !stopped)
+                    if (session.RoomFull is { } full)
+                        SeamlessRefused?.Invoke(full);
+                    else if (code != 0 && !stopped)
                         GameCrashed?.Invoke(code, session);
                     // The server refused the account's token (the session log's THD line): kept until the
                     // player signs in again, so the Online page marks the account, and told now.
@@ -164,6 +173,17 @@ namespace BloodborneLauncher.Core
             }
             _iniWarned = false;
             PortChanged?.Invoke();
+        }
+
+        private bool _settingsRedraw;
+
+        public bool SettingsChangedOutside()
+        {
+            var changed = Settings.ReloadIfChanged();
+            if (changed) SettingsReloaded?.Invoke();
+            changed |= _settingsRedraw;
+            _settingsRedraw = false;
+            return changed;
         }
 
         // ---------------------------------------------------------------- updates
@@ -278,6 +298,7 @@ namespace BloodborneLauncher.Core
         public string? StartGame()
         {
             SaveNow();
+            var savesRoot = GameEnvironment.SavesRoot(Settings);
             OutputLines.Clear();
             OutputCleared?.Invoke();
             SecureSaves();
@@ -309,6 +330,8 @@ namespace BloodborneLauncher.Core
                 return error;
             }
             Log(GameRunner.Custom(Settings) ? L.T("Started the game with the custom command.") : L.T("Started Bloodborne."), LogLevel.Step);
+            Settings.Set(SavesFolder.LastRootKey, SavesFolder.Full(savesRoot));
+            SaveSoon();
             if (Settings.Bool("section_stats"))
             {
                 // Timing every render stage costs frame rate: one game only.

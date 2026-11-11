@@ -3,6 +3,7 @@
 // lookup, score and WebAPI imports answered here (The Hunter's Dream has no PSN behind it).
 // Adapted from droogie/bbhost src/hle/np_signaling.cpp and src/hle/system.cpp (566184a).
 #include "thd_internal.h"
+#include "../vendor/bbhost_shim/hle/np.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -20,265 +21,6 @@
 
 namespace BbThd {
 namespace {
-
-// ---- sceNpSignaling ---------------------------------------------------------------------------------
-// The game activates a connection to a peer's NpId and expects ESTABLISHED (0x01) then ACTIVE
-// (0x0c); its status read wants 2 with the peer's address and port. 0x00 is dead.
-
-constexpr int kSigErrInvalidArg = static_cast<int>(0x80550003);
-constexpr std::uint16_t kEvDead = 0x00, kEvEstablished = 0x01, kEvActive = 0x0c;
-
-struct SigCtx {
-    void* cb = nullptr;
-    void* arg = nullptr;
-};
-struct Conn {
-    unsigned ctx = 0;
-    std::string online_id;
-    std::uint16_t member_id = 0;
-    bool announced = false;
-    bool dead = false;
-};
-std::mutex g_sig_mu;
-std::map<unsigned, SigCtx> g_sig_ctx;
-std::map<unsigned, Conn> g_conn;
-unsigned g_next_sig_ctx = 1;
-unsigned g_next_conn = 1;
-
-void sig_fire(unsigned ctx, unsigned conn, std::uint16_t event, int error) {
-    SigCtx c;
-    {
-        std::lock_guard lk(g_sig_mu);
-        const auto it = g_sig_ctx.find(ctx);
-        if (it == g_sig_ctx.end() || !it->second.cb) return;
-        c = it->second;
-    }
-    if (Trace()) Log("np: NpSignaling event 0x%x conn %u", event, conn);
-    CallGuest(c.cb, static_cast<std::int64_t>(ctx), static_cast<std::int64_t>(conn), static_cast<std::int64_t>(event),
-              static_cast<std::int64_t>(error), c.arg);
-}
-
-// A connection with a known peer: ESTABLISHED at +200 ms, ACTIVE at +400.
-void announce_locked(unsigned conn_id, Conn& c) {
-    if (c.announced || !c.member_id) return;
-    c.announced = true;
-    PeersSetConn(c.member_id, conn_id, 2);
-    const unsigned ctx = c.ctx;
-    DispatchAfter(200, Prio::Signaling, [ctx, conn_id] { sig_fire(ctx, conn_id, kEvEstablished, 0); });
-    DispatchAfter(400, Prio::Signaling, [ctx, conn_id] { sig_fire(ctx, conn_id, kEvActive, 0); });
-}
-
-s32 PS4_SYSV_ABI sig_init(u64, int, int, u64) { return 0; }
-s32 PS4_SYSV_ABI sig_term() {
-    std::lock_guard lk(g_sig_mu);
-    g_sig_ctx.clear();
-    g_conn.clear();
-    return 0;
-}
-s32 PS4_SYSV_ABI sig_create_ctx(const void*, void* cb, void* arg, unsigned* ctx) {
-    if (!ctx) return kSigErrInvalidArg;
-    std::lock_guard lk(g_sig_mu);
-    const unsigned id = g_next_sig_ctx++;
-    g_sig_ctx[id] = SigCtx{cb, arg};
-    *ctx = id;
-    return 0;
-}
-s32 PS4_SYSV_ABI sig_delete_ctx(unsigned ctx) {
-    std::lock_guard lk(g_sig_mu);
-    g_sig_ctx.erase(ctx);
-    for (auto it = g_conn.begin(); it != g_conn.end();) it = it->second.ctx == ctx ? g_conn.erase(it) : std::next(it);
-    return 0;
-}
-std::atomic<std::int64_t> g_resolve_at{0};
-
-bool RoomBackend() {
-    static const bool room = [] {
-        const char* v = std::getenv("BB_NET_BACKEND");
-        return v && std::strcmp(v, "room") == 0;
-    }();
-    return room;
-}
-
-// Asks the server for the peer's address: an HTTPS round trip, so never on the game's thread.
-// `first` is the try sig_activate starts; later ones come from status reads.
-void RetryResolve(unsigned conn, const std::string& peer, bool force, bool first = false) {
-    const std::int64_t now = NowMs();
-    if (!force && now - g_resolve_at.load() < 2000) return;
-    g_resolve_at = now;
-    Peer known;
-    if (PeersFindOnline(peer, &known)) {
-        std::lock_guard lk(g_sig_mu);
-        const auto it = g_conn.find(conn);
-        if (it != g_conn.end() && !it->second.dead && !it->second.member_id) {
-            it->second.member_id = known.member_id;
-            announce_locked(conn, it->second);
-        }
-        return;
-    }
-    std::uint32_t addr = 0;
-    std::uint16_t port = 0;
-    std::string error;
-    if (!ServerSignalingResolve(peer, &addr, &port, error)) {
-        if (first) Log("signaling: %s not known and not resolved: %s", peer.c_str(), error.c_str());
-        return;
-    }
-    // The connection may have gone while the request ran (deactivated, or the room left and
-    // SignalingReset): then the peer stays out of the peer table and nothing is announced.
-    // g_sig_mu before the peer table's lock, as sig_activate has always taken them.
-    std::lock_guard lk(g_sig_mu);
-    const auto it = g_conn.find(conn);
-    if (it == g_conn.end() || it->second.dead || it->second.member_id) return;
-    it->second.member_id = PeersProvisional(peer, addr, port).member_id;
-    const auto ms = static_cast<long long>(NowMs() - now);
-    if (first) Log("signaling: %s resolved (%s:%u) in %lld ms", peer.c_str(), BbNet::MaskIpv4(addr).c_str(), port, ms);
-    else Log("signaling: %s found on a later try (%s:%u) in %lld ms", peer.c_str(), BbNet::MaskIpv4(addr).c_str(), port, ms);
-    announce_locked(conn, it->second);
-}
-
-// One long-lived thread runs the resolves in turn. NpPost keeps its HTTPS connection per thread,
-// so this one stays open between peers: a thread per resolve paid a new TCP and TLS handshake
-// each time (~500 ms instead of ~270). The thread starts with the first resolve (online play).
-struct ResolveJob {
-    unsigned conn;
-    std::string peer;
-    bool first;
-};
-std::mutex g_rq_mu;
-std::condition_variable g_rq_cv;
-std::deque<ResolveJob> g_rq;
-bool g_rq_running = false;
-
-void ResolveWorker() {
-    for (;;) {
-        ResolveJob job;
-        {
-            std::unique_lock lk(g_rq_mu);
-            g_rq_cv.wait(lk, [] { return !g_rq.empty(); });
-            job = std::move(g_rq.front());
-            g_rq.pop_front();
-        }
-        RetryResolve(job.conn, job.peer, true, job.first);
-    }
-}
-
-void QueueResolve(unsigned conn, const std::string& peer, bool first = false) {
-    std::lock_guard lk(g_rq_mu);
-    for (const ResolveJob& j : g_rq) {
-        if (j.conn == conn) return; // already waiting its turn
-    }
-    g_rq.push_back({conn, peer, first});
-    if (!g_rq_running) {
-        g_rq_running = true;
-        std::thread(ResolveWorker).detach();
-    }
-    g_rq_cv.notify_one();
-}
-
-// Idempotent per peer: the game re-activates.
-s32 PS4_SYSV_ABI sig_activate(unsigned ctx, const void* npid, unsigned* conn_out) {
-    if (!conn_out) return kSigErrInvalidArg;
-    const std::string peer = NpIdText(npid);
-    unsigned retry = 0;
-    std::uint32_t fresh_addr = 0;
-    std::uint16_t fresh_port = 0;
-    if (RoomBackend()) {
-        std::string error;
-        Peer cached;
-        if (ServerSignalingResolve(peer, &fresh_addr, &fresh_port, error) && PeersFindOnline(peer, &cached) &&
-            (cached.addr != fresh_addr || cached.port != fresh_port)) {
-            Log("signaling: %s came back at a new address; the old one is dropped", peer.c_str());
-            {
-                std::lock_guard lk(g_sig_mu);
-                for (auto& [id, c] : g_conn)
-                    if (c.online_id == peer) c.dead = true;
-            }
-            if (cached.member_id >= 0xff00) PeersProvisional(peer, fresh_addr, fresh_port);
-            else PeersErase(cached.member_id);
-        }
-    }
-    {
-        std::lock_guard lk(g_sig_mu);
-        for (auto& [id, c] : g_conn) {
-            if (c.ctx == ctx && c.online_id == peer && !c.dead) {
-                *conn_out = id;
-                if (!c.member_id) {
-                    Peer p;
-                    if (PeersFindOnline(peer, &p)) c.member_id = p.member_id;
-                }
-                announce_locked(id, c);
-                if (!c.member_id) retry = id;
-                else return 0;
-                break;
-            }
-        }
-    }
-    if (retry) {
-        QueueResolve(retry, peer);
-        return 0;
-    }
-    std::lock_guard lk(g_sig_mu);
-    const unsigned id = g_next_conn++;
-    Conn c;
-    c.ctx = ctx;
-    c.online_id = peer;
-    Peer p;
-    if (PeersFindOnline(peer, &p)) c.member_id = p.member_id;
-    g_conn[id] = c;
-    *conn_out = id;
-    if (!c.member_id) {
-        // The host activates its connection to the guest it summons before the guest is a room
-        // member: the server resolves the address from the guest's context_start. That request
-        // blocked the game's frame for a server round trip (~270 ms) with every new peer; it now
-        // runs beside the game, the status read answers "pending" meanwhile, and the connection
-        // is announced when the address arrives, as for a peer resolved on a later try.
-        Log("sceNpSignalingActivateConnection %s -> conn %u (resolving)", peer.c_str(), id);
-        g_resolve_at = NowMs(); // the game's status reads right after do not start a second one
-        QueueResolve(id, peer, true);
-        return 0;
-    }
-    Log("sceNpSignalingActivateConnection %s -> conn %u", peer.c_str(), id);
-    announce_locked(id, g_conn[id]);
-    return 0;
-}
-s32 PS4_SYSV_ABI sig_deactivate(unsigned ctx, unsigned conn) {
-    std::lock_guard lk(g_sig_mu);
-    const auto it = g_conn.find(conn);
-    if (it != g_conn.end() && it->second.ctx == ctx) {
-        it->second.dead = true;
-        if (it->second.member_id) PeersSetConn(it->second.member_id, conn, 0);
-    }
-    return 0;
-}
-// (ctxId, connId, status*, SceNetInAddr*, SceInPort_t*)
-s32 PS4_SYSV_ABI sig_status(unsigned ctx, unsigned conn, int* st, std::uint32_t* addr, std::uint16_t* port) {
-    int status = 0;
-    std::uint32_t a = 0;
-    std::uint16_t p = 0;
-    std::string unresolved;
-    {
-        std::lock_guard lk(g_sig_mu);
-        const auto it = g_conn.find(conn);
-        if (it != g_conn.end() && it->second.ctx == ctx && !it->second.dead) {
-            Peer peer;
-            if (it->second.member_id && PeersGet(it->second.member_id, &peer) && peer.addr) {
-                status = it->second.announced ? 2 : 1;
-                a = peer.addr;
-                p = static_cast<std::uint16_t>((peer.port << 8) | (peer.port >> 8));
-            } else {
-                status = 1;
-                if (!it->second.member_id) unresolved = it->second.online_id;
-            }
-        }
-    }
-    if (!unresolved.empty() && NowMs() - g_resolve_at.load() >= 2000) {
-        g_resolve_at = NowMs();
-        QueueResolve(conn, unresolved);
-    }
-    if (st) *st = status;
-    if (addr) *addr = a;
-    if (port) *port = p;
-    return 0;
-}
 
 // ---- NP manager: signed in as the account, no PSN behind it -----------------------------------------
 
@@ -312,11 +54,11 @@ s32 PS4_SYSV_ABI np_presence_status(int, int* st) {
 }
 s32 PS4_SYSV_ABI np_cmp_online(const void* a, const void* b) {
     if (!a || !b) return kNpErrInvalidArg;
-    return std::memcmp(a, b, 16);
+    return CompareOnlineId(a, b);
 }
 s32 PS4_SYSV_ABI np_cmp_npid(const void* a, const void* b) {
     if (!a || !b) return kNpErrInvalidArg;
-    return std::memcmp(a, b, 36);
+    return CompareNpId(a, b);
 }
 s32 PS4_SYSV_ABI np_create_request(const void*) { return g_np_req.fetch_add(1); }
 s32 PS4_SYSV_ABI np_request_done(int) { return 0; }
@@ -366,7 +108,20 @@ s32 PS4_SYSV_ABI score_title_ctx(const void*, int) { return g_score_id.fetch_add
 s32 PS4_SYSV_ABI score_create_request(int) { return g_score_id.fetch_add(1); }
 s32 PS4_SYSV_ABI score_set_pc_id(int, int) { return 0; }
 s32 PS4_SYSV_ABI score_offline() { return kScoreErrOffline; }
-s32 PS4_SYSV_ABI score_comment_ok(int, const char*) { return 0; }
+constexpr int kScoreErrInvalidArgument = static_cast<int>(0x80550704u);
+constexpr std::size_t kCommentMax = 255;
+s32 PS4_SYSV_ABI score_censor(int, const char* comment, void*) { return comment ? 0 : kScoreErrInvalidArgument; }
+s32 PS4_SYSV_ABI score_sanitize(int, const char* comment, char* sanitized, void*) {
+    if (!comment || !sanitized) return kScoreErrInvalidArgument;
+    std::size_t len = strnlen(comment, kCommentMax + 1);
+    if (len > kCommentMax) {
+        len = kCommentMax;
+        while (len > 0 && (static_cast<unsigned char>(comment[len]) & 0xC0) == 0x80) --len;
+    }
+    std::memcpy(sanitized, comment, len);
+    sanitized[len] = 0;
+    return 0;
+}
 
 // ---- WebAPI: answered here, never sent anywhere -------------------------------------------------------
 
@@ -481,49 +236,18 @@ s32 PS4_SYSV_ABI webapi_parse_npid(const char* json, void* npid) {
 
 } // namespace
 
-void SignalingPeerKnown(std::uint16_t member_id) {
-    Peer p;
-    if (!PeersGet(member_id, &p)) return;
-    std::lock_guard lk(g_sig_mu);
-    for (auto& [id, c] : g_conn) {
-        if (!c.dead && c.online_id == p.online_id) {
-            c.member_id = member_id;
-            announce_locked(id, c);
-        }
-    }
-}
+void SignalingPeerKnown(std::uint16_t member_id) { hle_np_signaling_peer_known(member_id); }
 
-void SignalingPeerDead(const std::string& online_id) {
-    std::vector<std::pair<unsigned, unsigned>> dead;
-    {
-        std::lock_guard lk(g_sig_mu);
-        for (auto& [id, c] : g_conn) {
-            if (!c.dead && c.online_id == online_id) {
-                c.dead = true;
-                dead.emplace_back(c.ctx, id);
-            }
-        }
-    }
-    for (const auto& [ctx, conn] : dead) {
-        DispatchAfter(100, Prio::Signaling, [ctx = ctx, conn = conn] { sig_fire(ctx, conn, kEvDead, 0); });
-    }
-}
+void SignalingPeerDead(const std::string& online_id) { hle_np_signaling_peer_dead(online_id); }
 
-void SignalingReset() {
-    std::lock_guard lk(g_sig_mu);
-    for (auto& [id, c] : g_conn) c.dead = true;
+void SignalingReset() { hle_np_signaling_reset(); }
+
+void SignalingControl(const std::uint8_t* data, std::size_t len, std::uint32_t addr, std::uint16_t port_nbo) {
+    hle_np_signaling_control(data, len, addr, port_nbo);
 }
 
 void RegisterNp(Core::Loader::SymbolsResolver* sym) {
-#define SIG(nid, fn) LIB_FUNCTION(nid, "libSceNpSignaling", 1, "libSceNpSignaling", fn)
-    SIG("3KOuC4RmZZU", sig_init);
-    SIG("NPhw0UXaNrk", sig_term);
-    SIG("5yYjEdd4t8Y", sig_create_ctx);
-    SIG("hx+LIg-1koI", sig_delete_ctx);
-    SIG("0UvTFeomAUM", sig_activate);
-    SIG("6UEembipgrM", sig_deactivate);
-    SIG("bD-JizUb3JM", sig_status);
-#undef SIG
+    RegisterVendoredSignaling(sym);
 #define NP(nid, fn) LIB_FUNCTION(nid, "libSceNpManager", 1, "libSceNpManager", fn)
     NP("VfRSmPmj8Q8", np_register_cb);        // sceNpRegisterStateCallback
     NP("mjjTXh+NHWY", np_ok);                 // sceNpUnregisterStateCallback
@@ -576,8 +300,8 @@ void RegisterNp(Core::Loader::SymbolsResolver* sym) {
     SCORE("zT0XBtgtOSI", score_offline); // RecordScore
     SCORE("LoVMVrijVOk", score_offline); // GetBoardInfo
     SCORE("bcoVwcBjQ9E", score_offline); // RecordGameData
-    SCORE("2b3TI0mDYiI", score_comment_ok);
-    SCORE("r4oAo9in0TA", score_comment_ok);
+    SCORE("2b3TI0mDYiI", score_censor);
+    SCORE("r4oAo9in0TA", score_sanitize);
 #undef SCORE
 #define WEB(nid, fn) LIB_FUNCTION(nid, "libSceNpWebApi", 1, "libSceNpWebApi", fn)
     WEB("G3AnLNdRBjE", webapi_init);

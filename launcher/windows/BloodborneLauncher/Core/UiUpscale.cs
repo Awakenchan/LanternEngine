@@ -29,6 +29,29 @@ namespace BloodborneLauncher.Core
 
         public static bool ToolFound => File.Exists(Tool);
 
+        public static bool WholePng(string path)
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                if (!info.Exists || info.Length < 57) return false;
+                using var file = info.OpenRead();
+                Span<byte> head = stackalloc byte[8];
+                if (file.Read(head) != 8 || head[0] != 0x89 || head[1] != (byte)'P' || head[2] != (byte)'N' || head[3] != (byte)'G') return false;
+                file.Seek(-12, SeekOrigin.End);
+                Span<byte> tail = stackalloc byte[12];
+                if (file.Read(tail) != 12) return false;
+                if (tail[4] == (byte)'I' && tail[5] == (byte)'E' && tail[6] == (byte)'N' && tail[7] == (byte)'D') return true;
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+            return false;
+        }
+
         public static long PackBytes()
         {
             try
@@ -65,7 +88,11 @@ namespace BloodborneLauncher.Core
             await RunAsync(Tool, new[] { "export", menu, source }, null, cancel);
 
             var all = Directory.GetFiles(source, "*.png").Select(Path.GetFileName).ToList();
-            var missing = all.Where(name => !File.Exists(Path.Combine(upscaled, name!))).ToList();
+            var missing = all.Where(name => !WholePng(Path.Combine(upscaled, name!))).ToList();
+            foreach (var name in missing)
+            {
+                try { File.Delete(Path.Combine(upscaled, name!)); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
             if (Directory.Exists(todo)) Directory.Delete(todo, true);
             Directory.CreateDirectory(todo);
             foreach (var name in missing)
@@ -78,7 +105,7 @@ namespace BloodborneLauncher.Core
                 {
                     while (!watch.IsCancellationRequested)
                     {
-                        var done = all.Count(name => File.Exists(Path.Combine(upscaled, name!)));
+                        var done = all.Count(name => WholePng(Path.Combine(upscaled, name!)));
                         progress.Report(new Step(L.F($"Upscaling {done} of {all.Count} textures on the GPU…"), 0.05 + 0.85 * done / all.Count));
                         try { await Task.Delay(1000, watch.Token); } catch (OperationCanceledException) { }
                     }
@@ -94,7 +121,7 @@ namespace BloodborneLauncher.Core
                     {
                         failure = e.Message;
                     }
-                    var left = all.Where(name => !File.Exists(Path.Combine(upscaled, name!))).ToList();
+                    var left = all.Where(name => !WholePng(Path.Combine(upscaled, name!))).ToList();
                     if (left.Count > 0)
                     {
                         Directory.Delete(todo, true);
@@ -117,7 +144,7 @@ namespace BloodborneLauncher.Core
                     await counting;
                 }
             }
-            var still = all.Count(name => !File.Exists(Path.Combine(upscaled, name!)));
+            var still = all.Count(name => !WholePng(Path.Combine(upscaled, name!)));
             if (still > 0)
                 throw new InvalidOperationException(L.F($"{still} textures were not upscaled. Your GPU driver may not support Vulkan compute, or video memory ran out; try again after a driver update, with other programs closed.") + (failure.Length > 0 ? "\n" + failure : ""));
 

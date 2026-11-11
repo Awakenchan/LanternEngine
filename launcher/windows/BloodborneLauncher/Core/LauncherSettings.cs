@@ -15,6 +15,8 @@ namespace BloodborneLauncher.Core
         public const string ShadnetServer = "srv.shadps4.net:31313";
 
         private JsonObject _data = new();
+        private JsonObject _base = new();
+        private SettingsFile.Stamp _stamp;
 
         private static Dictionary<string, JsonNode?> Defaults() => new()
         {
@@ -114,17 +116,15 @@ namespace BloodborneLauncher.Core
 
         public void Load()
         {
-            _data = new JsonObject();
-            foreach (var (key, value) in Defaults())
-                _data[key] = value;
+            (_data, _base) = SettingsFile.Layer(Defaults(), null);
 
             try
             {
-                if (File.Exists(Paths.ConfigFile) &&
-                    JsonNode.Parse(File.ReadAllText(Paths.ConfigFile)) is JsonObject saved)
+                var (saved, stamp) = SettingsFile.Read(Paths.ConfigFile);
+                _stamp = stamp;
+                if (saved != null)
                 {
-                    foreach (var (key, value) in saved)
-                        _data[key] = value?.DeepClone();
+                    (_data, _base) = SettingsFile.Layer(Defaults(), saved);
                     // Beta builds: textures kept up to 80% of the card (the 40% default evicted and
                     // reloaded hundreds a second on 6-8 GB cards); switched on once for older files.
                     // The marker is only ever written by a beta: "vram_budget_default_on" is in
@@ -197,8 +197,23 @@ namespace BloodborneLauncher.Core
         public void Save()
         {
             Directory.CreateDirectory(Paths.ConfigDir);
-            File.WriteAllText(Paths.ConfigFile,
-                _data.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var (merged, stamp) = SettingsFile.Save(Paths.ConfigFile, _base, _data);
+            _base = (JsonObject)merged.DeepClone();
+            _data = merged;
+            _stamp = stamp;
+        }
+
+        public bool ReloadIfChanged()
+        {
+            if (SettingsFile.StampOf(Paths.ConfigFile) == _stamp) return false;
+            var (disk, stamp) = SettingsFile.Read(Paths.ConfigFile);
+            if (disk == null) return false;
+            var before = _data;
+            var (current, baseline) = SettingsFile.Refresh(disk, _base, _data);
+            _data = current;
+            _base = baseline;
+            _stamp = stamp;
+            return !JsonNode.DeepEquals(before, current);
         }
 
         /// <summary>The shadNet password, kept encrypted for this Windows user (Core/Secret.cs).</summary>

@@ -237,6 +237,67 @@ void TestGuestSide() {
 
 } // namespace
 
+int Rows(PartyStatus& status, Clock::time_point now, const char* name) {
+    int rows = 0;
+    for (const PeerStatus& row : status.List(now)) rows += row.name == name;
+    return rows;
+}
+
+void TestRejoinedName() {
+    PartyStatus status;
+    auto now = Clock::now();
+    status.OwnConnected(now);
+    now += seconds(20);
+    status.Heard(2, now);
+    status.Named(2, "Hunter", now);
+    status.Pinged(2);
+    status.Heard(3, now);
+    status.Named(3, "Twin", now);
+    status.Heard(4, now);
+    status.Named(4, "Twin", now);
+    Check(Rows(status, now, "Twin") == 2, "two live hunters with one name both stay listed");
+    now += kSilentAfter + seconds(1);
+    status.Tick(now);
+    status.Heard(5, now);
+    status.Named(5, "Hunter", now);
+    Check(Rows(status, now, "Hunter") == 1, "a hunter back in a new slot replaces the stale entry");
+    Check(status.List(now).size() == 3 && status.List(now)[2].slot == 5, "the new slot is the one listed");
+    status.Left(2, now);
+    Check(!HasLine(status, now, PartyLineKind::Left, "Hunter"), "the stale slot leaving later says nothing");
+    status.Heard(5, now);
+    status.Named(5, "Hunter", now);
+    Check(Rows(status, now, "Hunter") == 1, "the same slot naming itself again stays one row");
+
+    const std::map<int, std::string> names = {{1, "Host-0001"}, {2, "Hunter-ab12"}, {3, "Other-cd34"}, {4, "Hunter-ab12"}, {5, "Hunter-ef56"}};
+    const std::vector<int> twins = StaleTwins(names, {2, 3}, 4);
+    Check(twins.size() == 1 && twins[0] == 2, "a member joining with an id already in the party finds the old entry");
+    Check(StaleTwins(names, {2, 3, 4}, 5).empty(), "a different id with the same plain name is another hunter");
+    Check(StaleTwins(names, {2, 3}, 9).empty(), "an unnamed slot has no twin");
+}
+
+void TestAway() {
+    PartyStatus status;
+    auto now = Clock::now();
+    status.OwnConnected(now);
+    now += seconds(20);
+    status.Heard(3, now);
+    status.Named(3, "Dropped", now);
+    status.Away(3, now);
+    ReconnectNotice notice;
+    Check(status.List(now).size() == 1 && status.List(now)[0].state == LinkState::Reconnecting, "a hunter the room says is away reads reconnecting");
+    Check(status.Reconnecting(now, notice) && notice.names.size() == 1 && notice.names[0] == "Dropped", "and shows in the reconnect notice");
+    status.Heard(3, now + seconds(1));
+    Check(status.List(now)[0].state != LinkState::Reconnecting && HasLine(status, now, PartyLineKind::Reconnected, "Dropped"), "a frame from it again ends that");
+    status.Away(3, now);
+    status.Left(3, now);
+    Check(status.List(now).empty() && HasLine(status, now, PartyLineKind::Left, "Dropped"), "the leave at the end of the hold removes it");
+    status.Heard(3, now);
+    status.Named(3, "Newcomer", now);
+    Check(status.List(now).size() == 1 && status.List(now)[0].name == "Newcomer", "a newcomer in the same slot starts clean");
+    status.Away(9, now);
+    Check(status.List(now).size() == 1, "away for an unknown slot adds nothing");
+}
+
 int main() {
     TestLampAsk();
     TestPing();
@@ -247,6 +308,8 @@ int main() {
     TestLines();
     TestAsks();
     TestGuestSide();
+    TestRejoinedName();
+    TestAway();
     if (failures) return 1;
     std::printf("room status ok\n");
     return 0;

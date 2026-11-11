@@ -21,6 +21,8 @@ namespace BloodborneLauncher.Core
         private const int Slots = 10;
         private static readonly string[] GameProcesses = { "bb-start", "bb-probe" };
 
+        public static bool SavesInUse(bool launcherGame) => SavesFolder.InUse(launcherGame, GameProcessRunning);
+
         public static bool GameProcessRunning()
         {
             foreach (var name in GameProcesses)
@@ -36,6 +38,7 @@ namespace BloodborneLauncher.Core
         public static List<SaveCharacter> Characters(SavePlace place)
         {
             var list = new List<SaveCharacter>();
+            var errors = new List<string>();
             for (var slot = 0; slot < Slots; slot++)
             {
                 var path = Path.Combine(place.Folder, string.Format(CultureInfo.InvariantCulture, SlotFileName, slot));
@@ -50,10 +53,33 @@ namespace BloodborneLauncher.Core
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException or SaveFormatException or ArgumentException)
                 {
+                    errors.Add(string.Format(CultureInfo.InvariantCulture, "slot {0}: {1}", slot, e.Message));
                 }
             }
+            if (list.Count == 0 && errors.Count > 0) throw new IOException(string.Join("; ", errors));
             return list;
         }
+
+        public static string Title(string name, string profile, bool showProfile, string? detail = null)
+        {
+            var label = name.Length > 0 ? name : "?";
+            var parts = new List<string>();
+            if (showProfile && profile.Length > 0) parts.Add(profile);
+            if (!string.IsNullOrEmpty(detail)) parts.Add(detail);
+            return parts.Count > 0 ? $"{label} ({string.Join(", ", parts)})" : label;
+        }
+
+        public static List<string> Titles(IReadOnlyList<SaveCharacter> hunters, bool showProfile)
+        {
+            var plain = hunters.Select(h => Title(h.Name, h.Profile, showProfile)).ToList();
+            var leveled = hunters.Select((h, i) => Count(plain, plain[i]) > 1 ? Title(h.Name, h.Profile, showProfile, L.F($"level {h.Level}")) : plain[i]).ToList();
+            return hunters.Select((h, i) => Count(leveled, leveled[i]) > 1
+                ? Title(h.Name, h.Profile, showProfile, L.F($"level {h.Level}, slot {h.Slot + 1}"))
+                : leveled[i]).ToList();
+        }
+
+        private static int Count(List<string> titles, string title) =>
+            titles.Count(t => string.Equals(t, title, StringComparison.OrdinalIgnoreCase));
 
         public static int DefaultCharacter(IReadOnlyList<SaveCharacter> characters, string currentProfile)
         {

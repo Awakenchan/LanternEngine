@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "gpu_cache_stamp.h"
 #include "assets.h"
 #include "common.h"
 #include "elf.h"
@@ -71,6 +72,8 @@ bool RecompileGpuCache(const fs::path& cache, const fs::path& recompiler) {
         std::error_code e;
         if (!entry.is_directory(e) || !fs::is_regular_file(entry.path() / "profile.bin", e)) continue;
         std::string output;
+        Log("%s", GpuCacheStamp::RecompileNotice(Utf8(entry.path().filename())).c_str());
+        std::fflush(stdout);
         const auto start = std::chrono::steady_clock::now();
         const int code = RunProgram(recompiler, {L"--recompile-cache", entry.path().native()}, &output);
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -185,14 +188,16 @@ void SeedGpuCache(const fs::path& cache, const fs::path& catalogs, const fs::pat
 }
 
 void ResetStaleGpuCache(const fs::path& cache, const std::string& identity, const std::string& legacy,
-                        const fs::path& recompiler) {
+                        const std::vector<std::string>& accepted, const fs::path& recompiler) {
     const fs::path stamp = cache / "engine.txt";
     std::error_code error;
     try {
         const std::string stamped = Trim(ReadText(stamp));
-        if (identity.empty() || stamped == identity) return;
-        if (!legacy.empty() && stamped == legacy) {
+        const auto action = GpuCacheStamp::Decide(stamped, identity, legacy, accepted);
+        if (action == GpuCacheStamp::Action::Keep) return;
+        if (action == GpuCacheStamp::Action::Restamp) {
             WriteText(stamp, identity + "\n");
+            Log("GPU cache: kept (%s: the same shaders as %s)", identity.c_str(), stamped.c_str());
             return;
         }
     } catch (const Error&) {
@@ -337,6 +342,11 @@ int Main(std::vector<std::wstring> arguments) {
         const auto package = nlohmann::json::parse(ReadText(folders.package / "package.json"));
         const std::string engine = package.value("engine", "");
         std::string identity = engine, legacy;
+        std::vector<std::string> accepted;
+        try {
+            accepted = GpuCacheStamp::Accepted(ReadText(out / "gpu-cache.accepted.id"));
+        } catch (const Error&) {
+        }
         try {
             const std::string id = Trim(ReadText(out / "gpu-cache.id"));
             if (!id.empty()) identity = "gpu " + id;
@@ -344,7 +354,7 @@ int Main(std::vector<std::wstring> arguments) {
             if (!old.empty()) legacy = "gpu " + old;
         } catch (const Error&) {
         }
-        ResetStaleGpuCache(Path(Env("BB_GPU_USER_DIR", "")) / "cache", identity, legacy, out / "bb-shader-lab.exe");
+        ResetStaleGpuCache(Path(Env("BB_GPU_USER_DIR", "")) / "cache", identity, legacy, accepted, out / "bb-shader-lab.exe");
     } catch (const std::exception&) {
     }
     fs::create_directories(out);

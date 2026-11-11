@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -114,8 +115,17 @@ bool PcModelGpu(const Vulkan::Instance& instance) {
             return false;
         }
         if (const char* user = std::getenv("BB_GPU_USER_DIR"); user && *user && !(any && any[0] == '1')) {
-            if (std::FILE* mark = std::fopen((std::string(user) + "/pc-model-hung").c_str(), "r")) {
+            const std::string path = std::string(user) + "/pc-model-hung";
+            if (std::FILE* mark = std::fopen(path.c_str(), "r")) {
+                char tag[4] = {};
+                const bool current = std::fread(tag, 1, 3, mark) == 3 && std::memcmp(tag, "[2]", 3) == 0;
                 std::fclose(mark);
+                if (!current) {
+                    std::remove(path.c_str());
+                    std::printf("Guest memory: an older pc-model-hung mark was removed: the freezes that wrote it "
+                                "came from the object motion worker, fixed since\n");
+                    return true;
+                }
                 std::printf("Guest memory: the PC memory model stays off on this PC: the GPU stopped "
                             "answering with it in an earlier session (delete user\\pc-model-hung or set "
                             "BB_PC_MODEL_ANY_GPU=1 to try it again)\n");

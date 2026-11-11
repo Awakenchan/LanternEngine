@@ -102,7 +102,10 @@ void Install(std::uint8_t* image, std::size_t size) {
         !s.pc_controls && !s.widescreen)
         return;
     if (!identity || std::strcmp(identity, kVerifiedImage) != 0) {
-        host_log("engine features off: the executable was not verified");
+        host_log(identity ? "engine features off (widescreen, Lantern menus, camera controls, native frame rate): the "
+                            "game's executable is not the 1.09 one this engine knows; a patched or other version"
+                          : "engine features off (widescreen, Lantern menus, camera controls, native frame rate): the "
+                            "launcher did not pass the executable's identity (BB_ENGINE_IMAGE_SHA256)");
         return;
     }
     if (mirror && !DreamLayoutIsTheGames()) {

@@ -282,6 +282,7 @@ void ObjectMotion::Sync() {
 
 void ObjectMotion::WorkerLoop(std::stop_token stop) {
     Common::SetCurrentThreadName("bb:Motion");
+    bb_fault_recovers_only = true;
     static const auto spin_time =
         std::chrono::microseconds(BbThreads::CapSpinUs(BbThreads::Available() >= 12 ? 200 : 50));
     u64 next = 0;

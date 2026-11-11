@@ -793,7 +793,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                             });
                         });
                 }
-                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                MarkCpuModified(device_addr, size);
                 twin_faults.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -815,7 +815,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         }
         DownloadMemory(arena, download_start, download_end - download_start);
         if (is_write) {
-            memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+            MarkCpuModified(device_addr, size);
         }
     };
     if (assume_locks) {
@@ -1045,13 +1045,26 @@ bool BufferCache::TryCompare() {
     return on;
 }
 
-BufferCache::TryRead BufferCache::TryObtainRead(VAddr device_addr, u32 size, StreamSlice* slice,
-                                                std::pair<const Buffer*, u64>& out) {
+void BufferCache::MarkCpuModified(VAddr address, u64 size) {
+    BbEngine::GxObjects::NoteCpuWrite(address, size);
+    memory_tracker->MarkRegionAsCpuModified(address, size);
+}
+
+bool BufferCache::StillClean(VAddr address, u64 size, bool in_place) noexcept {
+    return in_place || !memory_tracker->IsRegionCpuModifiedRead(address, size);
+}
+
+bool BufferCache::MemoAllowed() const noexcept {
     static const bool shadows = [] {
         const char* env = std::getenv("BB_SHADOWS");
         return env && env[0] == '1';
     }();
-    if (size == 0 || shadows || hle_obtain || ChunkBuffers() || BufferStatsEnabled()) {
+    return !shadows && !hle_obtain && !ChunkBuffers() && !BufferStatsEnabled();
+}
+
+BufferCache::TryRead BufferCache::TryObtainRead(VAddr device_addr, u32 size, StreamSlice* slice,
+                                                std::pair<const Buffer*, u64>& out) {
+    if (size == 0 || !MemoAllowed()) {
         return TryRead::Config;
     }
     const bool in_place_mode = GuestInPlace();
@@ -1164,8 +1177,14 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         if (!comparing) {
             std::pair<const Buffer*, u64> tried{};
             const TryRead result = TryObtainRead(device_addr, size, nullptr, tried);
-            const u64 uploads = obtain_paths[5];
             const u64 residency = ResidencyGeneration();
+            const bool written_since = result == TryRead::Clean &&
+                                       memory_tracker->IsRegionCpuModifiedRead(device_addr, size);
+            const u64 first = device_addr >> block_shift, last = (device_addr + size - 1) >> block_shift;
+            const bool in_place_before = in_place_blocks.Contains(first, last + 1);
+            synced_upload = false;
+            synced_from = ~VAddr(0);
+            synced_to = 0;
             comparing = true;
             const auto real = ObtainBuffer(device_addr, size, false, false);
             comparing = false;
@@ -1174,8 +1193,15 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                 const bool same = tried.first == real.first &&
                                   (tried.first == &stream_buffer || tried.second == real.second);
                 try_read_differ += !same;
-                try_read_uploaded += obtain_paths[5] != uploads;
-                try_read_rebound += ResidencyGeneration() != residency;
+                if (SyncedOver(device_addr, size)) {
+                    ++(written_since ? try_read_raced : try_read_uploaded);
+                } else if (synced_upload) {
+                    ++try_read_neighbour;
+                }
+                if (ResidencyGeneration() != residency) {
+                    ++(in_place_blocks.Contains(first, last + 1) != in_place_before ? try_read_rebound
+                                                                                     : try_read_elsewhere);
+                }
             } else {
                 try_dirty = true;
             }
@@ -1198,6 +1224,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     // decoded later (WriteData, constant RAM dumps) change them on the CPU in decode order, and
     // a draw decoded before must keep its values (buffer renaming). GPU writes are noted for
     // that: a range the GPU has yet to write is not copied.
+    if (is_written) {
+        BbEngine::GxObjects::NoteGpuWrite(device_addr, size);
+    }
     if (is_written && !shadows.empty()) {
         DropShadows(device_addr, size);
     }
@@ -1997,7 +2026,7 @@ void BufferCache::EvictVramBlock(u64 block) {
     resident_ranges.Subtract(block, block + 1);
     memory_tracker->UnmarkRegionAsGpuModified(address, block_size);
     gpu_modified_ranges.Subtract(address, block_size);
-    memory_tracker->MarkRegionAsCpuModified(address, block_size);
+    MarkCpuModified(address, block_size);
     ReleaseResidencySlot(memory, offset);
     // After the work submitted so far: it may still read the block.
     bind_wait_tick = std::max(bind_wait_tick, scheduler.CurrentTick() - 1);
@@ -2399,7 +2428,7 @@ void BufferCache::ProcessDemotions() {
         // Its uploads up to `tick` land in the VRAM copy first; the rebind waits for them.
         bind_wait_tick = std::max(bind_wait_tick, tick);
         // Never uploaded or protected again: writes go to the memory the GPU reads.
-        memory_tracker->MarkRegionAsCpuModified(address, block_size);
+        MarkCpuModified(address, block_size);
         if (idle) {
             BbStats::vram_idle_bytes.fetch_add(block_size, std::memory_order_relaxed);
             idle_demoted.Add({block, block + 1});
@@ -2798,7 +2827,7 @@ void BufferCache::ProcessPendingAssets() {
                     }
                     demotions_waiting.push_back({block, scheduler.CurrentTick(), false});
                 }
-                memory_tracker->MarkRegionAsCpuModified(from, to - from);
+                MarkCpuModified(from, to - from);
             }
             continue;
         }
@@ -3115,7 +3144,7 @@ void BufferCache::QueueCopyBacks(u64 submitted) {
         }
         memory_tracker->UnmarkRegionAsGpuModified(address, block_size);
         gpu_modified_ranges.Subtract(address, block_size);
-        memory_tracker->MarkRegionAsCpuModified(address, block_size);
+        MarkCpuModified(address, block_size);
         BbStats::copied_back_blocks.fetch_add(1, std::memory_order_relaxed);
         demoted_by[DemoteCopiedBack] += block_size;
         moved = true;
@@ -3175,7 +3204,7 @@ void BufferCache::QueuePromotions(u64 submitted) {
                 });
             }
         }
-        memory_tracker->MarkRegionAsCpuModified(address, block_size);
+        MarkCpuModified(address, block_size);
         moved += block_size;
     }
     promote_source.clear();
@@ -3403,6 +3432,9 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
 
     if (src_buffer || !chunk_copies.empty()) {
         ++obtain_paths[5];
+        synced_upload = true;
+        synced_from = std::min(synced_from, device_addr);
+        synced_to = std::max(synced_to, device_addr + size);
     }
     if (src_buffer) {
         runtime.CopyBuffer(src_buffer, arena, copies);

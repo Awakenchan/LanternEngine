@@ -10,6 +10,8 @@
 #include <mutex>
 #include <thread>
 #include "common/recursive_lock.h"
+#include "engine/ring_constants.h"
+#include "engine/batch.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
@@ -218,7 +220,7 @@ public:
     void RetireSubmission();
     /// Stage A: guest memory the recording thread will write for work handed to it (storage
     /// buffers, DMA, WriteData, fences); constants overlapping it are bound there, not copied here.
-    void NotePendingGpuWrite(VAddr address, u64 size);
+    void NotePendingGpuWrite(VAddr address, u64 size, u8 writer = BbEngine::RingConstants::WriterShader);
     /// Stage A: guest memory the recording thread will read for the next packet (buffer bindings).
     void NotePendingRead(VAddr address, u64 size);
     /// Before a guest-visible write: fences deferred earlier are written first.
@@ -905,6 +907,10 @@ private:
     std::array<ConstantCopy, 4096> constant_copies{};
     std::vector<u64> gpu_written_granules = std::vector<u64>(1u << 14);
     u64 constant_checks = 0;
+    bool const_census = false;
+    std::uint8_t ring_constants = 0;
+    BbEngine::RingConstants::Ring gx_ring;
+    std::deque<BbEngine::RingConstants::QueuedWrite> ring_writes;
     PendingReads pending_write_table; ///< the same per granule for GPU writes queued (NotePendingGpuWrite)
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
@@ -931,6 +937,33 @@ private:
     u64 object_bind_checks = 0;
     std::pair<const VideoCore::Buffer*, u64> BindByObject(u64 key, VAddr base, u64 size);
     std::pair<const VideoCore::Buffer*, u64> BindVertexRange(u64 key, VAddr base, u64 size);
+    struct VertexMemo {
+        VAddr base = 0;
+        u64 size = 0;
+        u64 generation = 0;
+        const VideoCore::Buffer* buffer = nullptr;
+        u64 offset = 0;
+        bool in_place = false;
+    };
+    std::array<VertexMemo, 4096> vertex_memo{};
+    BbEngine::Batch::Mode vertex_memo_mode = BbEngine::Batch::Off;
+    BbEngine::Batch::Step* vertex_memo_step = nullptr;
+    BbEngine::Batch::Step* vertex_memo_races = nullptr;
+    std::pair<const VideoCore::Buffer*, u64> BindVertexMemo(VAddr base, u64 size);
+    struct SealedBind {
+        VAddr base = 0;
+        u64 size = 0;
+        u32 id = 0, generation = 0;
+        u64 layout = 0;
+        const VideoCore::Buffer* buffer = nullptr;
+        u64 offset = 0;
+    };
+    std::array<SealedBind, 4096> sealed_binds{};
+    BbEngine::Batch::Mode own_buffers_mode = BbEngine::Batch::Off;
+    BbEngine::Batch::Step* own_buffers_step = nullptr;
+    BbEngine::Batch::Step* own_buffers_share = nullptr;
+    u64 sealed_hits = 0, sealed_misses = 0, sealed_draws = 0, unsealed_draws = 0;
+    bool SealedLookup(VAddr base, u64 size, const VideoCore::Buffer*& buffer, u64& offset);
     static constexpr u64 RangeBindKey = 0x52414e4745ull;
     u64 range_binds = 0, range_hits = 0, range_checked = 0, range_differ = 0;
     struct DrawContext {

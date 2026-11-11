@@ -68,6 +68,7 @@ namespace BloodborneLauncher.Core
         private static string Cause(List<string> tail, long code)
         {
             bool Has(string text) => tail.Any(l => l.Contains(text, StringComparison.OrdinalIgnoreCase));
+            if (OnlineStatus.RoomFull(tail) is { } full) return full;
             // The game's memory pool could not be created at start: Windows counts all of it against
             // RAM plus page file (error 1450: not enough left).
             if (Has("creating the memory pool section") || Has("mapping the memory pool"))
@@ -124,9 +125,14 @@ namespace BloodborneLauncher.Core
                 return fault.Groups[1].Value == "Guest"
                     ? L.F($"The game's own code crashed ({fault.Groups[3].Value}), usually a rare timing race in the game.")
                     : L.F($"The engine crashed in {fault.Groups[3].Value} ({Name(Convert.ToUInt32(fault.Groups[2].Value, 16))}).");
+            if (tail.LastOrDefault(l => l.StartsWith("Online configuration:", StringComparison.Ordinal) ||
+                                        l.StartsWith("bb-start:", StringComparison.Ordinal) ||
+                                        l.StartsWith("prepare failed:", StringComparison.Ordinal)) is { } start)
+                return L.T("The game did not start: ") + start[(start.IndexOf(':') + 1)..].Trim();
             return code switch
             {
                 23 => L.T("The engine stopped itself on an error (exit code 23); the report has the details."),
+                24 => L.T("The graphics card stopped answering for a minute, so the engine ended the game (exit code 24)."),
                 0xC0000005 => L.T("The engine crashed on a bad memory access (0xC0000005)."),
                 0xC0000409 => L.T("The engine stopped on a failed safety check (0xC0000409)."),
                 0xC00000FD => L.T("The engine ran out of stack (0xC00000FD)."),

@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include "room_ws.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 
@@ -127,7 +128,26 @@ void Frame(std::vector<std::uint8_t>& out, std::uint8_t opcode, const std::uint8
     for (std::size_t i = 0; i < size; ++i) out[at + i] = data[i] ^ mask[i & 3];
 }
 
+int AnswerProtocol(const std::string& head) {
+    std::string lower = head;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::string wanted = "\r\nx-lantern-room:";
+    const auto at = lower.find(wanted);
+    if (at == std::string::npos) return 0;
+    return std::atoi(head.c_str() + at + wanted.size());
+}
+
 } // namespace
+
+std::string VersionRefusal(int room, int own) {
+    const std::string versions = room > 0 ? "protocol " + std::to_string(room) + ", yours " + std::to_string(own) : "yours " + std::to_string(own);
+    const char* side = room > own ? ", so update your Lantern" : room > 0 ? ", so the host has to update Lantern" : ", so update to the newest beta";
+    return "This room runs a different Lantern version (" + versions + "): everyone in a seamless room needs the same Lantern version" + side;
+}
+
+std::string FullRefusal(int most) {
+    return "This room is full (" + std::to_string(most) + " of " + std::to_string(most) + " hunters)";
+}
 
 struct WebSocket::Impl {
     Sock sock = kBad;
@@ -296,9 +316,13 @@ bool WebSocket::Connect(const std::string& text, int timeout_s, std::string& err
         if (!(impl_->ssl && SSL_pending(impl_->ssl) > 0)) WaitSock(impl_->sock, false, std::min(left(), 200));
     }
     if (head.find(" 101") == std::string::npos) {
-        error = head.find(" 426") != std::string::npos
-                    ? "this Lantern Engine is older than the room server accepts: update to the newest beta"
-                    : "the server refused the room (" + head.substr(0, head.find("\r\n")) + ")";
+        const std::string status = head.substr(0, head.find("\r\n"));
+        if (status.find(" 426") != std::string::npos) {
+            version_refused_ = true;
+            error = VersionRefusal(AnswerProtocol(head), kRoomProtocol);
+        } else {
+            error = "the server refused the room (" + status + ")";
+        }
         return false;
     }
 
@@ -454,6 +478,7 @@ void WebSocket::Run(const Handler& handler) {
                 Frame(pong, 10, payload, static_cast<std::size_t>(len));
                 s.out.insert(s.out.end(), pong.begin(), pong.end());
             } else if (opcode == 8) {
+                if (len >= 2) close_code_ = (int(payload[0]) << 8) | payload[1];
                 closed = true;
                 break;
             } else if (opcode == 1 || opcode == 2 || opcode == 0) {

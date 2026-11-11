@@ -1499,32 +1499,25 @@ static int SanitizeCommentImpl(s32 reqId, const char* comment, char* sanitizedCo
         return ORBIS_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     }
 
+    size_t len = strnlen(comment, ORBIS_NP_SCORE_SANITIZE_COMMENT_MAXLEN + 1);
+    if (len > ORBIS_NP_SCORE_SANITIZE_COMMENT_MAXLEN) {
+        len = ORBIS_NP_SCORE_SANITIZE_COMMENT_MAXLEN;
+        while (len > 0 && (static_cast<unsigned char>(comment[len]) & 0xC0) == 0x80) {
+            --len;
+        }
+    }
+    std::memcpy(sanitizedComment, comment, len);
+    sanitizedComment[len] = '\0';
+
     std::shared_ptr<ScoreRequestCtx> req;
     {
         std::lock_guard lock(g_mutex);
         req = LookupRequestUnlocked(reqId);
-        if (!req) {
-            LOG_ERROR(Lib_NpScore, "invalid reqId {}", reqId);
-            return ORBIS_NP_COMMUNITY_ERROR_INVALID_ID;
-        }
-        if (IsRequestAborted(req)) {
-            return ORBIS_NP_COMMUNITY_ERROR_ABORTED;
-        }
     }
-
-    constexpr size_t probe = ORBIS_NP_SCORE_SANITIZE_COMMENT_MAXLEN + 1;
-    const size_t len = strnlen(comment, probe);
-    if (len > ORBIS_NP_SCORE_SANITIZE_COMMENT_MAXLEN) {
-        LOG_ERROR(Lib_NpScore, "SanitizeComment: comment too long (max {} chars + null)",
-                  ORBIS_NP_SCORE_SANITIZE_COMMENT_MAXLEN);
-        return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
-    }
-
-    // Passthrough copy
-    std::memcpy(sanitizedComment, comment, len);
-    sanitizedComment[len] = '\0';
-
     LOG_INFO(Lib_NpScore, "SanitizeComment: reqId={} len={} (passthrough)", reqId, len);
+    if (!req) {
+        return ORBIS_OK;
+    }
     req->SetResult(ORBIS_OK);
     if (is_async) {
         return ORBIS_OK;

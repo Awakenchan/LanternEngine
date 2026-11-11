@@ -104,6 +104,20 @@ namespace BloodborneLauncher.Core
             return (name, token, reply["RecoveryCode"]?.GetValue<string>() ?? "");
         }
 
+        public static async Task<OnlineStatus.SignInState> WhoAmIAsync(string token, CancellationToken cancel)
+        {
+            try
+            {
+                using var content = new StringContent(new JsonObject { ["Token"] = token }.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+                using var response = await Http.PostAsync(Server + "/auth/whoami", content, cancel);
+                return OnlineStatus.ClassifyWhoAmI(await response.Content.ReadAsStringAsync(cancel));
+            }
+            catch (Exception) when (!cancel.IsCancellationRequested)
+            {
+                return new OnlineStatus.SignInState(OnlineStatus.SignIn.Unknown, "");
+            }
+        }
+
         /// <summary>Tells the server to forget the token (best effort).</summary>
         public static async Task LogoutAsync(string token)
         {

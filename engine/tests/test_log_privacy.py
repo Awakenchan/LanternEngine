@@ -4,7 +4,8 @@ from pathlib import Path
 import unittest
 
 BBNET = Path(__file__).resolve().parents[1] / 'gpu' / 'bbnet'
-SOURCES = sorted(p for p in BBNET.rglob('*') if p.suffix in ('.cpp', '.h') and 'third_party' not in p.parts)
+SOURCES = sorted(p for p in BBNET.rglob('*') if p.suffix in ('.cpp', '.h') and 'third_party' not in p.parts
+                 and 'bbhost' not in p.parts)
 
 LOG_CALL = re.compile(r'\b(?:Log|LOG_[A-Z]+)\s*\(')
 DOTTED = re.compile(r'%[ud]\.%[ud]\.%[ud]\.%[ud]|\{\}\.\{\}\.\{\}\.\{\}')
@@ -55,10 +56,17 @@ class LogPrivacyTests(unittest.TestCase):
     def test_thd_log_lines_use_the_mask(self):
         thd = {p.name: p.read_text(encoding='utf-8') for p in (BBNET / 'thd').glob('*.cpp')}
         for needle in ('net: recv', 'net: send', 'net: punch', 'sees our P2P port', 'our address is now',
-                       'found on a later try', 'resolved (%s:%u)', 'np: guest_invite'):
+                       'np: guest_invite'):
             owner = next(t for t in thd.values() if needle in t)
             at = owner.index(needle)
             self.assertIn('BbNet::Mask', owner[at:at + 300], needle)
+
+    def test_vendored_bbhost_logs_go_through_the_mask(self):
+        shim = (BBNET / 'vendor' / 'bbhost_shim' / 'log.h').read_text(encoding='utf-8')
+        self.assertIn('#define host_log bbhost_np_log', shim)
+        glue = (BBNET / 'thd' / 'thd_bbhost_glue.cpp').read_text(encoding='utf-8')
+        at = glue.index('void bbhost_np_log(')
+        self.assertIn('BbNet::MaskIpv4Host', glue[at:at + 1200])
 
 
 if __name__ == '__main__':

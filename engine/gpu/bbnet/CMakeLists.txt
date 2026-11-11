@@ -19,7 +19,9 @@ file(GLOB_RECURSE BBNET_SOURCES CONFIGURE_DEPENDS
     vendor/shadps4/shadnet/*.cpp)
 file(GLOB BBNET_THD_SOURCES CONFIGURE_DEPENDS thd/*.cpp)
 file(GLOB BBNET_ROOM_SOURCES CONFIGURE_DEPENDS room/*.cpp)
-add_library(bbnet STATIC ${BBNET_SOURCES} ${BBNET_THD_SOURCES} ${BBNET_ROOM_SOURCES} ${BBNET_PROTO_OUT}/shadnet.pb.cc bbnet_glue.cpp)
+add_library(bbnet STATIC ${BBNET_SOURCES} ${BBNET_THD_SOURCES} ${BBNET_ROOM_SOURCES} ${BBNET_PROTO_OUT}/shadnet.pb.cc bbnet_glue.cpp vendor/bbhost/np_signaling.cpp)
+set_source_files_properties(vendor/bbhost/np_signaling.cpp PROPERTIES
+    COMPILE_OPTIONS "-iquote;${CMAKE_CURRENT_SOURCE_DIR}/vendor/bbhost_shim;-Wno-unused-parameter")
 target_include_directories(bbnet PRIVATE include ../shim ${BBNET_VENDOR}
     ${BBNET_VENDOR}/shadnet ../shadps4 ${BBNET_PROTO_OUT} ../third_party/imgui third_party/httplib)
 target_compile_definitions(bbnet PRIVATE BOOST_ASIO_STANDALONE NDEBUG

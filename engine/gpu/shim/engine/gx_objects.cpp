@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_objects.h"
+#include "const_census.h"
+#include "ring_constants.h"
+#include "gx_sealed.h"
+#include "batch.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include <algorithm>
@@ -126,6 +130,8 @@ void Note(u64 address, u32 creator, u64 source, const void* description) {
 }
 
 constexpr std::size_t kResourceBase = 0x20, kResourceBytes = 0x30;
+constexpr std::size_t kBufferSize = 0x2c, kBufferAligned = 0x30, kBufferDynamic = 0x40;
+GxSealed::Registry* g_sealed = nullptr;
 struct ImageSeen {
     u64 uid;
     u32 width, height, format, bytes;
@@ -238,6 +244,10 @@ template <int C> std::int64_t __attribute__((sysv_abi)) OnCreate(std::uint64_t, 
         Note(made, C, third, reinterpret_cast<const void*>(third));
         if (kind == Buffer) {
             BufferVersionOf(made).fetch_add(1, std::memory_order_release);
+            if (g_sealed && !Peek<std::uint8_t>(made + kBufferDynamic)) {
+                g_sealed->Seal(Peek<u64>(made + kResourceBase),
+                               std::max<u64>(Peek<u32>(made + kBufferSize), Peek<u32>(made + kBufferAligned)));
+            }
             NoteResource(made, kind, reinterpret_cast<const u32*>(third), Peek<u64>(made + kResourceBase), Peek<u32>(third));
         } else if (kind == Texture2D || kind == Texture3D) {
             NoteResource(made, kind, reinterpret_cast<const u32*>(third), Peek<u64>(made + kResourceBase), Peek<u32>(made + kResourceBytes));
@@ -314,7 +324,13 @@ std::int64_t __attribute__((sysv_abi)) OnUploadPool(std::uint64_t, const std::ui
 
 template <int V> std::int64_t __attribute__((sysv_abi)) OnRelease(std::uint64_t, const std::uint64_t* saved) {
     const u64 address = saved[5];
-    if (kVtables[V].kind == Buffer) BufferVersionOf(address).fetch_add(1, std::memory_order_release);
+    if (kVtables[V].kind == Buffer) {
+        BufferVersionOf(address).fetch_add(1, std::memory_order_release);
+        if (g_sealed)
+            g_sealed->RetireRange(Peek<u64>(address + kResourceBase),
+                                  std::max<u64>(Peek<u32>(address + kBufferSize), Peek<u32>(address + kBufferAligned)),
+                                  GxSealed::ByRelease);
+    }
     if (kVtables[V].kind == Buffer || kVtables[V].kind == Texture2D || kVtables[V].kind == Texture3D) DropResource(address);
     Shard& shard = ShardFor(address);
     std::scoped_lock lock(shard.mutex);
@@ -466,6 +482,47 @@ bool TakeUploadArena(std::uint64_t* base, std::uint64_t* bytes) {
 
 bool TexturesChecked() {
     return g_textures_checked.load(std::memory_order_relaxed);
+}
+
+bool UploadArena(std::uint64_t* base, std::uint64_t* bytes) {
+    *bytes = g_arena_bytes.load(std::memory_order_relaxed);
+    *base = g_arena_base.load(std::memory_order_relaxed);
+    return *bytes != 0;
+}
+
+bool SealingOn() {
+    return g_sealed != nullptr;
+}
+
+bool SealedFind(std::uint64_t address, std::uint64_t size, std::uint32_t* id, std::uint32_t* generation, std::uint64_t* base) {
+    GxSealed::Hit hit;
+    if (!g_sealed || !g_sealed->Find(address, size, &hit)) return false;
+    *id = hit.id;
+    *generation = hit.generation;
+    *base = hit.base;
+    return true;
+}
+
+bool SealedValid(std::uint32_t id, std::uint32_t generation) {
+    return g_sealed && g_sealed->Valid({id, generation, 0, 0});
+}
+
+void NoteCpuWrite(std::uint64_t address, std::uint64_t size) {
+    if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByCpuWrite);
+}
+
+void NoteGpuWrite(std::uint64_t address, std::uint64_t size) {
+    if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByGpuWrite);
+}
+
+void RetireSealed(std::uint64_t address, std::uint64_t size) {
+    if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByUpdate);
+}
+
+bool BufferAt(std::uint64_t address) {
+    ConstCensus::Range found;
+    std::scoped_lock lock(g_resource_mutex);
+    return ConstCensus::ContainingRange(g_resources, address, [](const Resource& r) { return r.kind == Buffer ? r.bytes : 0; }, &found);
 }
 
 HeldImage HeldAt(std::uint64_t address) {
@@ -664,8 +721,23 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const bool buffers = buffers_env && buffers_env[0] == '1';
     const char* records = std::getenv("LANTERN_GX_RECORDS");
     const bool want_records = records && (records[0] == '1' || records[0] == '2' || records[0] == '3');
-    if (!textures && !buffers && !want_records && (!on || on[0] != '1')) {
+    const char* census = std::getenv("LANTERN_CONST_CENSUS");
+    const bool want_census = census && census[0] == '1';
+    const char* ring = std::getenv("LANTERN_RING_CONSTANTS");
+    const bool want_ring = RingConstants::Parse(ring) != RingConstants::Off;
+    const bool own_buffers = Batch::Switch("LANTERN_GX_OWN_BUFFERS") != Batch::Off;
+    const bool objects = textures || buffers || want_records || want_census || (on && on[0] == '1');
+    if (!objects && !own_buffers) {
         host_log("GX objects: off (LANTERN_GX_TEXTURES, LANTERN_GX_BUFFERS or LANTERN_GX_RECORDS=1 turns them on)");
+        if (want_ring) {
+            Hook pool;
+            if (Prepare(pool, image, size, kUploadPool, kUploadPoolEntry, OnUploadPool)) {
+                Commit(std::span<Hook>(&pool, 1));
+                host_log("GX upload pool: watched for ring constants (LANTERN_RING_CONSTANTS=1)");
+            } else {
+                host_log("GX upload pool: its entry differs from 1.09, ring constants off");
+            }
+        }
         return false;
     }
     for (const Vtable& v : kVtables) {
@@ -726,13 +798,16 @@ bool Install(std::uint8_t* image, std::size_t size) {
         std::memcpy(image + kVtables[v].offset, &complete, sizeof complete);
         std::memcpy(image + kVtables[v].offset + 8, &deleting, sizeof deleting);
     }
-    g_on.store(true, std::memory_order_relaxed);
+    if (own_buffers) g_sealed = new GxSealed::Registry();
+    g_on.store(objects, std::memory_order_relaxed);
     g_textures_owned.store(textures, std::memory_order_relaxed);
     g_textures_checked.store(checked, std::memory_order_relaxed);
     g_buffers_owned.store(buffers, std::memory_order_relaxed);
     Commit(std::span<Hook>(hooks));
     if (buffers) host_log("GX objects: GX's upload arena stays in place (LANTERN_GX_BUFFERS=1)");
-    host_log(textures ? "GX objects: on, textures hold their images (LANTERN_GX_TEXTURES)" : "GX objects: on (LANTERN_GX_OBJECTS=1)");
+    if (own_buffers) host_log("GX objects: static GX buffers are sealed for their own buffers (LANTERN_GX_OWN_BUFFERS)");
+    if (objects)
+        host_log(textures ? "GX objects: on, textures hold their images (LANTERN_GX_TEXTURES)" : "GX objects: on (LANTERN_GX_OBJECTS=1)");
     return true;
 }
 }

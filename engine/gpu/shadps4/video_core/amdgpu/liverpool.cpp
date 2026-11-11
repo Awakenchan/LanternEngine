@@ -807,7 +807,8 @@ void Liverpool::NotePendingFences(const auto& event) {
         BbWriteLog::NoteIntent(reinterpret_cast<u64>(address), &data, num_bytes,
                                is_eop ? BbWriteLog::FenceIntent : BbWriteLog::EosIntent);
         pending_fences.push_back({reinterpret_cast<VAddr>(address), data, num_bytes, position});
-        rasterizer->NotePendingGpuWrite(reinterpret_cast<VAddr>(address), num_bytes);
+        rasterizer->NotePendingGpuWrite(reinterpret_cast<VAddr>(address), num_bytes,
+                                        BbEngine::RingConstants::WriterFence);
     };
     if constexpr (requires { event.SignalFence(note, [] {}); }) {
         event.SignalFence(note, [] {});
@@ -1858,7 +1859,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                        "ZpassDump")) {
                                 zpass_dumps_in_order.fetch_add(1, std::memory_order_relaxed);
                                 rasterizer->NotePendingGpuWrite(
-                                    dump.address, u64(dump.num_pairs) * 2 * sizeof(u64));
+                                    dump.address, u64(dump.num_pairs) * 2 * sizeof(u64),
+                                    BbEngine::RingConstants::WriterZpass);
                             }
                         } else {
                             WriteZpassCounters(rasterizer, dump, false);
@@ -1924,7 +1926,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     (dma_data->dst_sel == DmaDataDst::Memory ||
                      dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
                     rasterizer->NotePendingGpuWrite(dma_data->DstAddress<VAddr>(),
-                                                    dma_data->NumBytes());
+                                                    dma_data->NumBytes(),
+                                                    BbEngine::RingConstants::WriterDma);
                 }
                 break;
             }
@@ -1946,7 +1949,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                                "WriteData")) {
                         NotePendingWrite(*write_data, (count - 2) * sizeof(u32));
                         rasterizer->NotePendingGpuWrite(write_data->Address<VAddr>(),
-                                                        (count - 2) * sizeof(u32));
+                                                        (count - 2) * sizeof(u32),
+                                                        BbEngine::RingConstants::WriterWriteData);
                     }
                 } else {
                     BbFreeCheck::Check(write_data->Address<u64>(), (count - 2) * 4, write_data->data,
