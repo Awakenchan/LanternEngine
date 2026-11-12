@@ -1,0 +1,54 @@
+name: ${COMPOSE_PROJECT_NAME:-private-coop-docker}
+
+services:
+  setup:
+    image: python:3.13-alpine
+    profiles: [setup]
+    working_dir: /setup
+    volumes:
+      - .:/setup
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set RELAY_DOMAIN in .env}
+    command: [python, configure.py]
+
+  relay:
+    build:
+      context: ../..
+      dockerfile: server/seamless/Dockerfile
+    environment:
+      ROOM_ID: ${ROOM_ID:-}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: "${LOG_MAX_FILES:-3}"
+
+  caddy:
+    image: caddy:2
+    depends_on: [relay]
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set RELAY_DOMAIN in .env}
+    ports:
+      - "443:443/tcp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: "${LOG_MAX_FILES:-3}"
+
+volumes:
+  caddy_data:
+  caddy_config:

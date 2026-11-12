@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <cstdio>
+#include <csignal>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,6 +24,7 @@
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -90,13 +92,28 @@ std::string Exchange(int port, const std::string& request) {
 
 void OtherVersionServer(int port, int protocol, std::atomic<bool>& ready) {
     const RawSock listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+#ifndef _WIN32
+    const int reuse = 1;
+    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
+#endif
     sockaddr_in at{};
     at.sin_family = AF_INET;
     at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     at.sin_port = htons(static_cast<std::uint16_t>(port));
-    ::bind(listener, reinterpret_cast<sockaddr*>(&at), sizeof at);
-    ::listen(listener, 1);
+    if (::bind(listener, reinterpret_cast<sockaddr*>(&at), sizeof at) != 0 || ::listen(listener, 1) != 0) {
+        std::fprintf(stderr, "version-test listener could not open port %d\n", port);
+        CloseRaw(listener);
+        return;
+    }
     ready = true;
+    fd_set pending;
+    FD_ZERO(&pending);
+    FD_SET(listener, &pending);
+    timeval wait{10, 0};
+    if (::select(static_cast<int>(listener + 1), &pending, nullptr, nullptr, &wait) <= 0) {
+        CloseRaw(listener);
+        return;
+    }
     const RawSock peer = ::accept(listener, nullptr, nullptr);
     std::string head;
     char buffer[1024];
@@ -256,6 +273,10 @@ void TestSevenHunters() {
 } // namespace
 
 int main() {
+#ifndef _WIN32
+    // Match the standalone relay: a peer closing a socket is not a fatal signal.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     const std::string name = "direct-room", password = "secret";
     const int port = 38765;
     const std::string server = "ws://127.0.0.1:" + std::to_string(port);
@@ -399,6 +420,7 @@ int main() {
     std::atomic<bool> other_ready{false};
     std::thread other_server(OtherVersionServer, other_port, kRoomProtocol + 1, std::ref(other_ready));
     for (int i = 0; i < 100 && !other_ready.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    Check(other_ready.load(), "the version-test listener opens its port");
     Link outdated;
     outdated.Start("ws://127.0.0.1:" + std::to_string(other_port), name, password);
     Event version;

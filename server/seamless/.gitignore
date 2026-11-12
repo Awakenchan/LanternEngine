@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+invite.txt
+*.log
+build/
+__pycache__/

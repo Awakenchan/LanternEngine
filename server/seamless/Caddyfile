@@ -1,0 +1,37 @@
+{
+    auto_https disable_redirects
+}
+
+(relay_health) {
+    reverse_proxy relay:38765 {
+        rewrite /
+        @reachable status 404
+        handle_response @reachable {
+            respond "relay reachable" 200
+        }
+    }
+}
+
+{$RELAY_DOMAIN} {
+    tls {
+        issuer acme {
+            disable_http_challenge
+        }
+    }
+    handle /healthz {
+        import relay_health
+    }
+    handle {
+        reverse_proxy relay:38765
+    }
+}
+
+# Internal health listener only; not published on the host.
+http://:8080 {
+    handle /healthz {
+        import relay_health
+    }
+    handle {
+        respond 404
+    }
+}
