@@ -98,6 +98,8 @@ public:
         return fetch_shader;
     }
 
+    vk::Pipeline HdrHandle() const { return *hdr_pipeline; }
+    bool ScaledGlow() const { return scaled_glow; }
     const GraphicsPipelineKey& GetGraphicsKey() const {
         return key;
     }
@@ -116,6 +118,8 @@ private:
     void BuildDescSetLayout(bool preloading);
 
 private:
+    vk::UniquePipeline hdr_pipeline;
+    bool scaled_glow = false;
     GraphicsPipelineKey key;
     vk::UniqueDescriptorSetLayout motion_address_layout;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};

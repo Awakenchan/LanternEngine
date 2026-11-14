@@ -19,6 +19,7 @@
 #include "lantern_anti_lag.h"
 #include "video_core/renderer_vulkan/vk_fsr_framegen.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
+#include "video_core/renderer_vulkan/vk_hdr_channel.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
@@ -131,12 +132,29 @@ static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_widt
 
 // bbport: screenshot capture and ImGui overlays removed; the port presents directly.
 
+// Native+: a half float of the RGBA16F frame, clamped to 0..1 as an 8-bit channel.
+static std::uint8_t FaceHalfToByte(std::uint16_t h) {
+    const u32 exponent = (h >> 10) & 0x1F, mantissa = h & 0x3FF;
+    float value = exponent == 0 ? std::ldexp(float(mantissa), -24)
+                                : exponent == 31 ? 1.0f : std::ldexp(float(mantissa | 0x400), int(exponent) - 25);
+    if (h & 0x8000) value = 0.0f;
+    return std::uint8_t(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+}
+
 static void GrabFace(const Instance& instance, Scheduler& scheduler, vk::Image image, u32 width, u32 height,
                      vk::Format format) {
     float rect[4];
     if (!BbFaceShot::Due(rect) || !width || !height) {
         return;
     }
+    // Native+ presents an RGBA16F frame (8 bytes a texel): read as such, then made 8-bit RGBA.
+    // Any other format than 8-bit RGBA/BGRA is skipped, so the copy never outgrows the buffer.
+    const bool half = format == vk::Format::eR16G16B16A16Sfloat;
+    if (!half && format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eR8G8B8A8Srgb &&
+        format != vk::Format::eB8G8R8A8Unorm && format != vk::Format::eB8G8R8A8Srgb) {
+        return;
+    }
+    const u32 texel = half ? 8 : 4;
     const u32 x = u32(rect[0] * float(width)), y = u32(rect[1] * float(height));
     const u32 w = std::min(width - x, u32((rect[2] - rect[0]) * float(width)));
     const u32 h = std::min(height - y, u32((rect[3] - rect[1]) * float(height)));
@@ -145,7 +163,7 @@ static void GrabFace(const Instance& instance, Scheduler& scheduler, vk::Image i
     }
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = VkDeviceSize(w) * h * 4,
+        .size = VkDeviceSize(w) * h * texel,
         .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     };
     const VmaAllocationCreateInfo alloc_ci{
@@ -181,9 +199,17 @@ static void GrabFace(const Instance& instance, Scheduler& scheduler, vk::Image i
     };
     cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
     const bool bgra = format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb;
-    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info, w, h, bgra] {
+    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info, w, h, bgra, half] {
         vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
-        BbFaceShot::Deliver(static_cast<const std::uint8_t*>(info.pMappedData), w, h, w * 4, bgra);
+        const auto* pixels = static_cast<const std::uint8_t*>(info.pMappedData);
+        std::vector<std::uint8_t> bytes;
+        if (half) {
+            const auto* halves = static_cast<const std::uint16_t*>(info.pMappedData);
+            bytes.resize(std::size_t(w) * h * 4);
+            for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = FaceHalfToByte(halves[i]);
+            pixels = bytes.data();
+        }
+        BbFaceShot::Deliver(pixels, w, h, w * 4, bgra);
         vmaDestroyBuffer(allocator, buffer, allocation);
     });
 }
@@ -236,7 +262,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
-    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    pp_pass.Create(device, HdrChannel::Native16() ? HdrChannel::Native16Format : swapchain.GetSurfaceFormat().format);
     // bbport: + 2: frame generation presents up to twice per game frame, and adds a swapchain
     // image; the menu's vertex buffers rotate over this many.
     BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images + 2);
@@ -393,7 +419,11 @@ void Presenter::CreateHdrTarget(HdrTarget& target, vk::Extent2D extent, const ch
     const bool sdr = format == vk::Format::eUndefined;
     const vk::ImageCreateInfo image_info = {
         .imageType = vk::ImageType::e2D,
-        .format = sdr ? swapchain.GetSurfaceFormat().format : format,
+        // Native+: the composite keeps the 16-bit chain's values above white.
+        .format = !sdr ? format
+                  : HdrChannel::Native16() && std::strcmp(name, "composite") == 0
+                      ? HdrChannel::Native16Format
+                      : swapchain.GetSurfaceFormat().format,
         .extent = {extent.width, extent.height, 1},
         .mipLevels = 1,
         .arrayLayers = 1,
@@ -464,7 +494,9 @@ void Presenter::EnsureDlssHdrTargets(vk::Extent2D extent) {
                 DestroyHdrTarget(hudless);
             });
     }
-    CreateHdrTarget(dlss_hdr_composite, extent, "DLSS-G HUD-less composite");
+    // Native+: the 16-bit chain's frame without its UI, as the back buffer's composite.
+    CreateHdrTarget(dlss_hdr_composite, extent, "DLSS-G HUD-less composite",
+                    HdrChannel::Native16() ? HdrChannel::Native16Format : vk::Format::eUndefined);
     CreateHdrTarget(dlss_hdr_hudless, extent, "DLSS-G HUD-less", swapchain.GetHdrFormat().format);
     dlss_hdr_extent = extent;
 }
@@ -576,7 +608,10 @@ void Presenter::PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D 
     // real frame's it was interpolated towards (PresentGenerated), or every other frame would
     // fall back to plain SDR.
     const Frame* gain = hdr_gain_source ? hdr_gain_source : frame;
-    const bool native = mode == BbSettings::HdrModeNative && gain->hdr_native && gain->hdr_gain;
+    const bool native_plus = HdrChannel::Native16() && frame->nativeplus_frame;
+    BbSettings::Get().hdr_native16_live.store(native_plus, std::memory_order_relaxed); // menu status
+    const bool native = !HdrChannel::Native16() && mode == BbSettings::HdrModeNative &&
+                        gain->hdr_native && gain->hdr_gain;
     LogHdrState(scrgb, mode, native);
     // BB_HDR_DEBUG=1: the gain as a heat map over a grey picture (hdr_output.frag).
     static const bool debug = [] {
@@ -590,7 +625,7 @@ void Presenter::PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D 
         .paper_white = std::clamp(settings.hdr_paper_white.load(), BbSettings::HdrPaperWhiteMin,
                                   BbSettings::HdrPaperWhiteMax),
         .peak = BbSettings::HdrPeakNits(settings),
-        .boost = mode == BbSettings::HdrModeNative && !native
+        .boost = HdrChannel::Native16() || (mode == BbSettings::HdrModeNative && !native)
                      ? 0.0f
                      : std::clamp(settings.hdr_boost.load(), 0.0f, 1.0f),
         .flags = (scrgb ? HostPasses::HdrOutputPass::FlagScRgb : 0u) |
@@ -598,22 +633,34 @@ void Presenter::PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D 
                  (native ? HostPasses::HdrOutputPass::FlagNative : 0u) |
                  (debug ? HostPasses::HdrOutputPass::FlagDebug : 0u) |
                  (mode == BbSettings::HdrModeNative && !native ? HostPasses::HdrOutputPass::FlagUiFrame : 0u) |
-                 (settings.hdr_compare.load(std::memory_order_relaxed) ? HostPasses::HdrOutputPass::FlagCompare : 0u),
+                 // The split comparison (Native / Expand); Native+ has its own (hdr16_compare).
+                 (!native_plus && settings.hdr_compare.load(std::memory_order_relaxed) ? HostPasses::HdrOutputPass::FlagCompare : 0u) |
+                 (native_plus ? HostPasses::HdrOutputPass::FlagNativePlus : 0u) |
+                 (native_plus && frame->nativeplus_encoded ? HostPasses::HdrOutputPass::FlagEncoded : 0u) |
+                 (native_plus && frame->hud_snapshot ? HostPasses::HdrOutputPass::FlagSnapshot : 0u) |
+                 (native_plus && HdrChannel::VanillaChain() ? HostPasses::HdrOutputPass::FlagGameLook : 0u),
         .gain_offset = {float(fit.offset.x), float(fit.offset.y)},
         .gain_scale = {1.0f / float(std::max(fit.extent.width, 1u)),
                        1.0f / float(std::max(fit.extent.height, 1u))},
-        .ui_white = mode == BbSettings::HdrModeNative
-                        ? std::clamp(settings.hdr_ui_brightness.load(), BbSettings::HdrUiBrightnessMin,
-                                     BbSettings::HdrUiBrightnessMax)
+        .ui_white = (mode == BbSettings::HdrModeNative || native_plus)
+                        // UI Brightness in nits, as a factor of the paper white the pass gets.
+                        ? std::clamp(settings.hdr_ui_nits.load(), BbSettings::HdrUiNitsMin,
+                                     BbSettings::HdrUiNitsMax) /
+                              std::clamp(settings.hdr_paper_white.load(), BbSettings::HdrPaperWhiteMin,
+                                         BbSettings::HdrPaperWhiteMax)
                         : 1.0f,
         .ui_vivid = mode == BbSettings::HdrModeNative ? std::clamp(settings.hdr_ui_color.load(), 0.0f, 1.0f) : 0.0f,
+        // The menu's HDR preset Off is the game's own look: no black floor either.
+        .black_floor = settings.hdr_preset == 0
+                           ? 0.0f
+                           : settings.hdr_black_floor.load() / std::max(settings.hdr_paper_white.load(), 1.0f),
     };
     // bbport: MaxCLL, the brightest the content gets: native mode's highlights reach the peak;
     // expand mode's SDR white goes to boost's share of it. It changes with the settings, not
     // per frame: a display re-mapping its tone curve on every fallback would pump.
     const float expand_white =
         std::max(1.0f + (hdr.peak / hdr.paper_white - 1.0f) * hdr.boost, 1.0f);
-    const float content_peak = mode == BbSettings::HdrModeNative
+    const float content_peak = HdrChannel::Native16() || mode == BbSettings::HdrModeNative
                                    ? hdr.peak
                                    : std::min(hdr.peak, hdr.paper_white * expand_white);
     swapchain.SetHdrMetadata(hdr.peak, content_peak, hdr.paper_white);
@@ -629,7 +676,8 @@ void Presenter::PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D 
     hdr_pass.Render(cmdbuf, hdr_game.view, overlay ? hdr_overlay.view : hdr_game.view,
                     native ? *gain->hdr_gain->view : hdr_game.view,
                     native ? Layout::eGeneral : Layout::eShaderReadOnlyOptimal,
-                    swapchain.ImageView(), extent, hdr);
+                    swapchain.ImageView(), extent, hdr,
+                    native_plus && frame->hud_snapshot ? *frame->hud_snapshot->view : hdr_game.view);
 
     const std::array to_present{
         barrier(swapchain_image, Layout::eColorAttachmentOptimal, Layout::ePresentSrcKHR,
@@ -677,7 +725,9 @@ void Presenter::PresentHdr(vk::CommandBuffer cmdbuf, Frame* frame, vk::Extent2D 
     };
     barriers(to_encode);
     auto hudless_hdr = hdr;
-    hudless_hdr.flags &= ~HostPasses::HdrOutputPass::FlagOverlay;
+    // Without the menu layer; Native+: no UI to tell from the scene in it (no pre-UI snapshot).
+    hudless_hdr.flags &= ~(HostPasses::HdrOutputPass::FlagOverlay |
+                           HostPasses::HdrOutputPass::FlagSnapshot);
     hdr_pass.Render(cmdbuf, dlss_hdr_composite.view, dlss_hdr_composite.view,
                     native ? *frame->hdr_gain->view : dlss_hdr_composite.view,
                     native ? Layout::eGeneral : Layout::eShaderReadOnlyOptimal,
@@ -699,7 +749,9 @@ void Presenter::LogHdrState(bool scrgb, int mode, bool native_frame) {
         hdr_native_state = hdr_logged_native = -1;
         std::printf("HDR output: %s, mode %s (%s)\n",
                     scrgb ? "scRGB (FP16)" : "HDR10 (PQ, BT.2020)", BbSettings::HdrModeNames[mode],
-                    mode == BbSettings::HdrModeNative
+                    HdrChannel::Native16()
+                        ? "Native+, tone mapped on the game's scene, 16-bit chain"
+                    : mode == BbSettings::HdrModeNative
                         ? "highlights from the game's HDR scene, plain SDR where a frame has none"
                         : "highlights expanded from the SDR picture");
     }
@@ -741,7 +793,7 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
         vmaDestroyImage(instance.GetAllocator(), frame->image, frame->allocation);
     }
 
-    const vk::Format format = swapchain.GetSurfaceFormat().format;
+    const vk::Format format = HdrChannel::Native16() ? HdrChannel::Native16Format : swapchain.GetSurfaceFormat().format;
     const vk::ImageCreateInfo image_info = {
         .flags = vk::ImageCreateFlagBits::eMutableFormat,
         .imageType = vk::ImageType::e2D,
@@ -871,6 +923,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // bbport: scaled upscaler presets: the output-size display buffer drawn by the port.
     TemporalUpscaler::Display display{};
     const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);
+    const bool nativeplus_frame =
+        HdrChannel::Native16() && upscaled && display.format == HdrChannel::Native16Format;
     VideoCore::ImageId image_id{};
     if (!upscaled) {
         auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
@@ -879,6 +933,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
 
     Frame* frame = GetRenderFrame();
+    // Native+: the 16-bit chain's frame, its SDR part encoded as the display buffer's format
+    // says, and the scene before its HUD (the final pass tells the HUD from it).
+    frame->nativeplus_frame = nativeplus_frame;
+    frame->nativeplus_encoded =
+        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb ||
+        GetFrameViewFormat(attribute.attrib.pixel_format) == vk::Format::eB8G8R8A8Srgb ||
+        GetFrameViewFormat(attribute.attrib.pixel_format) == vk::Format::eR8G8B8A8Srgb;
+    if (nativeplus_frame) {
+        rasterizer->GetUpscaler().TakeHudSnapshot(cpu_address, frame->hud_snapshot);
+    } else {
+        frame->hud_snapshot.reset();
+    }
+
     // bbport: native HDR output: the gain map made at this display buffer's display pass (for
     // the frame it holds, a frame earlier in the command stream) goes with the frame to the
     // present thread; the frame's old one, presented (its fence was waited above), goes back.
@@ -906,12 +973,20 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     vk::Extent2D image_size{};
     if (upscaled) {
         const auto device = instance.GetDevice();
+        // Native+: the RGBA16F display image holds the game's channel order; the view swaps red
+        // and blue where the game's display buffer and the frame's view order them differently.
+        const auto bgra = [](vk::Format format) {
+            return format == vk::Format::eB8G8R8A8Srgb || format == vk::Format::eB8G8R8A8Unorm;
+        };
+        const bool swap_rb = nativeplus_frame && bgra(view_info.format) != bgra(display.guest_format);
         image_view = Check(device.createImageView({
             .image = display.image,
             .viewType = vk::ImageViewType::e2D,
-            .format = view_info.format,
-            .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
-                           vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
+            .format = nativeplus_frame ? display.format : view_info.format,
+            .components = {swap_rb ? vk::ComponentSwizzle::eB : vk::ComponentSwizzle::eIdentity,
+                           vk::ComponentSwizzle::eIdentity,
+                           swap_rb ? vk::ComponentSwizzle::eR : vk::ComponentSwizzle::eIdentity,
+                           vk::ComponentSwizzle::eOne},
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
         draw_scheduler.DeferOperation([device, image_view] { device.destroyImageView(image_view); });
@@ -960,15 +1035,18 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
 
+    // Keep the gamma-encoded HDR values above one through the post-process target.
+    pp_settings.hdr = nativeplus_frame;
     // bbport: frame generation: this frame's generated one, shown before it. Without a free
     // generated frame the interpolation still runs (its history stays whole) but none is shown.
     frame->generated = nullptr;
     std::optional<FrameGenerator::Job> gen_job;
     Frame* generated = nullptr;
     {
+        // Native+'s frames are HDR too (16-bit): FSR 3.1 interpolates them as they are.
         const bool hdr = BbSettings::Get().hdr_output.load(std::memory_order_relaxed) !=
                              BbSettings::HdrOutputOff ||
-                         frame->is_hdr;
+                         frame->is_hdr || nativeplus_frame;
         gen_job = frame_gen->Prepare(image_size, view_info.format, hdr, fsr_settings.enable,
                                      draw_scheduler.CurrentTick());
         if (gen_job && gen_job->present) {
@@ -1017,6 +1095,46 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const bool dlss_srgb = view_info.format == vk::Format::eR8G8B8A8Srgb ||
                            view_info.format == vk::Format::eB8G8R8A8Srgb;
 
+    // Native+ (FSR 3.1 frame generation): the generated frame's scene before its HUD is FSR's
+    // interpolated frame, copied after the composition into the generated frame's own snapshot
+    // (its pool frame is not reused before it is shown): the final pass tells its HUD as on a
+    // real frame, at UI Brightness.
+    vk::Image generated_snapshot{};
+    u32 generated_width = 0, generated_height = 0;
+    if (generated && nativeplus_frame && !gen_job->dlss) {
+        generated_width = gen_job->width;
+        generated_height = gen_job->height;
+        auto& snapshot = generated->hud_snapshot;
+        if (!snapshot || snapshot->width != generated_width ||
+            snapshot->height != generated_height) {
+            const auto device = instance.GetDevice();
+            snapshot = std::make_unique<HdrGainMap>();
+            snapshot->image = VideoCore::UniqueImage(device, instance.GetAllocator());
+            snapshot->image.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = HdrChannel::Native16Format,
+                .extent = {generated_width, generated_height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            snapshot->view = Check(device.createImageViewUnique({
+                .image = vk::Image(snapshot->image),
+                .viewType = vk::ImageViewType::e2D,
+                .format = HdrChannel::Native16Format,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+            snapshot->width = generated_width;
+            snapshot->height = generated_height;
+        }
+        generated_snapshot = vk::Image(snapshot->image);
+    } else if (generated) {
+        generated->hud_snapshot.reset();
+    }
+
     // Numbered here, in command order; marked where the commands are recorded.
     const u32 stream = draw_scheduler.CrumbStream();
     const bool crumbs = Breadcrumbs::Enabled();
@@ -1025,7 +1143,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     draw_scheduler.Record([this, frame, image_view, image_size, frame_subresources, stream,
                            fsr_crumb, pp_crumb, fsr = fsr_settings, pp = pp_settings, generated,
                            gen_job, dlss_hudless, dlss_srgb, dlss = dlss_fg.get(), fsr_fg,
-                           fg = frame_gen.get()](vk::CommandBuffer cmdbuf) {
+                           fg = frame_gen.get(), generated_snapshot, generated_width,
+                           generated_height](vk::CommandBuffer cmdbuf) {
         // Frames of different submissions may be recorded on two threads at once.
         std::scoped_lock lock{passes_mutex};
         const auto pre_barrier = vk::ImageMemoryBarrier2{
@@ -1047,7 +1166,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         }
         const vk::ImageView input = fsr_pass.Render(cmdbuf, image_view, image_size,
                                                     {frame->width, frame->height}, fsr,
-                                                    frame->is_hdr);
+                                                    frame->is_hdr || frame->nativeplus_frame);
         if (fsr_crumb) {
             Breadcrumbs::Mark(cmdbuf, stream, fsr_crumb, true);
             Breadcrumbs::Mark(cmdbuf, stream, pp_crumb, false);
@@ -1115,6 +1234,47 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 .pImageMemoryBarriers = &to_target,
             });
             pp_pass.Render(cmdbuf, frame_gen->ComposedView(), image_size, *generated, pp);
+            if (generated_snapshot) {
+                const vk::ImageSubresourceRange color{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+                const std::array to_copy{
+                    vk::ImageMemoryBarrier2{
+                        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+                        .oldLayout = vk::ImageLayout::eGeneral,
+                        .newLayout = vk::ImageLayout::eGeneral,
+                        .image = frame_gen->GeneratedImage(),
+                        .subresourceRange = color},
+                    vk::ImageMemoryBarrier2{
+                        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
+                        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                        .oldLayout = vk::ImageLayout::eUndefined,
+                        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+                        .image = generated_snapshot,
+                        .subresourceRange = color}};
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 2,
+                                         .pImageMemoryBarriers = to_copy.data()});
+                cmdbuf.copyImage(frame_gen->GeneratedImage(), vk::ImageLayout::eGeneral,
+                                 generated_snapshot, vk::ImageLayout::eTransferDstOptimal,
+                                 vk::ImageCopy{
+                                     .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                     .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                     .extent = {generated_width, generated_height, 1}});
+                const vk::ImageMemoryBarrier2 to_read{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                    .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                    .dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader,
+                    .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead,
+                    .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+                    .newLayout = vk::ImageLayout::eGeneral,
+                    .image = generated_snapshot,
+                    .subresourceRange = color};
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1,
+                                         .pImageMemoryBarriers = &to_read});
+            }
             std::atomic_ref<bool>(generated->generated_ok).store(true, std::memory_order_release);
         }
     });
@@ -1127,6 +1287,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         generated->ready_semaphore = frame->ready_semaphore;
         generated->ready_tick = frame->ready_tick;
         generated->hdr_native = false;
+        // Native+ (FSR 3.1 frame generation): the generated frame is the chain's 16-bit image
+        // like the real one, encoded alike by the final pass, with its own pre-HUD snapshot
+        // (FSR's interpolated frame, above): not the real frame's, the scene moved since.
+        generated->nativeplus_frame = frame->nativeplus_frame;
+        generated->nativeplus_encoded = frame->nativeplus_encoded;
         frame->generated = generated;
     }
     SubmitInfo info{};

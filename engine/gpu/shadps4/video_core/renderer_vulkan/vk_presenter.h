@@ -58,6 +58,9 @@ struct Frame {
     bool generated_ok{false};
     /// bbport: DLSS Frame Generation (vk_streamline.h): this game frame's index and inputs.
     DlssFrameInfo dlss{};
+    bool nativeplus_frame = false;
+    bool nativeplus_encoded = true;
+    std::unique_ptr<HdrGainMap> hud_snapshot;
 };
 
 enum SchedulerType {

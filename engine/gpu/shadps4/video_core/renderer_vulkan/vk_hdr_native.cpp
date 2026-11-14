@@ -2,6 +2,7 @@
 // bbport: native HDR output (vk_hdr_native.h, hdr_native.comp, docs/hdr.md).
 
 #include "video_core/renderer_vulkan/vk_hdr_native.h"
+#include "video_core/renderer_vulkan/vk_hdr_channel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -172,6 +173,7 @@ HdrNative::~HdrNative() {
 }
 
 bool HdrNative::Wanted() {
+    if (HdrChannel::Native16()) return false;
     const auto& s = BbSettings::Get();
     return s.hdr_output.load(std::memory_order_relaxed) != BbSettings::HdrOutputOff &&
            s.hdr_mode.load(std::memory_order_relaxed) == BbSettings::HdrModeNative;

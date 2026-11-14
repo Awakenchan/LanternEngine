@@ -12,8 +12,9 @@ In the source (paths under engine/ unless named), Lantern Engine's own code is e
 gpu/bbnet/thd/, the launcher (launcher/ in the repository), and the built-in game patches
 (patches/Bloodborne.xml and the tools that build them). Parts by others
 keep their own licenses and notices: shadPS4, bbport, bloodborne_pc, bbhost (licenses/
-BBHOST-PORTS.md), shadNet (licenses/SHADNET-PORT.md), the third-party libraries, and the changes
-contributors sent in. The additional terms apply only to Lantern Engine's own code.
+BBHOST-PORTS.md), shadNet (licenses/SHADNET-PORT.md), RenoDX's code ported for Native+ HDR
+(licenses/RenoDX-MIT.txt), the third-party libraries, and the changes contributors sent in. The
+additional terms apply only to Lantern Engine's own code.
 
 Additional terms (GNU GPL version 3, section 7)
 

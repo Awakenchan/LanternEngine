@@ -114,6 +114,11 @@ public:
     [[nodiscard]] vk::ImageView ComposedView() const {
         return *composed_view;
     }
+    /// Native+: FSR's interpolated frame, without the UI (General layout after Record), the
+    /// generated frame's scene before its HUD.
+    [[nodiscard]] vk::Image GeneratedImage() const {
+        return vk::Image(generated_image);
+    }
     /// bbport: the captures (General layout) for DLSS Frame Generation's copies: depth (R32F)
     /// and motion (RG16F) at render size, the frame without its UI (RGBA8) at display size, and
     /// a view of it in the real frame's encoding.
@@ -173,6 +178,8 @@ private:
     float input_near = 0.1f, input_fov = 1.0f;
     CameraMotion::Matrices input_camera{};
     bool resources_fsr = false; ///< the resources have the FSR 3.1 context (not DLSS's captures only)
+    /// Native+: the HUD-less and generated images are RGBA16F, the chain's gamma-encoded values.
+    bool resources16 = false;
     bool need_reset = true;
     u64 next_frame_id = 1;
     Clock::time_point last_prepare{};
@@ -185,8 +192,8 @@ private:
     // Resources (made on the draw thread after the GPU is idle).
     u32 width = 0, height = 0, render_width = 0, render_height = 0;
     FfxVkFsr3_3_1_6FrameGenerationContext* context = nullptr;
-    VideoCore::UniqueImage hudless_image;   ///< RGBA8 Unorm (mutable: Srgb view for the compose)
-    VideoCore::UniqueImage generated_image; ///< FSR's output, RGBA8 Unorm
+    VideoCore::UniqueImage hudless_image;   ///< RGBA8 Unorm (mutable: Srgb view for the compose); Native+ RGBA16F
+    VideoCore::UniqueImage generated_image; ///< FSR's output, RGBA8 Unorm; Native+ RGBA16F
     VideoCore::UniqueImage composed_image;  ///< RGBA16F, the post process's input
     VideoCore::UniqueImage depth_image;     ///< R32F, render size
     VideoCore::UniqueImage motion_image;    ///< RG16F, render size

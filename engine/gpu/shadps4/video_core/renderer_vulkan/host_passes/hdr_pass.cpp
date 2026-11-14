@@ -34,6 +34,9 @@ void HdrOutputPass::Create(vk::Device device, vk::Format output_format) {
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eFragment,
         },
+        vk::DescriptorSetLayoutBinding{
+            .binding = 3, .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+            .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eFragment},
     };
     desc_set_layout = Check<"create HDR output descriptor set layout">(
         device.createDescriptorSetLayoutUnique(vk::DescriptorSetLayoutCreateInfo{
@@ -169,7 +172,7 @@ void HdrOutputPass::Create(vk::Device device, vk::Format output_format) {
 
 void HdrOutputPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView game, vk::ImageView overlay,
                            vk::ImageView gain, vk::ImageLayout gain_layout, vk::ImageView output,
-                           vk::Extent2D extent, const Settings& settings) {
+                           vk::Extent2D extent, const Settings& settings, vk::ImageView snapshot) {
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
             .pLabelName = "Host/HDR output",
@@ -192,6 +195,8 @@ void HdrOutputPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView game, vk::Ima
             .imageView = gain,
             .imageLayout = gain_layout,
         },
+        vk::DescriptorImageInfo{.sampler = *gain_sampler, .imageView = snapshot ? snapshot : game,
+            .imageLayout = snapshot && snapshot != game ? vk::ImageLayout::eGeneral : vk::ImageLayout::eShaderReadOnlyOptimal},
     };
     const std::array set_writes{
         vk::WriteDescriptorSet{
@@ -218,6 +223,8 @@ void HdrOutputPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView game, vk::Ima
             .descriptorType = vk::DescriptorType::eCombinedImageSampler,
             .pImageInfo = &image_infos[2],
         },
+        vk::WriteDescriptorSet{.dstBinding = 3, .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eCombinedImageSampler, .pImageInfo = &image_infos[3]},
     };
 
     const vk::RenderingAttachmentInfo attachment{

@@ -16,6 +16,7 @@
 #include "shader_recompiler/native/tone_curve.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/pipeline_compile_queue.h"
+#include "video_core/renderer_vulkan/vk_hdr_channel.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
@@ -156,7 +157,7 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
     const vk::PipelineLayout layout = *pipeline_layout;
     scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
-        cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
+        cmdbuf.pushConstants(layout, stage_flags, 0u, HdrChannel::PushConstantSize(), &push_data);
     });
     if (uses_tone_curve) {
         const Shader::Native::ToneCurvePush tone = ToneCurveParams();

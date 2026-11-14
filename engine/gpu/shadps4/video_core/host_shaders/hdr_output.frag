@@ -29,7 +29,10 @@ layout (push_constant) uniform HdrSettings {
     vec2 gain_scale;   // and 1 / its size: output pixels -> gain map coordinates
     float ui_white;    // native mode: the UI's white, times paper white
     float ui_vivid;    // native mode: 0 the UI in sRGB's colours .. 1 in DCI-P3's
+    float black_floor; // Native+: the game's black level taken to 0, in units of paper white
 } hdr;
+
+layout (binding = 3) uniform sampler2D snapshot; // Native+: the scene before its HUD (FLAG_SNAPSHOT)
 
 const uint FLAG_SCRGB = 1u;   // scRGB output, else HDR10
 const uint FLAG_OVERLAY = 2u; // the menu layer has something drawn
@@ -37,6 +40,11 @@ const uint FLAG_NATIVE = 4u;  // the gain map belongs to this frame
 const uint FLAG_DEBUG = 8u;   // BB_HDR_DEBUG: the gain as a heat map
 const uint FLAG_UI_FRAME = 16u; // native mode, a frame without a scene: all of it is UI
 const uint FLAG_COMPARE = 32u;  // the left half as SDR (at paper white), for comparison
+// Native+: the frame is the 16-bit chain's (in RGBA16F, the game's white at 1)...
+const uint FLAG_NATIVE_PLUS = 64u;
+const uint FLAG_ENCODED = 128u;   // ... its SDR part encoded as the game's signal (else linear)
+const uint FLAG_SNAPSHOT = 256u;  // ... the scene before its HUD bound (`snapshot`)
+const uint FLAG_GAME_LOOK = 512u; // ... shown as the game's SDR (preset Off, Compare SDR)
 
 // Linear brightness (SDR white = 1) above which the highlights are expanded: high, so large
 // bright areas (fog, sky) stay near paper white and only lamps, fire and sparks reach the peak.
@@ -92,9 +100,85 @@ vec3 Heat(float t) {
                       1.5 - abs(4.0 * t - 1.0)), 0.0, 1.0);
 }
 
+// Native+: the game's black level (its darkest grey, lifted by its brightness curve) taken down to
+// 0, less and less up to white; above white unchanged.
+vec3 BlackFloor(vec3 v) {
+    float f = clamp(hdr.black_floor, 0.0, 0.5);
+    if (f <= 0.0) {
+        return v;
+    }
+    vec3 lowered = max(v - f, 0.0) / (1.0 - f);
+    return mix(lowered, v, greaterThan(v, vec3(1.0)));
+}
+
+// The sRGB encoding (a linear chain frame's SDR part, as the game encodes its own).
+vec3 SrgbEncode(vec3 rgb) {
+    return mix(1.055 * pow(rgb, vec3(1.0 / 2.4)) - 0.055, 12.92 * rgb,
+               lessThan(rgb, vec3(0.0031308)));
+}
+
+// An SDR signal as an SDR display shows it, in BT.2020 nits with its white at `white`.
+vec3 SdrNits(vec3 signal, float white) {
+    return max(BT709_TO_BT2020 * SdrToLinear(signal), vec3(0.0)) * white;
+}
+
+// Native+: the 16-bit chain's frame (hdr_pass.h). Up to the game's white it is the game's SDR
+// signal, decoded as the game's SDR (2.2); above it, the chain's values (the composite's output,
+// gamma 2.2 encoded), already tone mapped to the peak by the composite: only encoded here.
+// Channels below 0 (a BT.2020 target: colors outside BT.709) are kept apart, decoded with their
+// sign and added back before the BT.2020 conversion, which drops what is still negative there.
+vec3 NativePlusNits(vec3 v, vec2 uv) {
+    vec3 below = min(v, 0.0);
+    v = max(v, 0.0);
+    vec3 sdr = min(v, 1.0);
+    bool encoded = (hdr.flags & FLAG_ENCODED) != 0u;
+    vec3 signal = encoded ? sdr : clamp(SrgbEncode(sdr), 0.0, 1.0);
+    if ((hdr.flags & FLAG_GAME_LOOK) != 0u) {
+        return SdrNits(signal, hdr.paper_white);
+    }
+    vec3 linear = BlackFloor(SdrToLinear(signal) *
+                             mix(vec3(1.0), pow(v, vec3(2.2)), greaterThan(v, vec3(1.0))));
+    // After Black Floor, which lowers the positive part only.
+    linear += encoded ? -pow(-below, vec3(2.2)) : below;
+    vec3 nits = min(max(BT709_TO_BT2020 * linear, vec3(0.0)) * hdr.paper_white, vec3(hdr.peak));
+    if ((hdr.flags & FLAG_SNAPSHOT) != 0u) {
+        // The HUD: the pixels the UI changed since the scene's snapshot, shown as the game's SDR
+        // at UI Brightness, told from luminance: the brightness curve comes after the snapshot,
+        // so the tolerance widens with brightness. Over highlights the HUD blends with the scene,
+        // as in RenoDX.
+        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+        float l_snap = dot(min(max(texture(snapshot, uv).rgb, 0.0), 1.0), luma);
+        float tolerance = 0.04 + 0.22 * l_snap * l_snap;
+        float miss = abs(dot(signal, luma) - l_snap);
+        float scene = 1.0 - smoothstep(tolerance, tolerance + 0.10, miss);
+        nits = mix(SdrNits(signal, hdr.ui_white * hdr.paper_white), nits, scene);
+        if ((hdr.flags & FLAG_DEBUG) != 0u && scene < 0.5) {
+            nits = mix(nits, vec3(hdr.paper_white, 0.0, 0.0), 0.6); // BB_HDR_DEBUG: the HUD in red
+        }
+    }
+    return nits;
+}
+
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     vec3 game_srgb = texelFetch(game, pixel, 0).rgb;
+    if ((hdr.flags & FLAG_NATIVE_PLUS) != 0u) {
+        vec3 nits = NativePlusNits(game_srgb, (gl_FragCoord.xy - hdr.gain_offset) * hdr.gain_scale);
+        if ((hdr.flags & FLAG_OVERLAY) != 0u) {
+            vec4 menu = texelFetch(overlay, pixel, 0);
+            vec3 menu_signal = clamp(menu.rgb + min(game_srgb, 1.0) * (1.0 - menu.a), 0.0, 1.0);
+            nits = mix(nits, SdrNits(menu_signal, hdr.paper_white), clamp(menu.a * 4.0, 0.0, 1.0));
+        }
+        if ((hdr.flags & FLAG_SCRGB) != 0u) {
+            // BT.2020 nits -> linear BT.709 scRGB (one unit = 80 nits).
+            const mat3 inv = mat3(1.660491, -0.1245505, -0.0181508,
+                -0.587641, 1.1328999, -0.1005789, -0.0728499, -0.0083494, 1.1187297);
+            color = vec4(inv * nits / 80.0, 1.0);
+        } else {
+            color = vec4(PqEncode(nits / 10000.0), 1.0);
+        }
+        return;
+    }
     float peak_white = max(hdr.peak / hdr.paper_white, 1.0);
     float white = max(mix(1.0, peak_white, clamp(hdr.boost, 0.0, 1.0)), 1.0);
     vec3 sdr_linear = SdrToLinear(game_srgb);

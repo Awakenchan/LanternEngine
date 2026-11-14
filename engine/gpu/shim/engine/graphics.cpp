@@ -211,8 +211,13 @@ GUEST_ABI std::int64_t BeforeYebisRecord(std::uint64_t, std::uint64_t*) noexcept
     const bool on = On();
     const auto& s = BbSettings::Get();
     const auto block = reinterpret_cast<std::uint64_t>(g_post_block);
-    const float bloom = Setting(s.graphics_bloom, 0.0f, 10.0f), saturation = Setting(s.graphics_saturation, 0.0f, 5.0f);
-    const float bright = Setting(s.graphics_brightness, 0.0f, 5.0f), contrast = Setting(s.graphics_contrast, 0.5f, 1.5f);
+    // Native+: brightness, contrast, saturation and bloom are the HDR menu's (exposure, contrast,
+    // saturation, bloom in the 16-bit chain): the game's own ones stay as drawn.
+    const bool hdr_grading = s.startup_nativeplus;
+    const float bloom = hdr_grading ? 1.0f : Setting(s.graphics_bloom, 0.0f, 10.0f);
+    const float saturation = hdr_grading ? 1.0f : Setting(s.graphics_saturation, 0.0f, 5.0f);
+    const float bright = hdr_grading ? 1.0f : Setting(s.graphics_brightness, 0.0f, 5.0f);
+    const float contrast = hdr_grading ? 1.0f : Setting(s.graphics_contrast, 0.5f, 1.5f);
     const float hue = std::clamp(std::isfinite(s.graphics_hue.load()) ? s.graphics_hue.load() : 0.0f, -180.0f, 180.0f);
     const bool vignette = s.graphics_vignette.load(std::memory_order_relaxed);
     Tune(block + kGlare, on && bloom != 1, [bloom](float v) { return v * bloom; });

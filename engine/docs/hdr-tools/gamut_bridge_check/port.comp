@@ -1,0 +1,18 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "gamut_bridge.glsl"
+// The input's w is which value to output (main.cpp), as orig.hlsl.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer In { vec4 inputs[]; };
+layout(std430, binding = 1) writeonly buffer Out { vec4 outputs[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec3 c = inputs[i].xyz;
+    int mode = int(inputs[i].w);
+    float scale = bb_gamut_compression_scale(c);
+    vec3 compressed = bb_gamut_compress(c, scale);
+    vec4 o = vec4(scale, 0.0, 0.0, 1.0);
+    if (mode == 1) o = vec4(compressed, 1.0);
+    if (mode == 2) o = vec4(bb_gamut_decompress(compressed, scale), 1.0);
+    outputs[i] = o;
+}

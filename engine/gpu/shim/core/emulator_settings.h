@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <string>
 #include "common/types.h"
+#include "bbport_settings.h"
 
 enum GpuReadbacksMode : int { Disabled, Relaxed, Precise };
 
@@ -19,6 +20,9 @@ public:
         const char* v = std::getenv(name);
         return v ? std::strtol(v, nullptr, 10) : fallback;
     }
+    bool IsHdrAllowed() { return BbSettings::Get().startup_hdr; }
+    bool IsNativePlus() { return BbSettings::Get().startup_nativeplus; }
+    float GetHdrPaperWhite() { return BbSettings::Get().hdr_paper_white.load(); }
     s32 GetGpuId() { static const auto value = s32(Number("BB_GPU_ID", -1)); return value; }
     u32 GetInternalScreenWidth() { static const auto value = u32(Number("BB_INTERNAL_WIDTH", 1920)); return value; }
     u32 GetInternalScreenHeight() { static const auto value = u32(Number("BB_INTERNAL_HEIGHT", 1080)); return value; }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_gpu_savings.h"
+#include "video_core/renderer_vulkan/vk_hdr_channel.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -26,6 +27,10 @@ SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r, Lookup g
     runtime.scene_targets = this;
     const char* force = std::getenv("BB_SCENE_STENCIL_BITS");
     force_stencil_bits = force && force[0] == '1';
+    // The 16-bit chain is drawn in the proxies: at a 1080p output without an upscaler the scene
+    // keeps its native size, so Native+ needs proxies of that same size (SetSize never runs).
+    proxies_at_native = HdrChannel::Native16();
+    HdrChannel::SetNative16Active(Reduced());
     CreateResampleResources();
 }
 SceneTargets::~SceneTargets() {
@@ -81,9 +86,14 @@ static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scen
     }
     return 0;
 }
+bool SceneTargets::OwnSize(const VideoCore::Image& image) const {
+    return HdrChannel::Native16Fixed() && !image.info.props.is_depth &&
+           HdrChannel::Upgraded(image.info.guest_address, image.info.size.width,
+                                image.info.size.height, image.info.pixel_format);
+}
 bool SceneTargets::Eligible(const VideoCore::Image& image) const {
     const auto& i = image.info;
-    const u32 div = SizeDivisor(i, size);
+    const u32 div = OwnSize(image) ? 1u : SizeDivisor(i, size);
     if (!div || i.size.depth != 1 || i.resources.layers != 1 || i.num_samples != 1 ||
         i.props.is_block || !image.backing || image.backing->num_samples != 1) {
         return false;
@@ -100,6 +110,10 @@ bool SceneTargets::EligibleScene(const VideoCore::Image& image) const {
     return image.info.size.width == native.width && image.info.size.height == native.height && Eligible(image);
 }
 SceneResolution::Size SceneTargets::ProxySize(const VideoCore::Image& image, u32 level) const {
+    if (OwnSize(image)) {
+        return {std::max(1u, image.info.size.width >> level),
+                std::max(1u, image.info.size.height >> level)};
+    }
     const u32 div = std::max(1u, SizeDivisor(image.info, size));
     return {std::max(1u, size.width / div >> level), std::max(1u, size.height / div >> level)};
 }
@@ -112,6 +126,7 @@ bool SceneTargets::SetSize(SceneResolution::Size next) {
     ++generation;
     recent = {};
     size = next;
+    HdrChannel::SetNative16Active(Reduced());
     std::printf("Scene resolution: raster %ux%u, half-resolution targets %ux%u, game targets %ux%u "
                 "(live)\n", size.width, size.height, size.width / 2, size.height / 2,
                 SceneResolution::Native().width, SceneResolution::Native().height);
@@ -159,6 +174,37 @@ void SceneTargets::NativeAccess(VideoCore::Image& image, vk::AccessFlags2 access
         }
         if (access & writes) entry.state.NativeWrite();
     }
+}
+bool SceneTargets::CopyProxies(VideoCore::ImageId src_id, VideoCore::ImageId dst_id) {
+    auto& src = *lookup(src_id, 0);
+    auto& dst = *lookup(dst_id, 0);
+    if (src.info.props.is_depth || dst.info.props.is_depth || !Eligible(src) || !Eligible(dst) ||
+        !ProxyCurrent(src, 0, 1) || ProxySize(src, 0) != ProxySize(dst, 0)) {
+        return false;
+    }
+    auto& s = Get(src_id, 0);
+    auto& d = Get(dst_id, 0);
+    if (s.image.image_ci.format != d.image.image_ci.format) {
+        return false;
+    }
+    scheduler.EndRendering();
+    Transition(s, src.aspect_mask, vk::ImageLayout::eTransferSrcOptimal,
+               vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    Transition(d, dst.aspect_mask, vk::ImageLayout::eTransferDstOptimal,
+               vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+    const auto extent = s.image.image_ci.extent;
+    const vk::ImageCopy region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .extent = {extent.width, extent.height, 1},
+    };
+    const vk::Image from = s.image, to = d.image;
+    scheduler.Record([from, to, region](vk::CommandBuffer cmd) {
+        cmd.copyImage(from, vk::ImageLayout::eTransferSrcOptimal, to,
+                      vk::ImageLayout::eTransferDstOptimal, region);
+    });
+    d.state.ProxyWrite();
+    return true;
 }
 void SceneTargets::Transition(Entry& e, vk::ImageAspectFlags aspect, vk::ImageLayout layout,
                                vk::PipelineStageFlags2 stages, vk::AccessFlags2 access) {
@@ -463,15 +509,33 @@ SceneTargets::Entry& SceneTargets::Get(VideoCore::ImageId id, u32 level) {
     DropForgotten();
     auto& original = *lookup(id, 0);
     const u64 key = Key(original.image_uid, level);
+    const bool needs_hdr_upgrade = !original.info.props.is_depth &&
+        HdrChannel::Upgraded(original.info.guest_address, original.info.size.width,
+                             original.info.size.height, original.info.pixel_format);
     // A draw has up to six targets, mostly the same as the previous draw's.
     for (const auto& [recent_key, recent_entry] : recent) {
         if (recent_entry && recent_key == key) {
+            if (needs_hdr_upgrade &&
+                recent_entry->image.image_ci.format != HdrChannel::Native16Format) break;
             if (!recent_entry->state.valid) Copy(*recent_entry, original, false);
             return *recent_entry;
         }
     }
     auto& entry = entries[key];
     original.scene_proxy = true;
+    // Native+: the 16-bit chain's targets get an RGBA16F proxy (vk_hdr_channel.h).
+    // A proxy made before the target joined the chain is resolved, retired after the GPU is done
+    // with it, and made again.
+    const bool native16 = needs_hdr_upgrade;
+    if (entry && native16 && entry->image.image_ci.format != HdrChannel::Native16Format) {
+        if (entry->state.valid && entry->state.dirty) {
+            Copy(*entry, original, true);
+        }
+        scheduler.DeferOperation([old = std::move(entry)]() mutable { old.reset(); });
+        entry.reset();
+        recent = {};
+        ++generation;
+    }
     if (!entry) {
         entry = std::make_unique<Entry>();
         entry->source = id;
@@ -480,6 +544,11 @@ SceneTargets::Entry& SceneTargets::Get(VideoCore::ImageId id, u32 level) {
         entry->image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
         auto ci = original.backing->image.image_ci;
         ci.pNext = nullptr;
+        if (native16) {
+            ci.format = HdrChannel::Native16Format;
+            ci.flags &= ~(vk::ImageCreateFlagBits::eMutableFormat |
+                          vk::ImageCreateFlagBits::eExtendedUsage);
+        }
         const auto proxy = ProxySize(original, level);
         ci.extent = vk::Extent3D{proxy.width, proxy.height, 1};
         ci.mipLevels = 1;
@@ -496,7 +565,10 @@ vk::ImageView SceneTargets::View(Entry& e, const VideoCore::Image& original,
     const auto aspect = original.info.props.is_depth
         ? (info.is_storage ? original.aspect_mask : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eDepth))
         : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eColor);
-    const auto format = original.info.props.is_depth ? original.backing->image.image_ci.format : info.format;
+    auto format = original.info.props.is_depth ? original.backing->image.image_ci.format : info.format;
+    if (e.image.image_ci.format == HdrChannel::Native16Format) {
+        format = HdrChannel::Native16Format; // the 16-bit chain (vk_hdr_channel.h)
+    }
     auto view = Check(instance.GetDevice().createImageViewUnique({
         .image = e.image, .viewType = vk::ImageViewType::e2D, .format = format,
         .components = info.mapping, .subresourceRange = {aspect,0,1,0,1},

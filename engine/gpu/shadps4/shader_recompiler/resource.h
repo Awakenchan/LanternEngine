@@ -234,13 +234,16 @@ struct PushData {
     std::array<u8, NUM_BUFFERS> buf_offsets;
     u32 motion_param; ///< bbport: object motion parameter index (0: off)
     u32 scene_size; ///< reduced width | height << 16; zero means native pixel coordinates
+    std::array<u32, 4> bb_hdr{};
+    std::array<u32, 8> bb_hdr2{};
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
     }
 };
-static_assert(sizeof(PushData) <= 128,
+static_assert(offsetof(PushData, bb_hdr) == 128);
+static_assert(sizeof(PushData) == 176,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
 
 } // namespace Shader
