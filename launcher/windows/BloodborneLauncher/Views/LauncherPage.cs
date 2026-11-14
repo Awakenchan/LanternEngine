@@ -325,6 +325,10 @@ namespace BloodborneLauncher.Views
             var count = Rows.Children.OfType<SettingRow>().Count(r => r.Visibility == Visibility.Visible);
             _label.Text = count > 0 ? $"{_title} ({count})" : _title;
         }
+
+        /// <summary>Counts the rows again: a choice elsewhere on the page shows and hides them (the HDR
+        /// source, which leaves Native+ its tone mapper and takes Native's UI colour away).</summary>
+        public void RefreshCount() => ShowCount();
     }
 
     /// <summary>
