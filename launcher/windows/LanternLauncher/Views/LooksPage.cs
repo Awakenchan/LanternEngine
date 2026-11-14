@@ -1,4 +1,5 @@
 using System.IO;
+using Avalonia;
 using Avalonia.Controls;
 using BloodborneLauncher.Core;
 
@@ -53,7 +54,13 @@ namespace BloodborneLauncher.Views
             _hints.RemoveAll(h => !h.Look.BuiltIn);
             var saved = Looks.Saved();
             if (saved.Count == 0)
-                _saved.Children.Add(Text(L.T("None yet. Save your current picture or import someone's look below."), "Faint"));
+            {
+                // No row carries this message, so it gets a row's own inset itself: level with the
+                // titles above and below, in a box as tall as a one-line row, not on the border.
+                var none = Text(L.T("None yet. Save your current picture or import someone's look below."), "Faint");
+                none.Padding = new Thickness(14, 10, 14, 10);
+                _saved.Children.Add(none);
+            }
             foreach (var look in saved)
             {
                 var use = UseButton(look);
