@@ -203,7 +203,7 @@ namespace BloodborneLauncher.Views
                     : L.T("This display shows no HDR");
             IniToggle(SymbolRegular.Hdr24, L.T("HDR output"), hdrHint, "hdr");
             ComboRow(SymbolRegular.Lightbulb24, L.T("HDR source"),
-                "Native+: the light of the game's scene kept to the screen, tone mapped to your display's peak by Vanilla+ or PsychoV. Native: highlights derived from the game's HDR scene. Expanded: bright SDR pixels expanded towards the peak. Entering or leaving Native+ requires restarting the game.",
+                "Native+: the light of the game's scene kept to the screen, tone mapped to your display's peak by Vanilla+ or PsychoV. Native: highlights derived from the game's HDR scene. Expanded: bright SDR pixels expanded towards the peak. Entering or leaving Native+ requires restarting the game. With Native+, brightness, contrast, saturation and bloom move to the in-game menu (Insert or L3 + R3): Graphics → Picture hides its four sliders while it is on.",
                 Choices.HdrMode, HdrMode, v => Ini.Set("hdr_mode", v), changed: RefreshHdrRows);
             // Defaults, as the engine's: paper white 203 (BT.2408's reference white); the peak from
             // the display (hdr_peak_auto) unless it is set.
