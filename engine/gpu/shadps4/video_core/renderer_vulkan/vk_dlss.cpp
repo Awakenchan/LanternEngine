@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <clocale>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -341,11 +342,91 @@ struct DlssUpscaler::Impl {
         return true;
     }
 
-    /// Directories searched for nvngx_dlss: BB_DLSS_DIR, then the executable's directory.
-    std::vector<std::wstring> SearchPaths() {
+    /// UTF-8 to wchar_t without the C++ global locale: path::wstring() uses the "C" locale,
+    /// where non-ASCII bytes fail, and a Chinese or Japanese install path then reached NGX empty.
+    static std::wstring Utf8ToWide(const std::string& text) {
+        std::wstring out;
+        out.reserve(text.size());
+        for (size_t i = 0; i < text.size();) {
+            const auto c = static_cast<unsigned char>(text[i]);
+            unsigned cp = c;
+            int extra = 0;
+            if (c < 0x80) {
+                cp = c;
+            } else if ((c & 0xE0) == 0xC0) {
+                cp = c & 0x1Fu;
+                extra = 1;
+            } else if ((c & 0xF0) == 0xE0) {
+                cp = c & 0x0Fu;
+                extra = 2;
+            } else if ((c & 0xF8) == 0xF0) {
+                cp = c & 0x07u;
+                extra = 3;
+            } else {
+                cp = 0xFFFDu;
+            }
+            if (i + static_cast<size_t>(extra) < text.size()) {
+                for (int k = 1; k <= extra; ++k) {
+                    cp = (cp << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3Fu);
+                }
+                i += static_cast<size_t>(extra) + 1;
+            } else {
+                i = text.size();
+                cp = 0xFFFDu;
+            }
+            out.push_back(static_cast<wchar_t>(cp));
+        }
+        return out;
+    }
+
+    /// Directories searched for nvngx_dlss: BB_DLSS_DIR, then the executable's directory, then
+    /// NGX's data directory. NGX converts every one of them itself (wcsrtombs in its own code),
+    /// which fails for a non-ASCII path even when the list is built correctly here: a runtime
+    /// found under such a path is copied into the ASCII data directory and that one is handed
+    /// over instead.
+    static bool IsAscii(const std::string& text) {
+        for (const unsigned char c : text) {
+            if (c >= 0x80) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static void AddSearchDir(const std::filesystem::path& dir, std::vector<std::wstring>& paths,
+                             const std::filesystem::path& data_dir) {
+        std::error_code ec;
+        const auto native = dir.string();
+        if (IsAscii(native)) {
+            paths.push_back(Utf8ToWide(native));
+            return;
+        }
+        const auto copy_dir = data_dir / "dlss";
+        std::filesystem::create_directories(copy_dir, ec);
+        bool copied = false;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (name.rfind("libnvidia-ngx-dlss.so", 0) != 0) {
+                continue;
+            }
+            std::error_code copy_ec;
+            std::filesystem::copy_file(it->path(), copy_dir / name,
+                                       std::filesystem::copy_options::overwrite_existing, copy_ec);
+            if (!copy_ec) {
+                copied = true;
+            }
+        }
+        paths.push_back(Utf8ToWide(copied ? copy_dir.string() : native));
+    }
+
+    std::vector<std::wstring> SearchPaths(const std::filesystem::path& data_dir) {
         std::vector<std::wstring> paths;
         if (const char* env = std::getenv("BB_DLSS_DIR"); env && *env) {
+#ifdef _WIN32
             paths.push_back(std::filesystem::path(env).wstring());
+#else
+            AddSearchDir(std::filesystem::path(env), paths, data_dir);
+#endif
         }
 #ifdef _WIN32
         wchar_t exe[MAX_PATH];
@@ -356,7 +437,7 @@ struct DlssUpscaler::Impl {
         std::error_code ec;
         const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
         if (!ec) {
-            paths.push_back(exe.parent_path().wstring());
+            AddSearchDir(exe.parent_path(), paths, data_dir);
         }
 #endif
         return paths;
@@ -376,6 +457,12 @@ struct DlssUpscaler::Impl {
     }
 
     void Initialize() {
+#ifndef _WIN32
+        // NGX turns the path list back into UTF-8 with wcsrtombs, which reads LC_CTYPE: with the
+        // "C" locale a non-ASCII path becomes empty ("Module not found at "). Set it from the
+        // environment before any path is handed over; LC_NUMERIC and the rest stay as they are.
+        std::setlocale(LC_CTYPE, "");
+#endif
         if (!instance.IsDlssCapable()) {
             Fail("the Vulkan device lacks VK_NVX_binary_import / VK_NVX_image_view_handle "
                  "(DLSS needs an NVIDIA RTX GPU)",
@@ -388,8 +475,9 @@ struct DlssUpscaler::Impl {
         std::error_code ec;
         const auto data_dir = std::filesystem::temp_directory_path(ec) / "lantern-ngx";
         std::filesystem::create_directories(data_dir, ec);
-        const std::wstring data_path = data_dir.wstring();
-        const auto paths = SearchPaths();
+        const std::wstring data_path = Utf8ToWide(data_dir.string());
+        auto paths = SearchPaths(data_dir);
+        paths.push_back(data_path); // a copy of the runtime dropped in NGX's data directory
         std::vector<const wchar_t*> path_ptrs;
         for (const auto& p : paths) {
             path_ptrs.push_back(p.c_str());
