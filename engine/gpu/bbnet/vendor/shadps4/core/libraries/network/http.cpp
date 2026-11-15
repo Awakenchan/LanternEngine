@@ -862,7 +862,16 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
             base_url += ":" + std::to_string(plan.port);
         }
         httplib::Client cli(base_url);
-        cli.set_connection_timeout(pick_timeout_seconds(plan.settings.connect_timeout_us, 30));
+        const auto connect_timeout = pick_timeout_seconds(plan.settings.connect_timeout_us, 30);
+        // bbport: the game's own connect timeout is short (the PS4's LAN assumption); a TLS
+        // handshake to a server on the internet can take longer, and httplib reports the
+        // handshake timeout as Error::SSLConnection ("SSL connection failed"), which the game
+        // then shows as "failed to acquire Bloodborne server information".
+        if (connect_timeout < std::chrono::seconds(10)) {
+            LOG_INFO(Lib_Http, "connect timeout {}s is short; using 10s for {}",
+                      connect_timeout.count(), base_url.c_str());
+        }
+        cli.set_connection_timeout(std::max(connect_timeout, std::chrono::seconds(10)));
         cli.set_read_timeout(pick_timeout_seconds(plan.settings.recv_timeout_us, 120));
         cli.set_write_timeout(pick_timeout_seconds(plan.settings.send_timeout_us, 120));
 
