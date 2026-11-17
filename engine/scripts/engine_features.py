@@ -17,7 +17,8 @@ import struct
 import sys
 import zlib
 
-from engine_assets import prepare_effect_fixes, prepare_menu_assets, prepare_mirror, verify_executable
+from engine_assets import (prepare_effect_fixes, prepare_jump_key, prepare_menu_assets,
+                           prepare_mirror, verify_executable)
 
 
 def settings_value(config, key):
@@ -68,19 +69,31 @@ def prepare(game, out, data, config):
                 print(f'Engine: native PC menus disabled: {error}', flush=True)
     except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
         print(f'Engine: enhancement preparation skipped: {error}', flush=True)
+    fixes = []
     if os.environ.get('BB_EFFECT_FIXES', '') != '0':
         try:
             fixed = prepare_effect_fixes(game, data / 'engine-assets',
                                          log=lambda line: print(line, flush=True))
             if fixed:
-                listing = out / 'file-fixes.txt'
-                listing.write_text(''.join(f'{relative.as_posix()}\t{path}\n' for relative, path in fixed),
-                                   encoding='utf-8')
-                env['BB_FILE_FIXES'] = str(listing)
+                fixes.extend(fixed)
                 print(f"Engine: Ebrietas' trail effect replaced as Nexus mod 41 does, in {len(fixed)} effect files "
-                      '(BB_EFFECT_FIXES=0 keeps the game\'s)', flush=True)
+                      "(BB_EFFECT_FIXES=0 keeps the game's)", flush=True)
         except (OSError, ValueError, IndexError, struct.error, zlib.error) as error:
             print(f'Engine: Ebrietas effect fix skipped: {error}', flush=True)
+    if settings_value(config, 'jump_key') == '1':
+        try:
+            jump = prepare_jump_key(game, data / 'engine-assets')
+            if jump:
+                fixes.append(jump)
+                print('Engine: jump on its own key: L3 jumps, sprinting or not, and the dodge button always dodges',
+                      flush=True)
+        except (OSError, ValueError) as error:
+            print(f'Engine: jump on its own key skipped: {error}', flush=True)
+    if fixes:
+        listing = out / 'file-fixes.txt'
+        listing.write_text(''.join(f'{relative.as_posix()}\t{path}\n' for relative, path in fixes),
+                           encoding='utf-8')
+        env['BB_FILE_FIXES'] = str(listing)
     return env
 
 

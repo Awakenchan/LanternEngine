@@ -446,3 +446,41 @@ def prepare_wide_movies(game, option_movie, cache, tool, width, height):
     temporary.write_text(json.dumps({'key': key, 'files': rows}, indent=2), encoding='utf-8')
     os.replace(temporary, manifest_path)
     return made
+
+# "Jump on its own key" (the Windows start's PrepareJumpKey): the game's 1.09 action script with
+# L3 jumping by itself, sprinting or not, and the dodge button dodging only. Same offsets and
+# hashes as engine/start/assets.cpp, so a Linux and a Windows start prepare the identical file.
+JUMP_SCRIPT = Path('dvdroot_ps4/action/script/c0000.hks')
+JUMP_INPUT_SHA = '335a1af801d4f2108fc77d347593a2ca65a43f5dd6e23348f47d953606d34c59'
+JUMP_OUTPUT_SHA = '026275a6d3fef4830ee765698abb1658a747a0f5c9a0246ffe9ec8b28cef9bdf'
+JUMP_SITES = ((0x1e450, bytes.fromhex('b6004d0298004e14'), bytes.fromhex('32001a0250052602')),
+              (0x1e48c, bytes.fromhex('39000b00'), bytes.fromhex('38ffff00')))
+
+
+def prepare_jump_key(game, cache, log=print):
+    """The action script for "Jump on its own key", as a (game path, file) pair for BB_FILE_FIXES,
+    or None: the script is already patched (a mod ships it) or is not the 1.09 file. The patched
+    script is kept under cache/jump-key, as the Windows start keeps it. Same bytes as
+    engine/start/assets.cpp PrepareJumpKey."""
+    game, cache = Path(game), Path(cache)
+    try:
+        script = (game / JUMP_SCRIPT).read_bytes()
+    except OSError:
+        return None
+    if sha(script) == JUMP_OUTPUT_SHA:
+        return None
+    if sha(script) != JUMP_INPUT_SHA:
+        log('Engine: jump on its own key: the action script is not the 1.09 file '
+            '(a mod changes it): jump stays on the dodge button')
+        return None
+    data = bytearray(script)
+    for site, old, new in JUMP_SITES:
+        if data[site:site + len(old)] != old:
+            raise ValueError('Unexpected action script')
+        data[site:site + len(new)] = new
+    if sha(data) != JUMP_OUTPUT_SHA:
+        raise ValueError('The action script does not match the verified result')
+    destination = cache / 'jump-key' / JUMP_SCRIPT.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(bytes(data))
+    return JUMP_SCRIPT, destination.resolve()
