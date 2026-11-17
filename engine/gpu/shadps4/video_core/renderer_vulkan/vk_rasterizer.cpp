@@ -19,6 +19,7 @@
 #include "engine/pipe_census.h"
 #include "engine/dynamic_state_skip.h"
 #include <bit>
+#include <cmath>
 #include <map>
 #include <thread>
 #include <unordered_set>
@@ -47,6 +48,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_compile_queue.h"
 #include "video_core/renderer_vulkan/vk_gpu_savings.h"
+#include "video_core/renderer_vulkan/vk_hdr_channel.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_occlusion.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -3812,6 +3814,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             GetDrawOffsets(regs, pipeline->GetStage(Shader::SwStage::Vertex), pipeline->GetFetchShader());
         EffectsBeforeBind(regs, pipeline, is_indexed, index_offset, effect_first_vertex);
     }
+    // Native+: the strength of the game's color table (the menu's Color Grade Strength), for
+    // Native+'s version of its pass (hdr/bb_color_grading.frag): the float's bits plus one. The
+    // game's look (preset Off, Compare SDR): left unset (0), the game's grading.
+    if (HdrChannel::Native16()) {
+        if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+            ps && ps->pgm_hash == HdrChannel::ColorGradingHash && !HdrChannel::VanillaChain()) {
+            const float strength =
+                std::clamp(BbSettings::Get().hdr_scene_grading.load(), 0.0f, 100.0f) / 100.0f;
+            dc.push_data.bb_hdr[3] = std::bit_cast<u32>(strength) + 1u;
+        }
+    }
     if (!stageb_counts) {
         pipeline->BindResources(dc.set_writes, dc.push_data, {dc.image_infos.data(), dc.image_infos.size()},
                                 {dc.buffer_infos.data(), dc.buffer_infos.size()});
@@ -3907,6 +3920,70 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
             Breadcrumbs::EndDraw(*note);
         }
+    }
+    const vk::Pipeline hdr_handle = pipeline->HdrHandle();
+    if (hdr_handle && HdrChannel::Native16() && !HdrChannel::VanillaChain()) {
+        const bool dynamic_masks = instance.IsDynamicColorWriteMaskSupported();
+        const ColorWriteMasks game_masks = scheduler.GetDynamicState().color_write_masks;
+        // Each a float's bits + 1. bb_hdr.w: the game's bloom (the menu's, 50 = the game's).
+        // bb_hdr2: the tone mapper (Vanilla+ or PsychoV), applied in the composite on the scene
+        // itself: the peak in units of the game's white, and the color grading sliders as
+        // PsychoV-30's own parameters, the way RenoDX's mods pass them (0..100 sliders over 50:
+        // 1 neutral; exposure as it is); then the target gamut (PsychoV-30's
+        // gamut_compression_mode, BT.2020) + 4 for Vanilla+ (its own curve and roll-off; the
+        // sliders as RenoDX's user grading) or 16 for PsychoV (PsychoV-30 with Vanilla+'s bloom)
+        // + PsychoV's Vanilla+ Highlights in percent from bit 8, its Vanilla+ Shadows from bit 16
+        // and Keep Deeper Blacks in bit 23, in one word, + 1; then PsychoV's Hue Correction, 0..1.
+        const auto bits = [](float f) { return std::bit_cast<u32>(f) + 1u; };
+        const auto& bb = BbSettings::Get();
+        const auto half = [](float slider) { return std::clamp(slider, 0.0f, 100.0f) / 50.0f; };
+        const bool psychov = bb.hdr_tonemapper == BbSettings::HdrToneMapperPsychoV;
+        const u32 highlights = u32(std::lround(BbSettings::VanillaPlusHighlightsPercent())) << 8u;
+        const u32 shadows = (u32(std::lround(BbSettings::VanillaPlusShadowsPercent())) << 16u) |
+                            (bb.hdr_vplus_shadows_deeper.load() ? 1u << 23u : 0u);
+        // bb_hdr.w .. bb_hdr2[7], contiguous: one push, then the game's values back.
+        const std::array<u32, 9> ours{
+            bits(std::clamp(bb.hdr_bloom.load(), 0.0f, 100.0f) / 50.0f),
+            bits(HdrChannel::PeakNits() / std::max(float(EmulatorSettings.GetHdrPaperWhite()), 1.0f)),
+            bits(std::clamp(bb.hdr_exposure.load(), 0.0f, 2.0f)),
+            bits(half(bb.hdr_grade_highlights)), bits(half(bb.hdr_shadows)),
+            bits(half(bb.hdr_contrast)), bits(half(bb.hdr_saturation)),
+            1u /* BT.2020, RenoDX's HDR target */ + (psychov ? 16u + highlights + shadows : 4u) + 1u,
+            bits(psychov ? BbSettings::HueCorrectionPercent() / 100.0f : 0.0f)};
+        std::array<u32, 9> game_reg{dc.push_data.bb_hdr[3]};
+        std::copy(dc.push_data.bb_hdr2.begin(), dc.push_data.bb_hdr2.end(), game_reg.begin() + 1);
+        const vk::PipelineLayout layout = pipeline->GetLayout();
+        constexpr u32 reg_offset = u32(offsetof(Shader::PushData, bb_hdr)) + 3u * 4u;
+        constexpr u32 reg_size = u32(sizeof(ours));
+        static_assert(offsetof(Shader::PushData, bb_hdr2) == offsetof(Shader::PushData, bb_hdr) + 16);
+        scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pushConstants(layout, AllGraphicsStageBits, reg_offset, reg_size, ours.data());
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, hdr_handle);
+            if (dynamic_masks) {
+                const std::array rgb{vk::ColorComponentFlags{vk::ColorComponentFlagBits::eR |
+                                                            vk::ColorComponentFlagBits::eG |
+                                                            vk::ColorComponentFlagBits::eB}};
+                cmdbuf.setColorWriteMaskEXT(0, rgb);
+            }
+            if (is_indexed) {
+                cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex),
+                                   first_instance);
+            } else {
+                cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+            }
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+            if (dynamic_masks) {
+                cmdbuf.setColorWriteMaskEXT(0, game_masks);
+            }
+            cmdbuf.pushConstants(layout, AllGraphicsStageBits, reg_offset, reg_size,
+                                 game_reg.data());
+        });
+    }
+    if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        ps && HdrChannel::Native16() && regs.color_buffers[0]) {
+        const auto& cb = regs.color_buffers[0];
+        HdrChannel::NoteTarget(ps->pgm_hash, cb.Address(), cb.Pitch(), cb.Height(),
+            LiverpoolToVK::SurfaceFormat(cb.GetDataFmt(), cb.GetNumberFmt()));
     }
     EffectsAfterDraw(regs, pipeline, is_indexed, num_indices, num_instances, first_vertex);
     if (spatial_ao->Enabled()) {
@@ -5632,6 +5709,28 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Perform image copy
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
+    // Native+: the game copies its finished image (the composite's target) into the copy its
+    // color grading reads with such a compute copy. Between two targets of the 16-bit chain it is
+    // done between their RGBA16F proxies: through the 8-bit images it clipped the HDR part at
+    // white.
+    const auto src_id = desc0.is_written ? image1_id : image0_id;
+    const auto dst_id = desc0.is_written ? image0_id : image1_id;
+    const auto chain = [](const VideoCore::Image& image) {
+        return HdrChannel::Upgraded(image.info.guest_address, image.info.size.width,
+                                    image.info.size.height, image.info.pixel_format);
+    };
+    if (chain(src_image) && chain(dst_image) && src_image.info.num_samples == 1 &&
+        dst_image.info.num_samples == 1 && scene_targets->CopyProxies(src_id, dst_id)) {
+        dst_image.flags |= VideoCore::ImageFlagBits::GpuModified;
+        dst_image.flags &= ~VideoCore::ImageFlagBits::Dirty;
+        return true;
+    }
+    if (chain(src_image) && !chain(dst_image) && !dst_image.info.props.is_depth &&
+        dst_image.info.size.width == src_image.info.size.width &&
+        dst_image.info.size.height == src_image.info.size.height) {
+        HdrChannel::NoteCopyTarget(dst_image.info.guest_address, dst_image.info.size.width,
+                                   dst_image.info.size.height, dst_image.info.pixel_format);
+    }
     runtime.CopyColorAndDepth(&src_image, &dst_image);
     return true;
 }
@@ -6682,6 +6781,9 @@ vk::Sampler Rasterizer::CachedSampler(const AmdGpu::Sampler& sharp, bool is_dept
 // The sampler that reads each image is not known here: any point sampler counts.
 // BB_PROXY_POINT_NATIVE=0 (or experiment bit 0): proxies are read regardless, as before.
 bool Rasterizer::PointReadsNative(const Shader::Info& stage, const PreparedStage* prepared) const {
+    // Resolving the post-composite HDR proxy into its RGBA8 guest image clips highlights.
+    // Keep the float proxies with Native+; retain Lantern's policy in its other modes.
+    if (HdrChannel::Native16()) return false;
     static const bool enabled = [] {
         const char* env = std::getenv("BB_PROXY_POINT_NATIVE");
         return !(env && env[0] == '0');
@@ -7372,6 +7474,35 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                           !same_size(texture_cache.GetImage(db_desc.first), 0))) {
         reduced = false;
     }
+    // Native+ with the startup patch ("Live resolution changes" off): the scene is
+    // drawn at the render size without proxies, but the passes drawing only into targets of the
+    // 16-bit chain draw into their same-size RGBA16F proxies (SceneTargets::OwnSize): native
+    // coordinates, no scaling.
+    bool own_size = false;
+    if (!reduced && HdrChannel::Native16Fixed() && HdrChannel::Native16Active() &&
+        key.num_samples == 1 && !db_desc.first &&
+        !(upscaler->Enabled() && upscaler->Redirecting())) {
+        u32 chain_targets = 0;
+        bool all = true;
+        pass_size.reset();
+        for (u32 cb = 0; cb < num_attachments; ++cb) {
+            const auto& [id, desc] = cb_descs[cb];
+            if (!id) {
+                continue;
+            }
+            const auto& image = texture_cache.GetImage(id);
+            if (scene_targets->OwnSize(image) && scene_targets->Eligible(image) &&
+                !image.binding.is_bound && !image.binding.needs_rebind &&
+                !desc.view_info.range.base.layer && !desc.view_info.range.base.level &&
+                same_size(image, 0)) {
+                ++chain_targets;
+            } else {
+                all = false;
+            }
+        }
+        own_size = all && chain_targets > 0;
+        reduced = own_size;
+    }
     if (debug_pass) {
         if (db_desc.first) {
             const auto& depth = texture_cache.GetImage(db_desc.first);
@@ -7381,7 +7512,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
-    dc.push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
+    dc.push_data.scene_size = reduced && !own_size ? SceneResolution::Pack(scene_targets->Size()) : 0;
     if (BbStats::enabled) {
         BbStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         BbStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
@@ -7598,14 +7729,16 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.num_layers = 1;
     }
 
-    if (reduced) {
+    if (reduced && !(own_size && (color_redirected || depth_redirected))) {
         // Half-resolution passes keep the scene's factor (proxy / native = scene / 1920).
         const auto size = scene_targets->Size();
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
         const auto native = SceneResolution::Native();
-        target_scale = {float(size.width) / float(native.width), float(size.height) / float(native.height)};
+        target_scale = own_size ? std::array{1.0f, 1.0f}
+                                : std::array{float(size.width) / float(native.width),
+                                             float(size.height) / float(native.height)};
         ui_pass.active = false; // the memo keeps this scale for the pass
     }
     if (FrameCapture::Active()) {
@@ -7631,8 +7764,17 @@ void Rasterizer::Resolve() {
     const auto& mrt1_hint = CbExtent(1);
     VideoCore::TextureCache::ImageDesc mrt0_desc{Regs().color_buffers[0], mrt0_hint};
     VideoCore::TextureCache::ImageDesc mrt1_desc{Regs().color_buffers[1], mrt1_hint};
-    auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
-    auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
+    const auto mrt0_image_id = texture_cache.FindImage(mrt0_desc, true);
+    auto& mrt0_image = texture_cache.GetImage(mrt0_image_id);
+    const auto mrt1_image_id = texture_cache.FindImage(mrt1_desc, true);
+    auto& mrt1_image = texture_cache.GetImage(mrt1_image_id);
+    if (HdrChannel::Native16() &&
+        HdrChannel::Upgraded(mrt0_image.info.guest_address, mrt0_image.info.size.width,
+            mrt0_image.info.size.height, mrt0_image.info.pixel_format)) {
+        HdrChannel::NoteCopyTarget(mrt1_image.info.guest_address, mrt1_image.info.size.width,
+            mrt1_image.info.size.height, mrt1_image.info.pixel_format);
+        if (scene_targets->CopyProxies(mrt0_image_id, mrt1_image_id)) return;
+    }
 
     ScopeMarkerBegin(fmt::format("Resolve:MRT0={:#x}:MRT1={:#x}",
                                  Regs().color_buffers[0].Address(),
@@ -8463,7 +8605,12 @@ void Rasterizer::UpdateRasterizationState() const {
 void Rasterizer::UpdateColorBlendingState(const GraphicsPipeline* pipeline) const {
     const auto& regs = Regs();
     auto& dynamic_state = scheduler.GetDynamicState();
-    dynamic_state.SetBlendConstants(regs.blend_constants);
+    if (pipeline->ScaledGlow()) {
+        const float k = HdrChannel::VanillaChain() ? 1.0f : BbSettings::Get().hdr_bloom / 50.0f;
+        dynamic_state.SetBlendConstants({k, k, k, 1.0f});
+    } else {
+        dynamic_state.SetBlendConstants(regs.blend_constants);
+    }
     dynamic_state.SetColorWriteMasks(pipeline->GetGraphicsKey().write_masks);
     dynamic_state.SetAttachmentFeedbackLoopEnabled(attachment_feedback_loop);
 }

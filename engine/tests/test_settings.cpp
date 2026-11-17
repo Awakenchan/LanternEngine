@@ -231,7 +231,7 @@ int main() {
     assert(Read(path).find("cheat_gun_range=off\n") != std::string::npos);
     assert(Read(path).find("cheat_echo_multiplier=1\n") != std::string::npos);
     assert(Read(path).find("hdr=0\n") != std::string::npos);
-    assert(Read(path).find("hdr_paper_white=200\n") != std::string::npos);
+    assert(Read(path).find("hdr_paper_white=203\n") != std::string::npos);
     assert(Read(path).find("hdr_peak=1000\n") != std::string::npos);
     assert(Read(path).find("hdr_boost=0.25\n") != std::string::npos);
     assert(s.hdr_mode == BbSettings::HdrModeNative);
@@ -401,6 +401,158 @@ int main() {
     { std::ofstream file(path); file << "frame_gen=fsr4\n"; }
     BbSettings::Load();
     assert(s.frame_gen == BbSettings::FrameGenOff);
+
+    // Native+ (hdr_mode=nativeplus) and its settings, saved and read back.
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_tonemapper=4\n"
+        "hdr_exposure=1.25\nhdr_scene_grading=75\nhdr_bloom=40\n"; }
+    BbSettings::Load();
+    assert(s.startup_nativeplus && s.hdr_mode == BbSettings::HdrModeNativePlus);
+    assert(s.hdr_tonemapper == BbSettings::HdrToneMapperPsychoV &&
+           s.hdr_exposure == 1.25f && s.hdr_scene_grading == 75.0f && s.hdr_bloom == 40.0f);
+    SaveAndWait();
+    assert(Read(path).find("hdr_mode=nativeplus\n") != std::string::npos);
+    BbSettings::Load();
+    assert(s.startup_nativeplus && s.hdr_exposure == 1.25f && s.hdr_bloom == 40.0f);
+    { std::ofstream file(path); file << "hdr=0\nhdr_mode=nativeplus\nhdr_tonemapper=99\n"
+        "hdr_exposure=nan\nhdr_bloom=999\nhdr_scene_grading=-5\n"; }
+    BbSettings::Load();
+    assert(!s.startup_nativeplus && s.hdr_tonemapper == BbSettings::HdrToneMapperVanillaPlus);
+    assert(s.hdr_exposure == 1.0f && s.hdr_bloom == 100.0f && s.hdr_scene_grading == 0.0f);
+    // HDR presets (Native+'s menu): a file from before them becomes Preset #1; another preset
+    // starts from the defaults; each keeps its own settings through a save and a reload.
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_exposure=1.40\n"
+        "hdr_contrast=70\nhdr_paper_white=180\n"; }
+    BbSettings::Load();
+    assert(s.hdr_preset == 1 && s.hdr_exposure == 1.4f && s.hdr_contrast == 70.0f);
+    BbSettings::SelectHdrPreset(2);
+    assert(s.hdr_preset == 2 && s.hdr_exposure == 1.0f && s.hdr_contrast == 50.0f);
+    s.hdr_saturation = 65.0f;
+    s.hdr_settings_mode = 2;
+    BbSettings::SelectHdrPreset(1);
+    assert(s.hdr_exposure == 1.4f && s.hdr_contrast == 70.0f && s.hdr_saturation == 50.0f &&
+           s.hdr_paper_white == 180.0f);
+    SaveAndWait();
+    assert(Read(path).find("hdr_preset=1\n") != std::string::npos);
+    assert(Read(path).find("hdr_settings_mode=2\n") != std::string::npos);
+    assert(Read(path).find("hdr_preset2=") != std::string::npos);
+    BbSettings::Load();
+    assert(s.hdr_preset == 1 && s.hdr_exposure == 1.4f && s.hdr_settings_mode == 2);
+    BbSettings::SelectHdrPreset(2);
+    assert(s.hdr_saturation == 65.0f && s.hdr_exposure == 1.0f);
+    BbSettings::ResetHdr();
+    assert(s.hdr_saturation == 50.0f && s.hdr_tonemapper == BbSettings::HdrToneMapperVanillaPlus);
+    // Game Brightness: 203 whatever the display's peak; the peak follows the display's.
+    s.hdr_display_peak = 600.0f;
+    BbSettings::ResetHdr();
+    assert(s.hdr_paper_white == 203.0f && s.hdr_peak == 600.0f);
+    s.hdr_display_peak = 0.0f;
+    BbSettings::SelectHdrPreset(0); // Off keeps the values; the renderer shows the game's look
+    assert(s.hdr_preset == 0 && s.hdr_saturation == 50.0f);
+    // Tone mappers: Vanilla+ by default; PsychoV (4) saved, read back and kept per preset; any
+    // other value read as Vanilla+.
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\n"; }
+    BbSettings::Load();
+    assert(s.hdr_tonemapper == BbSettings::HdrToneMapperVanillaPlus);
+    s.hdr_tonemapper = BbSettings::HdrToneMapperPsychoV;
+    SaveAndWait();
+    assert(Read(path).find("hdr_tonemapper=4\n") != std::string::npos);
+    BbSettings::Load();
+    assert(s.hdr_tonemapper == BbSettings::HdrToneMapperPsychoV);
+    BbSettings::SelectHdrPreset(2);
+    assert(s.hdr_tonemapper == BbSettings::HdrToneMapperVanillaPlus);
+    BbSettings::SelectHdrPreset(1);
+    assert(s.hdr_tonemapper == BbSettings::HdrToneMapperPsychoV);
+    // The fork's earlier settings: hdr_mode=psychov30 read as nativeplus and written back so;
+    // 0.9.38.2's PsychoV (7) read as PsychoV with Vanilla+ Highlights and Hue Correction at 100 %
+    // (a Hue Correction below 0, a test build's "not set", ignored); the earlier Vanilla (2),
+    // Hybrid (3), Neutwo (0) and PsychoV-17 (6) read as Vanilla+.
+    BbSettings::ResetHdr();
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=psychov30\nhdr_hue_correction=-1\n"
+                                        "hdr_tonemapper=7\n"; }
+    BbSettings::Load();
+    assert(s.startup_nativeplus && s.hdr_tonemapper == BbSettings::HdrToneMapperPsychoV &&
+           s.hdr_vplus_highlights == 100.0f && s.hdr_hue_correction == 100.0f);
+    SaveAndWait();
+    assert(Read(path).find("hdr_mode=nativeplus\n") != std::string::npos &&
+           Read(path).find("hdr_tonemapper=4\n") != std::string::npos &&
+           Read(path).find("hdr_vplus_highlights=100\n") != std::string::npos &&
+           Read(path).find("hdr_hue_correction=100\n") != std::string::npos);
+    for (const char* other : {"0", "2", "3", "6"}) {
+        { std::ofstream file(path); file << "hdr=1\nhdr_mode=psychov30\nhdr_tonemapper=" << other
+                                         << "\n"; }
+        BbSettings::Load();
+        assert(s.hdr_tonemapper == BbSettings::HdrToneMapperVanillaPlus);
+    }
+    // PsychoV's Vanilla+ Highlights and Hue Correction: 0 by default, kept per preset, saved and
+    // read back, clamped to 0..100; a Hue Correction below 0 or not a number is ignored (the
+    // migration above), a Vanilla+ Highlights reads as 0.
+    BbSettings::ResetHdr();
+    assert(s.hdr_hue_correction == 0.0f && s.hdr_vplus_highlights == 0.0f);
+    s.hdr_tonemapper = BbSettings::HdrToneMapperPsychoV;
+    s.hdr_hue_correction = 40.0f;
+    s.hdr_vplus_highlights = 65.0f;
+    assert(BbSettings::HueCorrectionPercent() == 40.0f &&
+           BbSettings::VanillaPlusHighlightsPercent() == 65.0f);
+    SaveAndWait();
+    assert(Read(path).find("hdr_hue_correction=40\n") != std::string::npos &&
+           Read(path).find("hdr_vplus_highlights=65\n") != std::string::npos);
+    BbSettings::Load();
+    assert(s.hdr_hue_correction == 40.0f && s.hdr_vplus_highlights == 65.0f);
+    BbSettings::SelectHdrPreset(2);
+    assert(s.hdr_hue_correction == 0.0f && s.hdr_vplus_highlights == 0.0f);
+    BbSettings::SelectHdrPreset(1);
+    assert(s.hdr_hue_correction == 40.0f && s.hdr_vplus_highlights == 65.0f);
+    for (const char* text : {"-5", "nan"}) {
+        { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_hue_correction="
+                                         << text << "\nhdr_vplus_highlights=" << text << "\n"; }
+        s.hdr_hue_correction = 30.0f;
+        BbSettings::Load();
+        assert(s.hdr_hue_correction == 30.0f && s.hdr_vplus_highlights == 0.0f);
+    }
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_hue_correction=250\n"
+                                        "hdr_vplus_highlights=250\n"; }
+    BbSettings::Load();
+    assert(s.hdr_hue_correction == 100.0f && s.hdr_vplus_highlights == 100.0f);
+    BbSettings::ResetHdr();
+    assert(s.hdr_hue_correction == 0.0f && s.hdr_vplus_highlights == 0.0f);
+    // Vanilla+ Shadows and Keep Deeper Blacks: 0 and off by default, saved and read back, kept
+    // per preset, clamped to 0..100.
+    assert(s.hdr_vplus_shadows == 0.0f && !s.hdr_vplus_shadows_deeper);
+    s.hdr_vplus_shadows = 70.0f;
+    s.hdr_vplus_shadows_deeper = true;
+    assert(BbSettings::VanillaPlusShadowsPercent() == 70.0f);
+    SaveAndWait();
+    assert(Read(path).find("hdr_vplus_shadows=70\n") != std::string::npos &&
+           Read(path).find("hdr_vplus_shadows_deeper=1\n") != std::string::npos);
+    BbSettings::Load();
+    assert(s.hdr_vplus_shadows == 70.0f && s.hdr_vplus_shadows_deeper);
+    BbSettings::SelectHdrPreset(2);
+    assert(s.hdr_vplus_shadows == 0.0f && !s.hdr_vplus_shadows_deeper);
+    BbSettings::SelectHdrPreset(1);
+    assert(s.hdr_vplus_shadows == 70.0f && s.hdr_vplus_shadows_deeper);
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_vplus_shadows=250\n"; }
+    BbSettings::Load();
+    assert(s.hdr_vplus_shadows == 100.0f);
+    BbSettings::ResetHdr();
+    assert(s.hdr_vplus_shadows == 0.0f && !s.hdr_vplus_shadows_deeper);
+    // UI Brightness in nits (203 by default, 48..500); the earlier ratio converted with the
+    // paper white written before it, and not written back.
+    assert(s.hdr_ui_nits == 203.0f);
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_paper_white=180\n"
+                                        "hdr_ui_brightness=1.25\n"; }
+    BbSettings::Load();
+    assert(s.hdr_ui_nits == 225.0f);
+    SaveAndWait();
+    assert(Read(path).find("hdr_ui_nits=225\n") != std::string::npos);
+    assert(Read(path).find("hdr_ui_brightness") == std::string::npos);
+    { std::ofstream file(path); file << "hdr=1\nhdr_mode=nativeplus\nhdr_ui_nits=9999\n"; }
+    BbSettings::Load();
+    assert(s.hdr_ui_nits == 500.0f);
+    s.hdr_ui_nits = 150.0f;
+    BbSettings::SelectHdrPreset(2);
+    assert(s.hdr_ui_nits == 203.0f);
+    BbSettings::SelectHdrPreset(1);
+    assert(s.hdr_ui_nits == 150.0f);
     std::filesystem::remove(temporary);
     std::puts("PASS: settings save keeps other keys, menu position");
 }

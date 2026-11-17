@@ -11,6 +11,7 @@
 #include "input/ini_bindings.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -42,6 +43,12 @@
 namespace BbSettings {
 
 namespace {
+
+// The HDR presets' settings (hdr_preset1..3 in lantern.ini: "key=value;key=value..."), and
+// whether the file had a preset choice (a file from before the presets).
+std::mutex hdr_slot_mutex;
+std::array<std::string, HdrPresetCount - 1> hdr_slots;
+bool loaded_hdr_preset = false;
 
 const char* Path() {
     const char* env = std::getenv("BB_CONFIG");
@@ -373,24 +380,80 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.hdr_peak = Clamp(std::isfinite(f) ? f : HdrPeakDefault, HdrPeakMin, HdrPeakMax);
     } else if (key == "hdr_peak_auto") {
         v.hdr_peak_auto = i != 0;
+    } else if (key == "hdr_preset") {
+        if (!value.empty()) v.hdr_preset = std::clamp(i, 0, HdrPresetCount - 1);
+        loaded_hdr_preset = true;
+    } else if (key == "hdr_settings_mode") {
+        if (!value.empty()) v.hdr_settings_mode = std::clamp(i, 0, 2);
+    } else if (key.size() == 11 && key.starts_with("hdr_preset") && key[10] >= '1' &&
+               key[10] <= '0' + HdrPresetCount - 1) {
+        std::scoped_lock lock{hdr_slot_mutex};
+        hdr_slots[key[10] - '1'] = value;
     } else if (key == "hdr_boost") {
         v.hdr_boost = Clamp(std::isfinite(f) ? f : HdrBoostDefault, 0.0f, 1.0f);
+    } else if (key == "hdr_ui_nits") {
+        v.hdr_ui_nits = Clamp(std::isfinite(f) ? f : HdrUiNitsDefault, HdrUiNitsMin, HdrUiNitsMax);
     } else if (key == "hdr_ui_brightness") {
-        v.hdr_ui_brightness = Clamp(std::isfinite(f) ? f : 1.0f, HdrUiBrightnessMin, HdrUiBrightnessMax);
+        // The earlier setting, times paper white (written after it): in nits. hdr_ui_nits, when
+        // the same text has it, comes later and wins.
+        const float ratio = Clamp(std::isfinite(f) ? f : 1.0f, HdrUiBrightnessMin, HdrUiBrightnessMax);
+        v.hdr_ui_nits = Clamp(std::round(ratio * v.hdr_paper_white.load()), HdrUiNitsMin, HdrUiNitsMax);
     } else if (key == "hdr_ui_color") {
         v.hdr_ui_color = Clamp(std::isfinite(f) ? f : HdrUiColorDefault, 0.0f, 1.0f);
     } else if (key == "hdr_mode") {
-        int mode = -1;
+        // Native+'s name before 0.9.38.2 is still read (and written back as nativeplus).
+        int mode = value == "psychov30" ? int(HdrModeNativePlus) : -1;
         for (int m = 0; m < HdrModeCount; ++m) {
             if (value == HdrModeNames[m]) {
                 mode = m;
             }
         }
         if (mode < 0) {
-            std::printf("Settings: unknown hdr_mode '%s' (expected native or expand); native\n",
-                        value.c_str());
+            std::printf("Settings: unknown hdr_mode '%s' (expected native, expand or nativeplus); "
+                        "native\n", value.c_str());
         }
         v.hdr_mode = mode < 0 ? HdrModeNative : mode;
+    } else if (key == "hdr_exposure") {
+        v.hdr_exposure = Clamp(std::isfinite(f) ? f : 1.0f, 0.0f, 2.0f);
+    } else if (key == "hdr_contrast") {
+        v.hdr_contrast = Clamp(std::isfinite(f) ? f : 50.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_grade_highlights") {
+        v.hdr_grade_highlights = Clamp(std::isfinite(f) ? f : 50.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_shadows") {
+        v.hdr_shadows = Clamp(std::isfinite(f) ? f : 50.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_saturation") {
+        v.hdr_saturation = Clamp(std::isfinite(f) ? f : 50.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_bloom") {
+        v.hdr_bloom = Clamp(std::isfinite(f) ? f : 50.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_scene_grading") {
+        v.hdr_scene_grading = Clamp(std::isfinite(f) ? f : 100.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_black_floor") {
+        v.hdr_black_floor = Clamp(std::isfinite(f) ? f : 0.0f, 0.0f, 2.0f);
+    } else if (key == "hdr_hue_correction") {
+        // Below 0 (a test build's "not set") or not a number: left as it is (the default, or
+        // 100 % from hdr_tonemapper=7 read before it).
+        if (std::isfinite(f) && f >= 0.0f) {
+            v.hdr_hue_correction = Clamp(f, 0.0f, 100.0f);
+        }
+    } else if (key == "hdr_vplus_highlights") {
+        v.hdr_vplus_highlights = Clamp(std::isfinite(f) ? f : 0.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_vplus_shadows") {
+        v.hdr_vplus_shadows = Clamp(std::isfinite(f) ? f : 0.0f, 0.0f, 100.0f);
+    } else if (key == "hdr_vplus_shadows_deeper") {
+        v.hdr_vplus_shadows_deeper = i != 0;
+    } else if (key == "hdr_tonemapper") {
+        // PsychoV or Vanilla+. 7, 0.9.38.2's PsychoV (Vanilla+'s curve above mid grey and its
+        // hues), is PsychoV with both sliders at 100 %; the earlier Vanilla, Hybrid, Neutwo and
+        // PsychoV-17 read as Vanilla+.
+        if (i == HdrToneMapperPsychoVPlus) {
+            v.hdr_vplus_highlights = 100.0f;
+            v.hdr_hue_correction = 100.0f;
+        }
+        v.hdr_tonemapper = i == HdrToneMapperPsychoV || i == HdrToneMapperPsychoVPlus
+                               ? HdrToneMapperPsychoV
+                               : HdrToneMapperVanillaPlus;
+    } else if (key == "hdr_compare") {
+        v.hdr_compare = std::clamp(i, 0, 1);
     } else if (key == "live_resolution") {
         v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
     } else if (key == "cheat_vials") {
@@ -454,8 +517,120 @@ MenuLanguage LanguageOfLocale(const char* lang) {
     return MenuLanguage::English;
 }
 
+// The Native+ settings a preset holds, as lantern.ini writes them, separated by `sep`.
+std::string HdrText(const Values& v, char sep) {
+    std::string out;
+    char item[64];
+    const auto add = [&](const char* format, auto... args) {
+        std::snprintf(item, sizeof(item), format, args...);
+        out += item;
+        out += sep;
+    };
+    add("hdr_paper_white=%.0f", v.hdr_paper_white.load());
+    add("hdr_peak=%.0f", v.hdr_peak.load());
+    add("hdr_peak_auto=%d", v.hdr_peak_auto.load() ? 1 : 0);
+    add("hdr_ui_nits=%.0f", v.hdr_ui_nits.load());
+    add("hdr_tonemapper=%d", v.hdr_tonemapper.load());
+    add("hdr_exposure=%.2f", v.hdr_exposure.load());
+    add("hdr_contrast=%.0f", v.hdr_contrast.load());
+    add("hdr_grade_highlights=%.0f", v.hdr_grade_highlights.load());
+    add("hdr_shadows=%.0f", v.hdr_shadows.load());
+    add("hdr_saturation=%.0f", v.hdr_saturation.load());
+    add("hdr_bloom=%.0f", v.hdr_bloom.load());
+    add("hdr_scene_grading=%.0f", v.hdr_scene_grading.load());
+    add("hdr_black_floor=%.2f", v.hdr_black_floor.load());
+    add("hdr_hue_correction=%.0f", v.hdr_hue_correction.load());
+    add("hdr_vplus_highlights=%.0f", v.hdr_vplus_highlights.load());
+    add("hdr_vplus_shadows=%.0f", v.hdr_vplus_shadows.load());
+    add("hdr_vplus_shadows_deeper=%d", v.hdr_vplus_shadows_deeper.load() ? 1 : 0);
+    return out;
 }
 
+// A preset's text applied to the settings (HdrText with ';').
+void ApplyHdrText(Values& v, const std::string& text) {
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find(';', start);
+        if (end == std::string::npos) end = text.size();
+        const std::string item = text.substr(start, end - start);
+        if (const auto eq = item.find('=');
+            eq != std::string::npos && item.compare(0, 4, "hdr_") == 0 &&
+            item.compare(0, 10, "hdr_preset") != 0) {
+            Set(v, item.substr(0, eq), item.substr(eq + 1));
+        }
+        start = end + 1;
+    }
+}
+
+void ResetHdr(Values& v) {
+    v.hdr_paper_white = HdrPaperWhiteDefault;
+    v.hdr_peak = DefaultPeakNits();
+    v.hdr_peak_auto = true; // the display's peak when it reports one
+    v.hdr_ui_nits = HdrUiNitsDefault;
+    v.hdr_tonemapper = HdrToneMapperVanillaPlus;
+    v.hdr_exposure = 1.0f;
+    v.hdr_contrast = 50.0f;
+    v.hdr_grade_highlights = 50.0f;
+    v.hdr_shadows = 50.0f;
+    v.hdr_saturation = 50.0f;
+    v.hdr_bloom = 50.0f;
+    v.hdr_scene_grading = 100.0f;
+    v.hdr_black_floor = 0.0f;
+    v.hdr_hue_correction = 0.0f;
+    v.hdr_vplus_highlights = 0.0f;
+    v.hdr_vplus_shadows = 0.0f;
+    v.hdr_vplus_shadows_deeper = false;
+}
+
+} // namespace
+
+void SelectHdrPreset(int preset) {
+    auto& v = Get();
+    preset = std::clamp(preset, 0, HdrPresetCount - 1);
+    const int previous = v.hdr_preset;
+    if (preset == previous) {
+        return;
+    }
+    std::string text;
+    {
+        std::scoped_lock lock{hdr_slot_mutex};
+        if (previous > 0) {
+            hdr_slots[previous - 1] = HdrText(v, ';');
+        }
+        if (preset > 0) {
+            text = hdr_slots[preset - 1];
+        }
+    }
+    if (preset > 0) {
+        ResetHdr(v); // a preset never saved starts from the defaults; a saved one sets them all
+        ApplyHdrText(v, text);
+    }
+    v.hdr_preset = preset;
+}
+
+void ResetHdr() {
+    ResetHdr(Get());
+}
+
+float DefaultPeakNits() {
+    const float peak = Get().hdr_display_peak.load();
+    return peak >= HdrPeakMin ? std::clamp(std::round(peak), 200.0f, HdrPeakMax) : HdrPeakDefault;
+}
+
+float HueCorrectionPercent() {
+    return std::clamp(Get().hdr_hue_correction.load(), 0.0f, 100.0f);
+}
+
+float VanillaPlusHighlightsPercent() {
+    return std::clamp(Get().hdr_vplus_highlights.load(), 0.0f, 100.0f);
+}
+
+float VanillaPlusShadowsPercent() {
+    return std::clamp(Get().hdr_vplus_shadows.load(), 0.0f, 100.0f);
+}
+
+// The display's size for output_res = auto: BB_DISPLAY_SIZE ("WxH", from run_windows.py), even
+// (the game has half-resolution buffers); 1920x1080 without it.
 static std::pair<int, int> DisplaySize() {
     static const std::pair<int, int> size = [] {
         int w = 0, h = 0;
@@ -774,6 +949,10 @@ std::string MergeSettings(std::string_view before, const KeyList& keys) {
             line.remove_suffix(1);
         }
         const std::string_view key = KeyOf(line);
+        // hdr_ui_brightness is read as hdr_ui_nits at load and replaced by it: not written back.
+        if (key == "hdr_ui_brightness") {
+            continue;
+        }
         const auto it = key.empty() ? keys.end()
                                     : std::find_if(keys.begin(), keys.end(),
                                                    [&](const auto& k) { return k.first == key; });
@@ -988,6 +1167,11 @@ void Load() {
         }
         v.menu_language = LanguageOfLocale(lang);
     }
+    loaded_hdr_preset = false;
+    {
+        std::scoped_lock lock{hdr_slot_mutex};
+        hdr_slots = {};
+    }
     const SettingsFileText file = ReadSettingsFile(Path());
     if (file.state == SettingsFileState::Read) {
         ForEachSetting(file.text, [&](std::string_view key, std::string_view value) {
@@ -999,6 +1183,15 @@ void Load() {
         g_settings_write_failed.store(true, std::memory_order_relaxed);
         std::printf("Settings: lantern.ini could not be read; the defaults are used and nothing is saved this run\n");
     }
+    // A file from before the HDR presets: the HDR settings it has become Preset #1.
+    if (!loaded_hdr_preset) {
+        v.hdr_preset = 1;
+        std::scoped_lock lock{hdr_slot_mutex};
+        if (hdr_slots[0].empty()) {
+            hdr_slots[0] = HdrText(v, ';');
+        }
+    }
+    // Environment overrides (scripts, A/B tests).
     if (const char* env = std::getenv("BB_UPSCALER")) {
         v.upscaler = UpscalerOff;
         for (int u = 0; u < UpscalerCount; ++u) {
@@ -1044,6 +1237,7 @@ void Load() {
     v.startup_hdr = v.hdr;
     v.startup_optiscaler = {v.optiscaler_compat, v.optiscaler_ngx_lock, v.optiscaler_clean_thread,
                             v.optiscaler_sync_submit};
+    v.startup_nativeplus = v.startup_hdr && v.hdr_mode == HdrModeNativePlus;
     LoadBaseline(file);
 }
 
@@ -1193,9 +1387,38 @@ KeyList CurrentKeys() {
     put("hdr_peak", fixed(v.hdr_peak, 0));
     put("hdr_peak_auto", flag(v.hdr_peak_auto));
     put("hdr_boost", fixed(v.hdr_boost, 2));
-    put("hdr_ui_brightness", fixed(v.hdr_ui_brightness, 2));
+    put("hdr_ui_nits", fixed(v.hdr_ui_nits, 0));
     put("hdr_ui_color", fixed(v.hdr_ui_color, 2));
+    put("hdr_exposure", fixed(v.hdr_exposure, 3));
+    put("hdr_contrast", fixed(v.hdr_contrast, 3));
+    put("hdr_grade_highlights", fixed(v.hdr_grade_highlights, 3));
+    put("hdr_shadows", fixed(v.hdr_shadows, 3));
+    put("hdr_saturation", fixed(v.hdr_saturation, 3));
+    put("hdr_bloom", fixed(v.hdr_bloom, 3));
+    put("hdr_scene_grading", fixed(v.hdr_scene_grading, 3));
+    put("hdr_black_floor", fixed(v.hdr_black_floor, 3));
+    put("hdr_hue_correction", fixed(v.hdr_hue_correction, 0));
+    put("hdr_vplus_highlights", fixed(v.hdr_vplus_highlights, 0));
+    put("hdr_vplus_shadows", fixed(v.hdr_vplus_shadows, 0));
+    put("hdr_vplus_shadows_deeper", flag(v.hdr_vplus_shadows_deeper));
+    put("hdr_tonemapper", std::to_string(v.hdr_tonemapper.load()));
     put("hdr_mode", HdrModeNames[std::clamp(v.hdr_mode.load(), 0, HdrModeCount - 1)]);
+    // The HDR presets (in-game menu): the selected one holds the settings above.
+    put("hdr_preset", std::to_string(v.hdr_preset.load()));
+    put("hdr_settings_mode", std::to_string(v.hdr_settings_mode.load()));
+    {
+        std::scoped_lock lock{hdr_slot_mutex};
+        if (const int preset = v.hdr_preset; preset > 0) {
+            hdr_slots[preset - 1] = HdrText(v, ';');
+        }
+        static constexpr const char* slot_keys[] = {"hdr_preset1", "hdr_preset2", "hdr_preset3"};
+        static_assert(std::size(slot_keys) == HdrPresetCount - 1);
+        for (size_t s = 0; s < hdr_slots.size(); ++s) {
+            if (!hdr_slots[s].empty()) {
+                put(slot_keys[s], hdr_slots[s]);
+            }
+        }
+    }
     put("graphics_controls",flag(v.graphics_controls));
     put("graphics_vignette",flag(v.graphics_vignette));
     put("graphics_ao_strength",fixed(v.graphics_ao_strength,2));

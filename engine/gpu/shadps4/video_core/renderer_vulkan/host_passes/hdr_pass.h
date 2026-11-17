@@ -17,7 +17,7 @@ class HdrOutputPass {
 public:
     /// Push constants of hdr_output.frag.
     struct Settings {
-        float paper_white = 200.0f; ///< nits of SDR white
+        float paper_white = 203.0f; ///< nits of SDR white
         float peak = 1000.0f;       ///< nits the display reaches
         float boost = 0.5f;         ///< highlight expansion, 0..1 (expand mode and fallback)
         u32 flags = 0;              ///< FlagScRgb | FlagOverlay | FlagNative | FlagDebug
@@ -28,6 +28,8 @@ public:
         /// Native mode: the UI's white (times paper white) and colours (0 sRGB .. 1 DCI-P3).
         float ui_white = 1.0f;
         float ui_vivid = 0.0f;
+        /// Native+: the game's black level taken to 0 (Black Floor), in units of paper white.
+        float black_floor = 0.0f;
     };
     static constexpr u32 FlagScRgb = 1;   ///< scRGB (linear BT.709) output, else HDR10 PQ
     static constexpr u32 FlagOverlay = 2; ///< the menu layer is drawn
@@ -35,6 +37,11 @@ public:
     static constexpr u32 FlagDebug = 8;   ///< BB_HDR_DEBUG: the gain as a heat map
     static constexpr u32 FlagUiFrame = 16; ///< native mode, a frame without a scene: all UI
     static constexpr u32 FlagCompare = 32; ///< the left half as SDR (the menu's comparison)
+    /// Native+: the frame is the 16-bit chain's (RGBA16F, the game's white at 1), its SDR part
+    /// encoded as the game's signal, its pre-HUD snapshot bound (`snapshot`), shown as the game's
+    /// SDR (the menu's preset Off or Compare SDR).
+    static constexpr u32 FlagNativePlus = 64, FlagEncoded = 128, FlagSnapshot = 256,
+                         FlagGameLook = 512;
 
     /// `output_format`: the HDR swapchain's format.
     void Create(vk::Device device, vk::Format output_format);
@@ -48,7 +55,7 @@ public:
     /// in `gain_layout`) is filtered.
     void Render(vk::CommandBuffer cmdbuf, vk::ImageView game, vk::ImageView overlay,
                 vk::ImageView gain, vk::ImageLayout gain_layout, vk::ImageView output,
-                vk::Extent2D extent, const Settings& settings);
+                vk::Extent2D extent, const Settings& settings, vk::ImageView snapshot = {});
 
 private:
     vk::UniquePipeline pipeline{};

@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "upscale_transfer.glsl"
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer In { vec4 inputs[]; };
+layout(std430, binding = 1) writeonly buffer Out { vec4 outputs[]; };
+
+vec3 fp16(vec3 v) {
+    return vec3(unpackHalf2x16(packHalf2x16(v.xy)),
+                unpackHalf2x16(packHalf2x16(vec2(v.z, 0.0))).x);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec3 c = inputs[i].rgb;
+    vec3 linear = bb_upscale_decode(c);
+    outputs[6 * i] = vec4(linear, 1.0);
+    outputs[6 * i + 1] = vec4(bb_upscale_encode(c), 1.0);
+    outputs[6 * i + 2] = vec4(bb_upscale_encode(linear), 1.0);
+    outputs[6 * i + 3] = vec4(fp16(bb_upscale_encode(fp16(linear))), 1.0);
+    // Half white / half black must average to half the light, not half the encoded signal.
+    outputs[6 * i + 4] = vec4(bb_upscale_encode(linear * 0.5), 1.0);
+    outputs[6 * i + 5] = vec4(fp16(linear), 1.0);
+}

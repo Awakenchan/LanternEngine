@@ -3,7 +3,7 @@
 `hdr=1` in `lantern.ini` (`BB_HDR=1`, the menu's "HDR output", applied on restart) presents the
 game in an HDR swapchain when the display offers one (Windows HDR on): HDR10 (BT.2020, PQ,
 `A2B10G10R10`) or scRGB (linear BT.709 in FP16). The game itself only makes an 8-bit SDR frame;
-`hdr_output.frag` encodes it. SDR white is shown at `hdr_paper_white` nits (10-500, default 200),
+`hdr_output.frag` encodes it. SDR white is shown at `hdr_paper_white` nits (10-500, default 203, BT.2408's reference white),
 nothing goes above the peak. The settings menu is drawn into its own layer and composed at paper
 white. SDR is decoded with a 2.2 power curve (the piecewise sRGB curve lifts Bloodborne's shadows
 into grey).
@@ -24,6 +24,11 @@ live):
 |---|---|---|---|
 | `native` (default) | the game's own linear HDR scene, before its tonemap | exactly the SDR picture | paper white |
 | `expand` | the clipped SDR picture (a guess) | exactly the SDR picture | expanded like the rest |
+| `nativeplus` (restart) | the game's scene, tone mapped in its place (Vanilla+ or PsychoV), a 16-bit chain to the screen | the game's curve up to mid grey | `hdr_ui_nits` |
+
+The HUD, menus and subtitles are shown at `hdr_ui_nits` (48-500, default 203) in `native` and
+`nativeplus`, whatever paper white; an older `hdr_ui_brightness` (times paper white) is read
+converted. Native+ has its own page: [nativeplus.md](nativeplus.md).
 
 ## Expand
 

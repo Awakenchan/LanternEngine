@@ -26,7 +26,9 @@ public:
     ~SceneTargets();
     bool SetSize(SceneResolution::Size);
     SceneResolution::Size Size() const { return size; }
-    bool Reduced() const { return size != SceneResolution::Native(); }
+    /// Proxies stand in for the scene's targets: a scene size other than 1920x1080, or (Native+)
+    /// at any size, the 16-bit chain living in the proxies (1080p output: scale 1).
+    bool Reduced() const { return size != SceneResolution::Native() || proxies_at_native; }
     /// A reduced proxy can stand in for the image: a 1920x1080 scene target or, scaled by
     /// the same factor, a half-resolution (960x540) one (toggle SceneHalfRes).
     bool Eligible(const VideoCore::Image&) const;
@@ -34,6 +36,9 @@ public:
     bool EligibleScene(const VideoCore::Image&) const;
     /// The proxy size of an eligible image: the scene size divided like the native size.
     SceneResolution::Size ProxySize(const VideoCore::Image&, u32 level = 0) const;
+    /// Native+ with the startup patch (HdrChannel::Native16Fixed): a target of the
+    /// 16-bit chain, proxied at its own size (an RGBA16F stand-in, no scaling).
+    bool OwnSize(const VideoCore::Image&) const;
     struct Target {
         vk::Image image;
         vk::ImageView view;
@@ -45,6 +50,9 @@ public:
                 vk::PipelineStageFlags2 = vk::PipelineStageFlagBits2::eComputeShader,
                 vk::AccessFlags2 = vk::AccessFlagBits2::eShaderRead);
     void NativeAccess(VideoCore::Image&, vk::AccessFlags2);
+    /// Native+: a guest copy (a color resolve) between two proxied targets of the
+    /// same proxy size and format, done between their proxies; false (nothing done) otherwise.
+    bool CopyProxies(VideoCore::ImageId src, VideoCore::ImageId dst);
     /// The proxy of `image` for sampling when it holds the current content (else nullopt: the
     /// native image is current). Transitions only after other use (attachment, copy).
     /// Mipmapped targets have one proxy per level: views of one level only.
@@ -114,6 +122,7 @@ private:
     u64 released_proxies = 0, released_bytes = 0, release_report_proxies = 0;
     bool copying = false;
     bool force_stencil_bits = false; ///< test the portable resampler on any driver
+    bool proxies_at_native = false;  ///< Native+: proxies even at the native 1920x1080
     u64 generation = 0;
     mutable std::unordered_map<vk::Format, vk::FormatFeatureFlags> format_features;
     mutable std::array<vk::FormatFeatureFlags, 256> format_table{};

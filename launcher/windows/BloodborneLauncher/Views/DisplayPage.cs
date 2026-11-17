@@ -10,8 +10,38 @@ namespace BloodborneLauncher.Views
     {
         private readonly ComboBox _monitor = new() { Width = 360, VerticalAlignment = VerticalAlignment.Center };
         private bool _refreshingMonitors;
+        private FrameworkElement? _hdrBoostRow;
+        private FrameworkElement? _hdrBrightnessRow;
+        private FrameworkElement? _hdrColourRow;
+        private FrameworkElement? _hdrToneMapperRow;
+        /// <summary>HDR › Advanced: its "Advanced (n)" label counts the rows on show, and the HDR source
+        /// above shows some and hides others (RefreshCount).</summary>
+        private AdvancedSection? _hdrAdvanced;
 
-        public override void OnShown() => RefreshMonitors();
+        public override void OnShown()
+        {
+            RefreshMonitors();
+            RefreshHdrRows();
+        }
+
+        /// <summary>hdr_mode as the engine reads it: psychov30, Native+'s name before 0.9.38.2, is Native+.</summary>
+        private string HdrMode() => HdrGrading.ModeValue(Ini.Get("hdr_mode", "native"));
+
+        private void RefreshHdrRows()
+        {
+            var mode = HdrMode();
+            var psycho = mode == "nativeplus";
+            var native = mode == "native";
+            if (_hdrBoostRow != null)
+                _hdrBoostRow.Visibility = psycho ? Visibility.Collapsed : Visibility.Visible;
+            if (_hdrBrightnessRow != null)
+                _hdrBrightnessRow.Visibility = native || psycho ? Visibility.Visible : Visibility.Collapsed;
+            if (_hdrColourRow != null)
+                _hdrColourRow.Visibility = native ? Visibility.Visible : Visibility.Collapsed;
+            if (_hdrToneMapperRow != null)
+                _hdrToneMapperRow.Visibility = psycho ? Visibility.Visible : Visibility.Collapsed;
+            _hdrAdvanced?.RefreshCount();
+        }
 
         private void RefreshMonitors()
         {
@@ -173,12 +203,18 @@ namespace BloodborneLauncher.Views
                     : L.T("This display shows no HDR");
             IniToggle(SymbolRegular.Hdr24, L.T("HDR output"), hdrHint, "hdr");
             ComboRow(SymbolRegular.Lightbulb24, L.T("HDR source"),
-                L.T("Native: highlights as bright as they are in the game's scene. Expanded: the SDR picture's bright parts made brighter"),
-                Choices.HdrMode, () => Ini.Get("hdr_mode", "native"), v => Ini.Set("hdr_mode", v));
-            SliderRow(SymbolRegular.BrightnessHigh24, L.T("Paper white"), L.T("How bright the game's white is, in nits. Range: 10–500"),
-                10, 500, 1, () => ParseDouble(Ini.Get("hdr_paper_white", "200"), 200),
+                "Native+: the light of the game's scene kept to the screen, tone mapped to your display's peak by Vanilla+ or PsychoV. Native: highlights derived from the game's HDR scene. Expanded: bright SDR pixels expanded towards the peak. Entering or leaving Native+ requires restarting the game. With Native+, brightness, contrast, saturation and bloom move to the in-game menu (Insert or L3 + R3): Graphics → Picture hides its four sliders while it is on.",
+                Choices.HdrMode, HdrMode, v => Ini.Set("hdr_mode", v), changed: RefreshHdrRows);
+            // Defaults, as the engine's: paper white 203 (BT.2408's reference white); the peak from
+            // the display (hdr_peak_auto) unless it is set.
+            const double DefaultPaperWhite = 203;
+            var paperWhite = SliderRow(SymbolRegular.BrightnessHigh24, L.T("Paper white"), "How bright the game's white is, in nits. Default: 203. Range: 10–500",
+                10, 500, 1, () => ParseDouble(Ini.Get("hdr_paper_white", ""), DefaultPaperWhite),
                 v => Ini.Set("hdr_paper_white", v.ToString("0", System.Globalization.CultureInfo.InvariantCulture)),
                 format: L.T("0' nits'"), valueWidth: 82);
+            if (paperWhite.Parent is Panel paperWhiteRow)
+                paperWhiteRow.Children.Add(IconButton(SymbolRegular.ArrowCounterclockwise24, "Reset to 203 nits",
+                    (_, _) => paperWhite.Value = DefaultPaperWhite));
             ToggleRow(SymbolRegular.Desktop24, L.T("Peak brightness from the display"),
                 L.T("The peak Windows reports for the display the game is on (the Windows HDR Calibration app's, once it has run). Off: the value below"),
                 () => Ini.Get("hdr_peak_auto", "1") != "0", v => Ini.Set("hdr_peak_auto", v ? "1" : "0"));
@@ -186,13 +222,43 @@ namespace BloodborneLauncher.Views
                 10, 4000, 10, () => ParseDouble(Ini.Get("hdr_peak", "1000"), 1000),
                 v => Ini.Set("hdr_peak", v.ToString("0", System.Globalization.CultureInfo.InvariantCulture)),
                 format: L.T("0' nits'"), valueWidth: 82);
+            // UI brightness in nits, as RenoDX's (48..500, 203 by default), whatever Paper white. An
+            // older bbport.ini's hdr_ui_brightness (times paper white) shows converted, as the
+            // engine reads it, and goes once this is set.
+            const double DefaultUiNits = 203;
+            double UiNits()
+            {
+                if (Ini.Raw("hdr_ui_nits") is { } nits) return ParseDouble(nits, DefaultUiNits);
+                if (Ini.Raw("hdr_ui_brightness") is { } ratio)
+                    return Math.Round(ParseDouble(ratio, 1) * ParseDouble(Ini.Get("hdr_paper_white", ""), DefaultPaperWhite));
+                return DefaultUiNits;
+            }
+            var uiNits = SliderRow(SymbolRegular.TextFont24, L.T("UI brightness"),
+                "Native and Native+: how bright the HUD, menus and subtitles are, in nits, whatever Paper white. Default: 203. Range: 48–500. Also in the in-game menu, live",
+                48, 500, 1, UiNits,
+                v =>
+                {
+                    Ini.Set("hdr_ui_nits", v.ToString("0", System.Globalization.CultureInfo.InvariantCulture));
+                    Ini.Set("hdr_ui_brightness", null);
+                },
+                format: L.T("0' nits'"), valueWidth: 82);
+            _hdrBrightnessRow = (FrameworkElement)Body.Children[Body.Children.Count - 1];
+            if (uiNits.Parent is Panel uiNitsRow)
+                uiNitsRow.Children.Add(IconButton(SymbolRegular.ArrowCounterclockwise24, "Reset to 203 nits",
+                    (_, _) => uiNits.Value = DefaultUiNits));
             ComboRow(SymbolRegular.Sparkle24, L.T("Highlight boost"), L.T("Off keeps the game's own look; higher makes lamps, fire and the sky brighter"),
                 Choices.HdrBoost, () => Ini.Get("hdr_boost", "0.25"), v => Ini.Set("hdr_boost", v));
+            _hdrBoostRow = (FrameworkElement)Body.Children[Body.Children.Count - 1];
+            ComboRow(SymbolRegular.Lightbulb24, L.T("Tone mapper"),
+                "Native+ only. Vanilla+ (by souperman9, from his RenoDX Bloodborne mod): the game's image up to mid grey, brighter highlights up to your display's peak. PsychoV: RenoDX's PsychoV-30 with Vanilla+'s bloom; deeper blacks, softer highlights with the most detail near the peak. Its Vanilla+ Highlights and Hue Correction (in-game menu) take it towards Vanilla+'s brightness and hues. Also in the in-game menu, live",
+                Choices.HdrToneMapper, () => Choices.HdrToneMapperValue(Ini.Get("hdr_tonemapper", "5")), v => Ini.Set("hdr_tonemapper", v));
+            _hdrToneMapperRow = (FrameworkElement)Body.Children[Body.Children.Count - 1];
             var hdrMore = Advanced();
-            ComboRow(SymbolRegular.TextFont24, L.T("UI brightness"), L.T("Native source only: how bright the HUD, menus and subtitles are, against paper white"),
-                Choices.HdrUiBrightness, () => Ini.Get("hdr_ui_brightness", "1"), v => Ini.Set("hdr_ui_brightness", v), hdrMore);
+            _hdrAdvanced = hdrMore.Parent as AdvancedSection;
             ComboRow(SymbolRegular.Color24, L.T("UI colour"), L.T("Native source only: Vivid shows the HUD and menus with the colours a wide-gamut monitor gives SDR; Exact keeps sRGB's"),
                 Choices.HdrUiColor, () => Ini.Get("hdr_ui_color", "1"), v => Ini.Set("hdr_ui_color", v), hdrMore);
+            _hdrColourRow = (FrameworkElement)hdrMore.Children[hdrMore.Children.Count - 1];
+            RefreshHdrRows();
 
             Group(L.T("Language"));
             ComboRow(SymbolRegular.LocalLanguage24, L.T("In-game menu language"), L.T("The port's settings menu (Insert or L3 + R3)"),

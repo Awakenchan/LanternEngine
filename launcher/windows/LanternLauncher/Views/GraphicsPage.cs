@@ -12,6 +12,11 @@ namespace BloodborneLauncher.Views
         private readonly SettingRow _glowSizeCard;
         private readonly SettingRow _presetCard, _renderScaleCard, _sharpenCard, _sharpnessCard, _mipBiasCard;
         private readonly SettingRow _frameGenFramesCard, _frameGenDynamicCard, _reflexCard, _frameGenCapCard;
+        /// <summary>Picture's Bloom, Saturation, Brightness and Contrast: the Native+ chain grades them while
+        /// it runs (HdrGrading.Active), so the engine leaves them as the game draws them and they are hidden.</summary>
+        private readonly List<SettingRow> _pictureGradedRows = new();
+        /// <summary>The line under them saying where they are while that happens (the in-game menu).</summary>
+        private TextBlock? _pictureGradedNote;
 
         public GraphicsPage() : base(L.T("Graphics"),
             L.T("Stored in lantern.ini; the upscaler can also be changed in game (Insert or L3 + R3)."))
@@ -91,13 +96,18 @@ namespace BloodborneLauncher.Views
             IniToggle(SymbolRegular.CircleHalfFill24, L.T("Vignette"), null, "graphics_vignette", picture);
             IniSlider(SymbolRegular.DarkTheme24, L.T("Ambient occlusion strength"), 0, 3, "graphics_ao_strength", picture);
             IniSlider(SymbolRegular.WeatherSunny24, L.T("Shadow distance"), 0.5, 4, "graphics_shadow_scale", picture);
-            IniSlider(SymbolRegular.Lightbulb24, L.T("Bloom"), 0, 3, "graphics_bloom", picture);
-            IniSlider(SymbolRegular.Color24, L.T("Saturation"), 0, 3, "graphics_saturation", picture);
-            IniSlider(SymbolRegular.BrightnessHigh24, L.T("Brightness"), 0, 3, "graphics_brightness", picture);
-            IniSlider(SymbolRegular.DarkTheme24, L.T("Contrast"), 0.8, 1.2, "graphics_contrast", picture, step: 0.01);
+            // The four the Native+ chain takes over while it grades (UpdatePicture hides them then).
+            GradedSlider(SymbolRegular.Lightbulb24, L.T("Bloom"), 0, 3, "graphics_bloom", picture);
+            GradedSlider(SymbolRegular.Color24, L.T("Saturation"), 0, 3, "graphics_saturation", picture);
+            GradedSlider(SymbolRegular.BrightnessHigh24, L.T("Brightness"), 0, 3, "graphics_brightness", picture);
+            GradedSlider(SymbolRegular.DarkTheme24, L.T("Contrast"), 0.8, 1.2, "graphics_contrast", picture, step: 0.01);
             IniSlider(SymbolRegular.Color24, L.T("Hue"), -180, 180, "graphics_hue", picture, step: 1, fallback: 0);
             IniSlider(SymbolRegular.WeatherFog24, L.T("Fog"), 0, 3, "graphics_fog", picture, snapToOne: true);
             Body.Children.Add(picture);
+            // Where they went, while they are hidden: the in-game menu's grading, which is live there.
+            _pictureGradedNote = Text(L.T("Native+ with HDR on: brightness, contrast, saturation and bloom are graded in the in-game menu (Insert or L3 + R3), live"), "Faint");
+            Body.Children.Add(_pictureGradedNote);
+            UpdatePicture();
 
             Group(L.T("Menus"));
             _ui4k = ToggleRow(SymbolRegular.ZoomIn24, L.T("4K menus"),
@@ -241,6 +251,15 @@ namespace BloodborneLauncher.Views
             double step = 0.05, double fallback = 1.0, bool snapToOne = false) =>
             SliderRow(icon, title, null, min, max, step, () => ParseDouble(Ini.Get(key, Fmt(fallback)), fallback), v => Ini.Set(key, Fmt(snapToOne ? Looks.SnapToOne(v) : v)), into: into);
 
+        /// <summary>A Picture slider the Native+ chain replaces while it grades (hdr_grading): kept in
+        /// _pictureGradedRows, so UpdatePicture hides it and the note says where it is.</summary>
+        private void GradedSlider(SymbolRegular icon, string title, double min, double max, string key, Panel into,
+            double step = 0.05)
+        {
+            IniSlider(icon, title, min, max, key, into, step);
+            _pictureGradedRows.Add((SettingRow)into.Children[^1]);
+        }
+
         private static bool DlssFrameGenGpu() =>
             Hardware.Detect() is { Rtx: true } hardware &&
             System.Text.RegularExpressions.Regex.IsMatch(hardware.Gpu, @"RTX\s*(PRO\s*)?[45]0\d\d", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -256,7 +275,26 @@ namespace BloodborneLauncher.Views
             _ => SymbolRegular.Color24,
         };
 
-        public override void OnShown() => UpdateUpscaler();
+        public override void OnShown()
+        {
+            UpdateUpscaler();
+            UpdatePicture();
+        }
+
+        /// <summary>
+        /// Picture's Bloom, Saturation, Brightness and Contrast are the game's own look only while the
+        /// Native+ chain does not grade: with HDR output on and the Native+ source the chain grades
+        /// instead (engine/graphics.cpp's hdr_grading), and the engine leaves them as drawn. Hidden
+        /// then, with the note saying where they are; HDR off, or Native and Expanded, keeps them.
+        /// </summary>
+        private void UpdatePicture()
+        {
+            var grades = HdrGrading.Active(Ini.Get("hdr"), Ini.Get("hdr_mode", "native"));
+            foreach (var row in _pictureGradedRows)
+                row.IsVisible = !grades;
+            if (_pictureGradedNote != null)
+                _pictureGradedNote.IsVisible = grades;
+        }
 
         private void UpdateGlowSize() => _glowSizeCard.IsEnabled = Ini.Get("graphics_point_fog_falloff", "0") == "1";
 

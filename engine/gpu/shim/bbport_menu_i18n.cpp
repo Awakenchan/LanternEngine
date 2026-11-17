@@ -2199,7 +2199,7 @@ constexpr Entry kChinese[] = {
     {"Highlight boost", "高光增强"},
     {"UI brightness", "界面亮度"},
     {"UI colour", "界面色彩"},
-    {"Native mode only: the game's HUD, menus, subtitles and loading screens. UI brightness: their white, times paper white. UI colour: 0 shows their exact sRGB colours, 1 the wider colours a wide-gamut monitor shows SDR with (the usual look; exact sRGB can look washed out next to it). Live.", "仅限原生模式：影响游戏 HUD、菜单、字幕和加载画面。界面亮度为界面白色相对纸白亮度的倍率。界面色彩：0 为准确的 sRGB 色彩，1 为广色域显示器呈现 SDR 时常见的较鲜艳色彩。调整即时生效。"},
+    {"Native mode only: the game's HUD, menus, subtitles and loading screens. UI brightness: their white, in nits. UI colour: 0 shows their exact sRGB colours, 1 the wider colours a wide-gamut monitor shows SDR with (the usual look; exact sRGB can look washed out next to it). Live.", "仅限原生模式：影响游戏 HUD、菜单、字幕和加载画面。界面亮度为界面白色的亮度（尼特）。界面色彩：0 为准确的 sRGB 色彩，1 为广色域显示器呈现 SDR 时常见的较鲜艳色彩。调整即时生效。"},
     {"Paper white: how bright the game's white (and this menu) is; about 200 suits a dim room. Peak: your display's peak brightness (its HDR specs, or the Windows HDR Calibration app). Highlight boost: 0 shows the SDR picture as it is; higher values let the brightest parts (lamps, fire, the moon) rise towards the peak. In Native mode it is how much of the scene's own highlight range is shown: 0.25 about half, 1 all of it (up to the peak). Changes apply live. Ctrl+click a slider to type an exact value.", "纸白亮度决定游戏白色和此菜单的亮度，较暗房间可从 200 尼特开始。峰值亮度应参考显示器 HDR 规格或 Windows HDR 校准结果。高光增强为 0 时保留 SDR 画面；提高后，灯光、火焰、月亮等高光会接近峰值。在原生模式下，它控制显示多少原始场景高光范围：0.25 约显示一半，1 显示全部，且不超过峰值。即时生效。按住 Ctrl 单击滑块可输入精确数值。"},
     {"Picture", "画面"},
     {"Unavailable: the game's code differs from version 1.09.", "不可用：游戏可执行文件与 1.09 版不一致。"},

@@ -17,6 +17,8 @@
 #include "lantern_switches.h"
 #include "bbport_sections.h"
 #include "common/hash.h"
+#include "video_core/renderer_vulkan/vk_hdr_channel.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -99,6 +101,7 @@ DriverCache::Identity DriverIdentity(const Instance& instance) {
 }
 
 std::filesystem::path DriverCachePath() {
+    // Native+ shares it with the other modes, as the shader cache (cache_storage.cpp).
     return Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
            (std::string{Common::ElfInfo::Instance().GameSerial()} + ".vkcache");
 }
@@ -681,6 +684,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              AmdGpu::Liverpool* liverpool_, u32 sparse_page_shift)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
+    ASSERT_MSG(!HdrChannel::Native16() ||
+        instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize >= 176,
+        "Native+ requires 176 bytes of Vulkan push constants; choose Native or Expand on this GPU");
     sel.regs = &liverpool->regs;
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -747,6 +753,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         // bbport: native shaders, on unless BB_NATIVE_SHADERS=0 (the launcher's "Legacy shader
         // compiler"). Uniform buffers need the per-buffer offset in the push data (a 64-byte
         // uniform alignment can leave a remainder) and the 64 KiB range the shaders declare.
+        // Native+ reads the composite's constant buffer either way (vk_hdr_channel.cpp
+        // BuildComposite); its layout is checked below.
         .uniform_constant_buffers =
             [] {
                 const char* env = std::getenv("BB_NATIVE_SHADERS");
@@ -770,6 +778,17 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         const char* env = std::getenv("BB_UBO_EXACT");
         return env && env[0] == '1';
     }();
+    // Native+'s composite reads a native uniform buffer as dwords, at the offset in the push data
+    // (bb_composite_hdr.frag, BB_CB_UBO); with another layout, the legacy compiler.
+    if (HdrChannel::Native16() && profile.uniform_constant_buffers &&
+        (!profile.uniform_dword_layout || profile.uniform_exact_base)) {
+        std::printf("Native shaders: off in HDR mode Native+ (BB_UBO_DWORDS=0, BB_UBO_EXACT=1 or no "
+                    "uniform buffer standard layout: its composite reads dwords at the push "
+                    "data's offset)\n");
+        profile.uniform_constant_buffers = false;
+        profile.uniform_dword_layout = false;
+        profile.uniform_exact_base = false;
+    }
     // Opt-in: measured slower at the test spot (Profile::early_fragment_tests).
     profile.early_fragment_tests = [] {
         const char* env = std::getenv("BB_EARLY_Z");
@@ -799,7 +818,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     profile.flatbuf_storage = profile.uniform_constant_buffers && !switch_on("BB_UBO_FLATBUF");
     // bbport: pixel shader arithmetic the driver may fuse; BB_FS_CONTRACT=0 keeps it unfused.
     profile.fragment_exact_fp = !switch_on("BB_FS_CONTRACT");
-    // bbport: manual interpolation only where it matters; BB_INTERP_HW=0 for every input.
+    // bbport: manual interpolation only where it matters; BB_INTERP_HW=0 for every input. Native+'s
+    // replacements have a build for either kind of input (vk_hdr_channel.cpp, bb_inputs.glsl).
     profile.manual_interpolation_all = profile.needs_manual_interpolation && !switch_on("BB_INTERP_HW");
     if (profile.uniform_constant_buffers) {
         std::printf("Native shaders: constant buffers as uniform buffers (BB_NATIVE_SHADERS=0: "
@@ -1265,6 +1285,16 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         color_buffer.data_format = col_buf.GetDataFmt();
         color_buffer.num_format = col_buf.GetNumberFmt();
         color_buffer.num_conversion = col_buf.GetNumberConversion();
+        if (HdrChannel::Native16Active()) {
+            const auto format = LiverpoolToVK::SurfaceFormat(col_buf.GetDataFmt(), col_buf.GetNumberFmt());
+            if (HdrChannel::Upgraded(col_buf.Address(), col_buf.Pitch(), col_buf.Height(), format) ||
+                (FrameCapture::IsDisplayBuffer(col_buf.Address()) &&
+                 HdrChannel::DisplayUpgraded(col_buf.Address(), format))) {
+                color_buffer.data_format = AmdGpu::DataFormat::Format16_16_16_16;
+                color_buffer.num_format = AmdGpu::NumberFormat::Float;
+                color_buffer.num_conversion = AmdGpu::NumberConversion::None;
+            }
+        }
         color_buffer.export_format = regs.color_export_format.GetFormat(cb);
         color_buffer.swizzle = col_buf.Swizzle();
 
@@ -1549,6 +1579,20 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
+    // Build composite variants from the original interface, then replace only chain passes. The
+    // cache keeps the game's own shader (`stored`): Native+ swaps its replacements in again when it
+    // loads it (LoadPipelineStage), so every mode, the shader catalog and bb-shader-lab's
+    // recompiles share one cache.
+    std::vector<u32> stored;
+    if (info.sw_stage == Shader::SwStage::Fragment && HdrChannel::Native16()) {
+        const HdrChannel::GameShader game{info, runtime_info, binding_before, spv};
+        HdrChannel::NoteGameShader(game);
+        auto replacement = HdrChannel::ChainReplacement(game);
+        if (!replacement.empty()) {
+            stored = std::move(spv);
+            spv = std::move(replacement);
+        }
+    }
     vk::ShaderModule module;
 
     auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
@@ -1573,7 +1617,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    RegisterShaderBinary(stored.empty() ? std::vector<u32>(spv) : std::move(stored), info.pgm_hash,
+                         perm_idx);
     return module;
 }
 

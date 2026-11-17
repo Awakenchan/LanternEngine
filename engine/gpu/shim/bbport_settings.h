@@ -9,6 +9,14 @@
 #include <cstdlib>
 
 namespace BbSettings {
+/// Native+'s hdr_tonemapper: 5 Vanilla+ (the default; souperman9's, from his RenoDX Bloodborne
+/// mod) or 4 PsychoV (RenoDX's PsychoV-30 with Vanilla+'s bloom; its Vanilla+ Highlights and Hue
+/// Correction sliders take it towards Vanilla+'s curve and hues), both on the scene in the
+/// composite, BT.2020: the final pass only encodes. 7, 0.9.38.2's PsychoV, reads as PsychoV with
+/// both sliders at 100 %; any other value (6 was PsychoV-17) as Vanilla+.
+inline constexpr int HdrToneMapperPsychoV = 4;
+inline constexpr int HdrToneMapperVanillaPlus = 5;
+inline constexpr int HdrToneMapperPsychoVPlus = 7; ///< read as PsychoV, both sliders at 100 %
 
 enum Upscaler : int { UpscalerOff = 0, UpscalerFsr3 = 1, UpscalerFsr4 = 2, UpscalerFsr411 = 3,
                       UpscalerTaa = 4, UpscalerDlss = 5, UpscalerFsr = 6, UpscalerXess = 7,
@@ -112,13 +120,24 @@ int OutputHeight(int index);
 inline constexpr int CheatOff = 0, CheatInfinite = -1, CheatMaxAmount = 99;
 inline constexpr int CheatGunRanges[] = {0, 150, 200, 300};
 inline constexpr int CheatEchoMultipliers[] = {1, 2, 5, 10};
-inline constexpr float HdrPaperWhiteDefault = 200.0f, HdrPaperWhiteMin = 10.0f, HdrPaperWhiteMax = 500.0f;
+/// HDR output (hdr_paper_white / hdr_peak in nits, hdr_boost 0..1): defaults and ranges.
+inline constexpr float HdrPaperWhiteDefault = 203.0f, HdrPaperWhiteMin = 10.0f, HdrPaperWhiteMax = 500.0f;
 inline constexpr float HdrPeakDefault = 1000.0f, HdrPeakMin = 10.0f, HdrPeakMax = 4000.0f;
 inline constexpr float HdrBoostDefault = 0.25f;
+/// Native and Native+: the game's UI (HUD, menus) at hdr_ui_nits, as RenoDX's UI Brightness
+/// (48 .. 500 nits, 203 by default), whatever Game Brightness; hdr_ui_color (native mode) of the
+/// way from sRGB's colours (0) to a wide-gamut SDR monitor's (1, DCI-P3). hdr_ui_brightness, the
+/// earlier setting (times paper white, 0.5 .. 2), is still read and converted.
+inline constexpr float HdrUiNitsDefault = 203.0f, HdrUiNitsMin = 48.0f, HdrUiNitsMax = 500.0f;
 inline constexpr float HdrUiBrightnessMin = 0.5f, HdrUiBrightnessMax = 2.0f, HdrUiColorDefault = 1.0f;
 enum HdrOutput : int { HdrOutputOff = 0, HdrOutputHdr10 = 1, HdrOutputScRgb = 2 };
-enum HdrMode : int { HdrModeNative = 0, HdrModeExpand = 1, HdrModeCount };
-inline constexpr const char* HdrModeNames[] = {"native", "expand"};
+/// hdr_mode in lantern.ini (docs/hdr.md). Native: the highlights' brightness from the game's own
+/// HDR scene (vk_hdr_native.h), expand where a frame has none (menus, loading, movies). Expand:
+/// the SDR picture's highlights stretched towards the peak. Native+ ("nativeplus", "psychov30"
+/// before 0.9.38.2; on restart, docs/nativeplus.md): the scene tone mapped in the composite, the
+/// 16-bit chain after it.
+enum HdrMode : int { HdrModeNative = 0, HdrModeExpand = 1, HdrModeNativePlus = 2, HdrModeCount };
+inline constexpr const char* HdrModeNames[] = {"native", "expand", "nativeplus"};
 static_assert(sizeof(HdrModeNames) / sizeof(HdrModeNames[0]) == HdrModeCount);
 
 inline constexpr int DlssPresetDefault = 0, DlssPresetK = 11, DlssPresetMax = 26;
@@ -227,8 +246,10 @@ struct Values {
         hdr_boost{HdrBoostDefault};
     std::atomic<bool> hdr_peak_auto{true};
     std::atomic<float> hdr_display_peak{0.0f};
-    std::atomic<bool> hdr_compare{false};
-    std::atomic<float> hdr_ui_brightness{1.0f}, hdr_ui_color{HdrUiColorDefault};
+    std::atomic<bool> hdr_compare{false}; ///< Native / Expand: the left half as SDR
+    std::atomic<float> hdr_ui_nits{HdrUiNitsDefault}, hdr_ui_color{HdrUiColorDefault};
+    /// HdrMode (hdr_mode, BB_HDR_MODE); live. In native mode boost is the share of the scene's
+    /// highlight range shown: sqrt(boost) of it in log2 (0.25: half, 1: all of it).
     std::atomic<int> hdr_mode{HdrModeNative};
     std::atomic<int> hdr_output{HdrOutputOff};
     std::atomic<int> live_resolution{0};
@@ -263,6 +284,37 @@ struct Values {
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
+    std::atomic<float> hdr_exposure{1.0f};
+    std::atomic<float> hdr_contrast{50.0f};
+    std::atomic<float> hdr_grade_highlights{50.0f};
+    std::atomic<float> hdr_shadows{50.0f};
+    std::atomic<float> hdr_saturation{50.0f};
+    /// PsychoV: how far its hues go to Vanilla+'s (Hue Correction), 0..100 %.
+    std::atomic<float> hdr_hue_correction{0.0f};
+    /// PsychoV: how far its highlights take Vanilla+'s curve above mid grey (Vanilla+
+    /// Highlights), 0..100 %.
+    std::atomic<float> hdr_vplus_highlights{0.0f};
+    /// PsychoV: how far its shadows take Vanilla+'s curve below mid grey (Vanilla+ Shadows),
+    /// 0..100 %.
+    std::atomic<float> hdr_vplus_shadows{0.0f};
+    /// Vanilla+ Shadows only takes PsychoV's shadows down (Keep Deeper Blacks): where PsychoV's
+    /// are deeper than the game's own curve, they stay.
+    std::atomic<bool> hdr_vplus_shadows_deeper{false};
+    std::atomic<float> hdr_bloom{50.0f};    ///< the game's bloom, 0..100, 50 as drawn
+    std::atomic<float> hdr_scene_grading{100.0f}; ///< the game's color table, 0..100 %
+    std::atomic<float> hdr_black_floor{0.0f}; ///< nits of the game's black taken down to 0 (0..2)
+    enum HdrCompare : int { HdrCompareHdr = 0, HdrCompareSdr = 1, HdrCompareCount };
+    std::atomic<int> hdr16_compare{HdrCompareHdr}; ///< Native+: F9 cycles HDR / the game's SDR
+    std::atomic<bool> hdr_native16_live{false}; ///< set by the presenter: the frame is Native+'s
+    std::atomic<int> hdr_tonemapper{HdrToneMapperVanillaPlus};
+    /// Native+'s HDR preset in the in-game menu, as RenoDX's: 0 Off (the game's own look), 1..3
+    /// the player's own settings, each kept in lantern.ini (hdr_preset1..3); the sliders change
+    /// the one selected.
+    std::atomic<int> hdr_preset{1};
+    /// The in-game menu's Settings Mode (RenoDX's): 0 Simple, 1 Intermediate, 2 Advanced.
+    std::atomic<int> hdr_settings_mode{0};
+    bool startup_nativeplus = false;
+
     bool startup_hdr = false;
 };
 
@@ -295,6 +347,8 @@ int RenderPreset();
 bool ResolutionNeedsRestart();
 enum class SaveResult { Written, Unchanged, LoadUnreadable, Unreadable, NotLocked, NotReplaced };
 
+/// Writes the file (menu changes). With an HDR preset selected, it also keeps the HDR settings
+/// as that preset's.
 void Save();
 [[nodiscard]] SaveResult SaveNow();
 [[nodiscard]] bool FlushSaves(std::chrono::milliseconds bound);
@@ -310,6 +364,20 @@ struct SaveFailures {
 };
 SaveFailures SaveFailureCounts();
 
+inline constexpr int HdrPresetCount = 4; ///< Off and three of the player's
+/// Selects an HDR preset: the HDR settings go to the one selected before, and those of the new
+/// one (1..3) are loaded; a preset never saved starts from the defaults. 0 (Off) keeps them.
+void SelectHdrPreset(int preset);
+/// Native+'s HDR settings of the selected preset back to the defaults (the menu's Reset all).
+void ResetHdr();
+/// PsychoV's Hue Correction, Vanilla+ Highlights and Vanilla+ Shadows in effect, 0..100 %.
+float HueCorrectionPercent();
+float VanillaPlusHighlightsPercent();
+float VanillaPlusShadowsPercent();
+/// Peak Brightness default: the display's peak, else 1000 nits.
+float DefaultPeakNits();
+
+/// Render resolution divisor of a preset (1.0 native, 1.5 quality, ...).
 float PresetScale(int preset);
 const char* PresetName(int preset);
 int ModelPreset(int preset);

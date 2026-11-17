@@ -263,7 +263,7 @@
 
         public static readonly Choice[] HdrPaperWhite =
         {
-            new(L.T("100 nits"), "100"), new(L.T("150 nits"), "150"), new(L.T("200 nits (default)"), "200"),
+            new(L.T("100 nits"), "100"), new(L.T("150 nits"), "150"), new(L.T("203 nits (default)"), "203"),
             new(L.T("250 nits"), "250"), new(L.T("300 nits"), "300"), new(L.T("400 nits"), "400"),
         };
 
@@ -292,18 +292,27 @@
 
         public static readonly Choice[] HdrMode =
         {
-            new(L.T("Native (default)"), "native"), new(L.T("Expanded"), "expand"),
+            new(L.T("Native"), "native"), new(L.T("Expanded"), "expand"),
+            new("Native+ (restart)", "nativeplus",
+                "Native+ HDR by LRF17 (github.com/LRF17/LanternEngine-NativePlusHDR). Tone mappers: Vanilla+ by souperman9 (from his RenoDX Bloodborne mod); PsychoV built on PsychoV-30 and the hue correction from RenoDX (© 2026 Carlos Lopez, MIT License, github.com/clshortfuse/renodx)."),
         };
+
+        /// <summary>hdr_tonemapper with Native+ (hdr_mode=nativeplus): 5 Vanilla+ (souperman9's, from his RenoDX Bloodborne mod; the default) or 4 PsychoV (RenoDX's PsychoV-30 with Vanilla+'s bloom; its Vanilla+ Highlights and Hue Correction are in the in-game menu). 7, 0.9.38.2's PsychoV, shows as PsychoV (HdrToneMapperValue): the engine reads it as PsychoV with both sliders at 100 %.</summary>
+        public static readonly Choice[] HdrToneMapper =
+        {
+            // The segmented buttons show the label up to " (".
+            new("Vanilla+ (by souperman9, default)", "5"), new("PsychoV (PsychoV-30, sliders in game)", "4"),
+        };
+
+        /// <summary>The stored hdr_tonemapper as a HdrToneMapper choice, as the engine reads it: 4 and 7 PsychoV, anything else Vanilla+. A stored 7 is shown as PsychoV but left as it is until changed, so the engine still reads its sliders at 100 %.</summary>
+        public static string HdrToneMapperValue(string stored) => stored == "4" || stored == "7" ? "4" : "5";
+
 
         public static readonly Choice[] HdrBoost =
         {
             new(L.T("Off"), "0"), new(L.T("Low (default)"), "0.25"), new(L.T("Medium"), "0.5"), new(L.T("High"), "1"),
         };
 
-        public static readonly Choice[] HdrUiBrightness =
-        {
-            new(L.T("Dimmer"), "0.75"), new(L.T("Paper white (default)"), "1"), new(L.T("Brighter"), "1.25"), new(L.T("Much brighter"), "1.5"),
-        };
 
         public static readonly Choice[] HdrUiColor =
         {

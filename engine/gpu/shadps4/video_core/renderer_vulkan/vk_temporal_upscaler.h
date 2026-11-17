@@ -145,8 +145,12 @@ public:
         vk::Image image;
         vk::Format format;
         u32 width, height;
+        vk::Format guest_format = vk::Format::eUndefined;
     };
     bool DisplayOverride(VAddr address, Display& display);
+    bool TakeHudSnapshot(VAddr address, std::unique_ptr<HdrGainMap>& snapshot);
+    void PublishHudSnapshot(VAddr address);
+    bool Redirecting() const noexcept { return ui_phase || display_redirect; }
     /// BB_PRESENT_DUMP_TRIGGER: whether this presented frame is to be saved (consumes the trigger).
     bool PresentDumpDue();
     /// Saves `image` (General layout, 4 bytes a pixel) as present_<w>x<h> in BB_DUMP_DIR.
@@ -177,11 +181,11 @@ private:
     /// Render size below the scaled-preset output size (the resolution patch is on).
     [[nodiscard]] bool Scaled() const;
     /// A target of the patched render size: the game allocates it with aligned dimensions
-    /// (a 1916x1078 scene in 1916x1080 targets).
+    /// (a 1916x1078 scene in 1916x1080 targets, a 1708x960 one in 1792x960: widths to 128).
     [[nodiscard]] bool RenderTarget(u32 w, u32 h) const {
         if (!scaled_session) return w == 1920 && h == 1080;
-        return w >= render_width && h >= render_height && w < render_width + 8 &&
-               h < render_height + 8;
+        return w >= render_width && h >= render_height && w < render_width + 128 &&
+               h < render_height + 64;
     }
     /// bbport: native HDR output: the game's tonemapped frame (the UI target): RGBA8 of the
     /// render size, not a display buffer.
@@ -201,6 +205,17 @@ private:
     /// Available and switched on (menu setting, toggle 1 << 24).
     [[nodiscard]] bool Active() const;
     [[nodiscard]] bool ReactiveOn() const;
+    bool UiComposed() const;
+    vk::Format UiColorFormat(const VideoCore::Image& color) const;
+    /// Native+: the chain's gamma-encoded frame decoded to linear light (`encode` false) or
+    /// encoded back (true) by hdr_upscale_transfer.comp; with a snapshot image, the encode also
+    /// writes the pre-HUD snapshot. Records only what it is given (on a recording thread too).
+    void RecordHdrTransfer(vk::CommandBuffer cmd, vk::Image source, vk::ImageView source_view,
+                           vk::Image target, vk::ImageView target_view, u32 w, u32 h, bool encode,
+                           vk::Image snapshot_image = {}, vk::ImageView snapshot_view = {}) const;
+    /// Native+: the pre-HUD snapshot's image at the UI image's size. True when it was made again
+    /// (after scheduler.Finish(): a command buffer taken before is gone).
+    bool EnsureSnapshot();
     bool EnsureResources(u32 width, u32 height, u32 out_width, u32 out_height, bool hdr);
     void CreatePipelines();
     /// Records the reactive mask pass; false when there is no snapshot this frame.
@@ -282,6 +297,20 @@ private:
     bool ui_phase = false;         ///< from the upscale to the next display pass
     bool display_redirect = false; ///< the display pass of an upscaled frame
     bool ui_read_barrier = false;
+    int applied_hdr_path = -1;
+    VideoCore::UniqueImage hdr_linear_input;
+    vk::UniqueImageView hdr_linear_input_view;
+    vk::UniqueDescriptorSetLayout hdr_transfer_desc_layout;
+    vk::UniquePipelineLayout hdr_transfer_pipeline_layout;
+    vk::UniquePipeline hdr_transfer_pipeline;
+    /// The encode that also writes the pre-HUD snapshot (a third binding).
+    vk::UniqueDescriptorSetLayout hdr_transfer_snapshot_desc_layout;
+    vk::UniquePipelineLayout hdr_transfer_snapshot_pipeline_layout;
+    vk::UniquePipeline hdr_transfer_snapshot_pipeline;
+    VideoCore::UniqueImage scene_snapshot;
+    vk::UniqueImageView scene_snapshot_view;
+    u32 snapshot_width = 0, snapshot_height = 0;
+    std::atomic<bool> snapshot_ready{false};
     VideoCore::UniqueImage ui_image;
     VideoCore::UniqueImage ui_depth_image;
     vk::UniqueImageView ui_view;
@@ -303,6 +332,8 @@ private:
                          vk::ComponentMapping mapping);
     std::vector<MirrorView> ui_views;
     struct DisplayImage {
+        std::unique_ptr<HdrGainMap> hud_snapshot;
+        vk::Format guest_format = vk::Format::eUndefined;
         VideoCore::UniqueImage image;
         std::vector<MirrorView> views;
         vk::Format format{};

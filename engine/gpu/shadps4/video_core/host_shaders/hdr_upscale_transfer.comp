@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "hdr/upscale_transfer.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform texture2D source_img;
+layout(binding = 1, rgba16f) uniform writeonly image2D target_img;
+#ifdef HDR_TRANSFER_SNAPSHOT
+// Native+: the pre-HUD snapshot written in the same pass (one 4K RGBA16F copy less per frame).
+layout(binding = 2, rgba16f) uniform writeonly image2D snapshot_img;
+#endif
+layout(push_constant) uniform Params {
+    uint encode; // 0: chain -> linear reconstruction; 1: linear result -> game chain
+};
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(target_img)))) {
+        return;
+    }
+    vec4 c = texelFetch(source_img, p, 0);
+    vec3 rgb = encode != 0u ? bb_upscale_encode(c.rgb) : bb_upscale_decode(c.rgb);
+    imageStore(target_img, p, vec4(rgb, c.a));
+#ifdef HDR_TRANSFER_SNAPSHOT
+    imageStore(snapshot_img, p, vec4(rgb, c.a));
+#endif
+}
