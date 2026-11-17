@@ -32,6 +32,8 @@ Get-ChildItem "$stage\out" -File | Where-Object { $_.Extension -notin '.exe', '.
 Get-ChildItem "$stage\out" -Directory | Remove-Item -Recurse -Force -Confirm:$false
 Get-ChildItem $stage -Recurse -File -Include *.orig, *.bak, *.old | Remove-Item -Force -Confirm:$false
 Copy-Item $exe "$stage\Bloodborne Launcher.exe" -Force
+# RecompLauncher reads this to set the game up and start it (the same file as in the Linux package).
+Copy-Item (Join-Path $PSScriptRoot '..\recomplauncher.json') "$stage\recomplauncher.json" -Force
 # Settings as shipped: the tested defaults, without this PC's menu position.
 (Get-Content "$stage\bbport.ini") | Where-Object { $_ -notmatch '^menu_pos=' } | Set-Content -Encoding ascii "$stage\bbport.ini"
 # New downloads start with the EldenRingStyle layout (the launcher's built-in profile).

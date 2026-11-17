@@ -1,0 +1,102 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Lantern Engine",
+  "repo": "Awakenchan/LanternEngine",
+  "game": {
+    "kind": "folder",
+    "label": "Your dumped Bloodborne game folder (CUSA03173) with update 1.09: the one that holds eboot.bin.",
+    "check": { "file": "eboot.bin" }
+  },
+  "start": {
+    "program": ["engine/out/bb-start.exe", "engine/out/bb-start"],
+    "args": ["--game-dir", "{game}"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{install}/lantern.ini" }]
+    }
+  ],
+  "saves": ["{install}/user/savedata", "{install}/lantern.ini"],
+  "folders": {
+    "saves": [{ "path": "{install}/user/savedata" }],
+    "logs": [{ "path": "{install}/logs" }]
+  },
+  "settings": [
+    {
+      "id": "fullscreen",
+      "label": "Window",
+      "help": "Fullscreen covers the whole screen. Windowed opens the game in a window.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0" } },
+        { "label": "Fullscreen", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "output_res",
+      "label": "Resolution",
+      "help": "The size of the picture on screen. Display (auto) uses your screen's own size, whatever its shape.",
+      "choices": [
+        { "label": "1280 x 720", "set": { "output_res": "1280x720" } },
+        { "label": "1920 x 1080", "set": { "output_res": "1920x1080" } },
+        { "label": "2560 x 1440", "set": { "output_res": "2560x1440" } },
+        { "label": "3840 x 2160", "set": { "output_res": "3840x2160" } },
+        { "label": "Display (auto)", "set": { "output_res": "auto" } }
+      ],
+      "defaults": { "output_res": "1920x1080" }
+    },
+    {
+      "id": "upscaler",
+      "label": "Upscaling",
+      "help": "How the game is drawn smaller and scaled up to your resolution. DLSS needs an NVIDIA RTX card. On Linux, FSR runs as FSR 3.1.",
+      "choices": [
+        { "label": "FSR", "set": { "upscaler": "fsr" } },
+        { "label": "FSR 3.1", "set": { "upscaler": "fsr3" } },
+        { "label": "DLSS", "set": { "upscaler": "dlss" } },
+        { "label": "TAA", "set": { "upscaler": "taa" } },
+        { "label": "Off", "set": { "upscaler": "off" } }
+      ],
+      "defaults": { "upscaler": "fsr" }
+    },
+    {
+      "id": "preset",
+      "label": "Upscaling quality",
+      "help": "How far the game is drawn below your resolution. Native AA draws at full size, Ultra Performance at a third.",
+      "choices": [
+        { "label": "Native AA", "set": { "preset": "0" } },
+        { "label": "Quality", "set": { "preset": "1" } },
+        { "label": "Balanced", "set": { "preset": "2" } },
+        { "label": "Performance", "set": { "preset": "3" } },
+        { "label": "Ultra Performance", "set": { "preset": "4" } }
+      ],
+      "defaults": { "preset": "4" }
+    },
+    {
+      "id": "skip_intro",
+      "label": "Intro videos",
+      "help": "The logos and videos when the game starts.",
+      "choices": [
+        { "label": "Play them", "set": { "skip_intro": "0" } },
+        { "label": "Skip them", "set": { "skip_intro": "1" } }
+      ],
+      "defaults": { "skip_intro": "0" }
+    },
+    {
+      "id": "show_fps",
+      "label": "Show FPS",
+      "help": "The frame rate counter on screen.",
+      "choices": [
+        { "label": "On", "set": { "show_fps": "1" } },
+        { "label": "Off", "set": { "show_fps": "0" } }
+      ],
+      "defaults": { "show_fps": "1" }
+    }
+  ],
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your Bloodborne saves.", "open": "saves" },
+    { "id": "logs", "label": "Logs", "help": "One log per session. Attach the newest to a bug report.", "open": "logs" }
+  ]
+}

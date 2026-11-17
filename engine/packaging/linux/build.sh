@@ -56,6 +56,8 @@ cp "$template/lantern.ini" "$root/engine/lantern.default.ini"
 cp "$template/lantern.ini" "$template/LICENSE" "$template/NOTICE" "$root/"
 install -m755 packaging/linux/lantern.sh "$root/lantern.sh"
 cp packaging/linux/README-linux.txt "$root/README.txt"
+# RecompLauncher reads this to set the game up and start it (the same file as in the Windows zip).
+cp "$engine/../recomplauncher.json" "$root/"
 if [[ -n $launcher ]]; then
     cp -r "$launcher"/. "$root/"
     rm -f "$root"/*.dbg
