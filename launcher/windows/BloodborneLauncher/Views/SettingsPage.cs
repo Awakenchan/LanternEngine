@@ -773,10 +773,10 @@ namespace BloodborneLauncher.Views
 
         private static string BuildStatus()
         {
-            var version = typeof(SettingsPage).Assembly.GetName().Version;
+            var version = Updater.Current;
             var root = Paths.SourceRoot;
             if (root == null)
-                return L.F($"Version {version?.ToString(3)}. The sources (launcher/windows) are not next to this copy, so it cannot rebuild itself.");
+                return L.F($"Version {version.ToString(3)}. The sources (launcher/windows) are not next to this copy, so it cannot rebuild itself.");
 
             var stamp = SourceStamp.Read(SourceStamp.AppDirOf(root));
             var current = SourceStamp.Compute(root, SourceStamp.LauncherProject);
@@ -784,7 +784,7 @@ namespace BloodborneLauncher.Views
                 ? L.T("Up to date with the sources")
                 : L.T("The sources changed since this build: rebuild to pick the changes up");
             var built = stamp.Built == default ? "" : L.F($" · built {stamp.Built.ToLocalTime():yyyy-MM-dd HH:mm}");
-            return L.F($"Version {version?.ToString(3)}{built}. {state}.");
+            return L.F($"Version {version.ToString(3)}{built}. {state}.");
         }
 
         private void Rebuild(bool force)

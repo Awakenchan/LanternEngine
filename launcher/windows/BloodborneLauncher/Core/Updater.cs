@@ -65,7 +65,12 @@ namespace BloodborneLauncher.Core
                 .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "";
             var stamped = TryVersion(informational, out _, out var beta) ? beta : 0;
             var own = new Version(v.Major, v.Minor, Math.Max(0, v.Build));
-            if (own == new Version(1, 0, 0) && (informational == "" || informational.StartsWith("1.0.0", StringComparison.Ordinal)))
+            // Nothing stamped: .NET's 1.0.0, or the 0.9.9 the project files and publish-linux.sh
+            // default to. Such a build shows its package's package.json version instead.
+            static bool Unstamped(Version own, string informational, string placeholder) =>
+                own == Version.Parse(placeholder) &&
+                (informational == "" || informational.StartsWith(placeholder, StringComparison.Ordinal));
+            if (Unstamped(own, informational, "1.0.0") || Unstamped(own, informational, "0.9.9"))
             {
                 try
                 {
