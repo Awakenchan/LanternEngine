@@ -3,8 +3,15 @@
 set -euo pipefail
 launcher=${LANTERN_LAUNCHER_SRC:-$(cd -- "$(dirname -- "$0")/.." && pwd)}
 out=${1:?usage: publish-linux.sh <output folder> [version] [informational version]}
-version=${2:-0.9.9}
-informational=${3:-$version}
+version=${2:-}
+if [[ -z $version ]]; then
+    # No version: stamp 1.0.0, the value Updater.ReadStamp treats as unstamped, so the launcher takes
+    # the version of the package.json beside it and cannot disagree with its package.
+    version=1.0.0
+    informational=1.0.0
+else
+    informational=${3:-$version}
+fi
 tree=${LANTERN_LAUNCHER_TREE:-$HOME/lantern-launcher}
 mkdir -p "$tree"
 rsync -a --delete --exclude bin --exclude obj --exclude '*.user' \
