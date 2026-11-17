@@ -19,7 +19,9 @@ namespace BloodborneLauncher.Views
     /// </summary>
     public sealed class ControlsPage : LauncherPage
     {
-        private readonly StackPanel _table = new();
+        // One width for the controller and Hold columns across every row (a shared size scope), so
+        // in a narrow window the controller's buttons are never cut off or covered by Hold.
+        private readonly StackPanel _table = new() { [Grid.IsSharedSizeScopeProperty] = true };
         private readonly InfoBar _conflicts;
         private readonly TextBox _search;
         private readonly TextBlock _padStatus;
@@ -355,7 +357,7 @@ namespace BloodborneLauncher.Views
                 foreach (var control in rows)
                 {
                     var name = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-                    name.Children.Add(new TextBlock { Text = control.Label, FontSize = 13.5 });
+                    name.Children.Add(new TextBlock { Text = control.Label, FontSize = 13.5, TextWrapping = TextWrapping.Wrap });
                     if (control.Hint.Length > 0) name.Children.Add(Text(control.Hint, "Faint"));
 
                     var c = control;
@@ -451,14 +453,20 @@ namespace BloodborneLauncher.Views
             {
                 Margin = new Thickness(0, header ? 4 : 1, 0, header ? 2 : 1),
                 MinHeight = header ? 0 : 40,
-                ColumnDefinitions = new ColumnDefinitions("240,1.6*,*,112"),
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition(1, GridUnitType.Star) { MinWidth = 120, MaxWidth = 240 },
+                    new ColumnDefinition(1.6, GridUnitType.Star) { MinWidth = 150 },
+                    new ColumnDefinition(GridLength.Auto) { SharedSizeGroup = "Pad" },
+                    new ColumnDefinition(GridLength.Auto) { SharedSizeGroup = "Action", MinWidth = 96 },
+                },
             };
             name.Margin = new Thickness(4, 0, 8, 0);
             Grid.SetColumn(keys, 1);
             Grid.SetColumn(pad, 2);
             Grid.SetColumn(action, 3);
             keys.Margin = new Thickness(header ? 10 : 4, 0, 4, 0);
-            pad.Margin = new Thickness(10, 0, 0, 0);
+            pad.Margin = new Thickness(10, 0, 10, 0); // clear of Hold, however long the button's name
             grid.Children.Add(name);
             grid.Children.Add(keys);
             grid.Children.Add(pad);

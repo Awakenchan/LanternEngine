@@ -63,15 +63,16 @@ namespace BloodborneLauncher.Core
             ["update_channel"] = "", // empty: beta builds follow beta, others stable
             ["ui_layout"] = "modern",
             ["ui_navigation"] = "sidebar", // sidebar | tabs (Modern layout; Classic has the sidebar)
-            ["ui_theme"] = "default",
+            ["ui_theme"] = "yharnam", // yharnam | default (the system's accent) | crimson | moon | amber | nightmare | verdant | custom
             ["ui_theme_colour"] = "#C41E3A",
-            ["ui_background"] = "lantern", // lantern | lantern-orange | game | custom | none
+            ["ui_background"] = "none", // lantern | lantern-orange | game | custom | none
             ["lantern_art_default"] = true,
+            ["yharnam_look_default"] = true,
             ["ui_background_image"] = "",
             ["ui_background_blur"] = "strong", // strong | light | off
             ["app_icon"] = "auto", // auto | orange | custom (AppIcon)
             ["app_icon_image"] = "", // custom: the picture chosen (AppIcon.CustomFile holds it as an icon)
-            ["ui_window_buttons"] = "mac", // mac | windows
+            ["ui_window_buttons"] = OperatingSystem.IsMacOS() ? "mac" : "windows", // mac | windows: the system's own by default
             ["ui_window_buttons_side"] = "usual", // usual (mac left, windows right) | left | right
             ["fsr4_balanced"] = false,
             ["exp_vram_cleanup"] = true,
@@ -137,6 +138,15 @@ namespace BloodborneLauncher.Core
                         if (Str("app_icon") is "red" or "blue" or "j3loo") _data["app_icon"] = "auto";
                         if (Str("ui_background") == "game") _data["ui_background"] = "lantern";
                         _data["ui_navigation"] = "sidebar";
+                    }
+                    // The Yharnam look, once: files still on the old defaults (the system's accent,
+                    // the purple lantern behind every page, macOS buttons on Windows and Linux) move
+                    // to the new ones. Any other choice is kept, and every option stays in Settings.
+                    if (!saved.ContainsKey("yharnam_look_default"))
+                    {
+                        if (Str("ui_theme") == "default") _data["ui_theme"] = "yharnam";
+                        if (Str("ui_background") == "lantern") _data["ui_background"] = "none";
+                        if (Str("ui_window_buttons") == "mac" && !OperatingSystem.IsMacOS()) _data["ui_window_buttons"] = "windows";
                     }
                     if (Updater.CurrentBeta > 0 && !saved.ContainsKey("vram_budget_beta_on"))
                         _data["exp_vram_budget"] = true;

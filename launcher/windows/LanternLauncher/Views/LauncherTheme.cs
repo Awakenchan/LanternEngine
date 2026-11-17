@@ -16,7 +16,8 @@ namespace BloodborneLauncher.Views
     {
         public static readonly Choice[] Themes =
         {
-            new(L.T("Default"), "default"),
+            new(L.T("Yharnam"), "yharnam", L.T("The game's own colours: night, parchment and blood")),
+            new(L.T("System accent"), "default", L.T("Grey, with your system's accent colour")),
             new(L.T("Crimson"), "crimson", L.T("The blood moon: deep red")),
             new(L.T("Moonlight"), "moon", L.T("Pale blue, like the Moonlight Greatsword")),
             new(L.T("Amber"), "amber", L.T("Lamplight gold")),
@@ -38,10 +39,90 @@ namespace BloodborneLauncher.Views
 
         private static ResourceDictionary? _overlay;
 
-        /// <summary>The theme's accent; null for Default (or a custom colour that doesn't parse).</summary>
+        // ---------------------------------------------------------------- Yharnam
+
+        // Taken from the game's own key art: teal-black night, the parchment of its logo, dried
+        // blood, tarnished brass. Blood is the one main action (Play); brass is everything that is
+        // on or chosen (switches, sliders, focus, links); bone is the thin lines.
+        private static readonly Color Night = Color.FromRgb(0x0B, 0x0F, 0x11);
+        private static readonly Color Stone = Color.FromRgb(0x0D, 0x13, 0x15);
+        private static readonly Color Parchment = Color.FromRgb(0xEF, 0xE6, 0xD0);
+        private static readonly Color Bone = Color.FromRgb(0xB3, 0xAB, 0x96);
+        private static readonly Color Ash = Color.FromRgb(0x8C, 0x85, 0x76);
+        private static readonly Color Blood = Color.FromRgb(0x7D, 0x1A, 0x1A);
+        private static readonly Color Brass = Color.FromRgb(0xC2, 0xA0, 0x6A);
+        private static readonly Color Line = Color.FromRgb(0xD6, 0xC9, 0xA8);
+
+        public static bool IsYharnam(LauncherSettings s) => s.Str("ui_theme") == "yharnam";
+
+        /// <summary>The whole Yharnam palette, over Charcoal or Glass: surfaces, text, lines and both accents.</summary>
+        private static ResourceDictionary Yharnam(bool glass)
+        {
+            var d = new ResourceDictionary();
+            void Solid(string key, Color c) => d[key] = new SolidColorBrush(c);
+            void Tint(string key, Color c, byte alpha) => d[key] = new SolidColorBrush(WithAlpha(c, alpha));
+
+            Solid("WindowBaseBrush", Night);
+            Tint("ContentAreaBrush", Night, glass ? (byte)0 : (byte)0xFF);
+            Tint("GlassPaneBrush", Stone, 0xD6);
+            Tint("GlassPaneStrokeBrush", Line, 0x30);
+            Tint("GlassDividerBrush", Line, 0x18);
+            Tint("PillTrackBrush", Stone, 0xE0);
+            Tint("SegmentSelectedBrush", Line, 0x2A);
+            Tint("CardBackgroundFillColorDefaultBrush", Line, 0x10);
+            Tint("CardBackgroundFillColorSecondaryBrush", Line, 0x0A);
+            Tint("CardStrokeColorDefaultBrush", Line, 0x2C);
+            Tint("ControlFillColorDefaultBrush", Line, 0x0F);
+            Tint("ControlFillColorSecondaryBrush", Line, 0x1C);
+            Tint("ControlFillColorTertiaryBrush", Line, 0x0A);
+            Tint("ControlFillColorInputActiveBrush", Night, 0xE6);
+            Tint("ControlStrokeColorDefaultBrush", Line, 0x40);
+            Tint("ControlStrokeColorSecondaryBrush", Line, 0x24);
+            Tint("SubtleFillColorSecondaryBrush", Line, 0x12);
+            Tint("SidebarItemHoverBrush", Line, 0x14);
+            Tint("SidebarItemSelectedBrush", Line, 0x24);
+            Solid("SidebarHeaderBrush", Ash);
+            Tint("PanelDeepBrush", Night, 0xCC);
+            Tint("DialogScrimBrush", Colors.Black, 0xA6);
+            Solid("DialogBackgroundBrush", Color.FromRgb(0x12, 0x1A, 0x1C));
+            Tint("DialogStrokeBrush", Line, 0x40);
+            Solid("TextFillColorPrimaryBrush", Parchment);
+            Solid("TextFillColorSecondaryBrush", Bone);
+            Solid("TextFillColorTertiaryBrush", Ash);
+            Solid("AccentTextFillColorPrimaryBrush", Brass);
+            Solid("StatusDotIdleBrush", Ash);
+            Solid("GoodTextBrush", Color.FromRgb(0x9B, 0xBF, 0x8F));
+            Solid("WarningTextBrush", Color.FromRgb(0xD9, 0xA4, 0x4F));
+            Solid("DangerTextBrush", Color.FromRgb(0xD8, 0x6A, 0x5E));
+            FluentKeys(d);
+
+            // Brass for what is on or chosen; blood only for the main button (Play), and Stop in it.
+            AccentKeys(d, Brass);
+            var knob = new SolidColorBrush(Night);
+            foreach (var key in new[] { "ToggleSwitchKnobFillOn", "ToggleSwitchKnobFillOnPointerOver", "ToggleSwitchKnobFillOnPressed" })
+                d[key] = knob;
+            var blood = new SolidColorBrush(Blood);
+            var bloodHover = new SolidColorBrush(Color.FromRgb(0x95, 0x1F, 0x1F));
+            var bloodPressed = new SolidColorBrush(Color.FromRgb(0x65, 0x14, 0x14));
+            var bloodLine = new SolidColorBrush(Color.FromRgb(0xC4, 0x54, 0x4A));
+            var onBlood = new SolidColorBrush(Parchment);
+            d["AccentButtonBackground"] = blood;
+            d["AccentButtonBackgroundPointerOver"] = bloodHover;
+            d["AccentButtonBackgroundPressed"] = bloodPressed;
+            d["AccentButtonBorderBrush"] = bloodLine;
+            d["AccentButtonBorderBrushPointerOver"] = bloodLine;
+            d["AccentButtonBorderBrushPressed"] = bloodLine;
+            foreach (var key in new[] { "AccentButtonForeground", "AccentButtonForegroundPointerOver", "AccentButtonForegroundPressed" })
+                d[key] = onBlood;
+            d["SystemAccentColor"] = Brass;
+            return d;
+        }
+
+        /// <summary>The theme's accent; null for the system accent (or a custom colour that doesn't parse).</summary>
         public static Color? Accent(LauncherSettings s)
         {
             var theme = s.Str("ui_theme");
+            if (theme == "yharnam") return Brass;
             if (theme == "custom")
                 return ParseColour(s.Str("ui_theme_colour"));
             return Accents.TryGetValue(theme, out var colour) ? colour : null;
@@ -96,6 +177,8 @@ namespace BloodborneLauncher.Views
             // Windows 11's UI font, made for small sizes on screen; elsewhere the system's own.
             d["UiFont"] = new FontFamily("Segoe UI Variable Text, Segoe UI, Inter, Cantarell, Noto Sans, DejaVu Sans");
             d["MonoFont"] = new FontFamily("Cascadia Mono, Consolas, JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono, Liberation Mono");
+            // A Victorian serif for the game's title and the group headers: the system's own, nothing bundled.
+            d["DisplayFont"] = new FontFamily("Palatino Linotype, Book Antiqua, Palatino, URW Palladio L, P052, Georgia, DejaVu Serif, serif");
             // The accent of Default is the system's own (Windows' accent colour), as in WPF: Fluent
             // reads it; a theme sets its own over it (Apply).
             FluentKeys(d);
@@ -251,6 +334,12 @@ namespace BloodborneLauncher.Views
                 _overlay = null;
             }
 
+            if (IsYharnam(s))
+            {
+                _overlay = Yharnam(glass);
+                resources.MergedDictionaries.Add(_overlay);
+                return;
+            }
             if (Accent(s) is not { } a) return;
             var d = new ResourceDictionary();
             void Solid(string key, Color c) => d[key] = new SolidColorBrush(c);
@@ -291,7 +380,8 @@ namespace BloodborneLauncher.Views
 
         /// <summary>The backdrop shade's colour (the dark wash over the background picture).</summary>
         public static Color ShadeColour(LauncherSettings s) =>
-            Accent(s) is { } a ? Mix(Color.FromRgb(0x0A, 0x0B, 0x0E), a, 0.12) : Color.FromRgb(0x0A, 0x0B, 0x0E);
+            IsYharnam(s) ? Night
+            : Accent(s) is { } a ? Mix(Color.FromRgb(0x0A, 0x0B, 0x0E), a, 0.12) : Color.FromRgb(0x0A, 0x0B, 0x0E);
 
         public static Color Mix(Color from, Color to, double amount) => Color.FromRgb(
             (byte)Math.Round(from.R + (to.R - from.R) * amount),

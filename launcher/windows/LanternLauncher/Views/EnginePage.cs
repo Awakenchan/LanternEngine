@@ -23,6 +23,7 @@ namespace BloodborneLauncher.Views
             var intro = Text(L.T("Each switch stays at the engine's default until you change it. Only changed ones are used."), "Faint");
             intro.SetTip(SettingRow.Wrapped(L.T("Only the switches you change are passed to the game, when it starts; a start in safe mode (after a crash) ") +
                                             L.T("leaves them out. Settings › Diagnostics › Extra variables is still there for anything not listed, and wins over these.")));
+            intro.Margin = new Avalonia.Thickness(4, 14, 4, 6);
             Body.Children.Add(intro);
             Add(Card(SymbolRegular.ArrowReset24, L.T("Changed switches"), L.T("Every switch on this page that is not at its default"),
                 SmallButton(L.T("Reset all"), SymbolRegular.ArrowUndo24, (_, _) => ResetAll()), out _changedHint));

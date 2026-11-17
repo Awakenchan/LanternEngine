@@ -14,22 +14,18 @@ namespace BloodborneLauncher.Views
 
         public OutputPage() : base(L.T("Game output"), L.T("What run.py and the game print. Copy or export it when reporting a problem."))
         {
-            var bar = new Grid { Margin = new Thickness(0, 18, 0, 8), ColumnDefinitions = new ColumnDefinitions("*,Auto") };
-
-            _follow = new ToggleSwitch { IsChecked = true, VerticalAlignment = VerticalAlignment.Center };
-            bar.Children.Add(Row(_follow, new TextBlock { Text = L.T("Follow new output"), Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center }));
+            // Both switches as rows, their switches on the right like every other page's.
+            _follow = ToggleRow(SymbolRegular.ArrowDown24, L.T("Follow new output"), L.T("Keeps the newest lines in view while the game prints"),
+                () => true, _ => { });
+            SettingToggle(SymbolRegular.WindowConsole20, L.T("Show this page when the game starts"), null, "switch_to_output");
 
             var buttons = Row(
                 SmallButton(L.T("Copy"), SymbolRegular.Copy24, (_, _) => Copy()),
                 SmallButton(L.T("Export…"), SymbolRegular.Save24, (_, _) => Export()),
                 SmallButton(L.T("Clear"), SymbolRegular.Broom24, (_, _) => Ws.ClearOutput()));
-            Grid.SetColumn(buttons, 1);
-            bar.Children.Add(buttons);
-            Body.Children.Add(bar);
+            Body.Children.Add(new Border { Child = buttons, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 8) });
 
-            SettingToggle(SymbolRegular.WindowConsole20, L.T("Show this page when the game starts"), null, "switch_to_output");
-
-            _output = new TextBox { Height = 520, Margin = new Thickness(0, 4, 0, 0) };
+            _output = new TextBox { Height = 520, Margin = new Thickness(0, 4, 0, 0), Watermark = L.T("The game's output shows here while it runs.") };
             _output.Classes.Add("CodeBox");
             Body.Children.Add(_output);
 
