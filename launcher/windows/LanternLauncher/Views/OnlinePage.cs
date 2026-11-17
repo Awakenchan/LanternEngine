@@ -7,6 +7,8 @@ namespace BloodborneLauncher.Views
     public sealed class OnlinePage : LauncherPage
     {
         private readonly ToggleSwitch _online;
+        /// <summary>The seamless co-op rows under its switch: dimmed while it is off (they do nothing then).</summary>
+        private readonly List<Control> _seamlessRows = new();
         private readonly StackPanel _results = new();
         private readonly AppButton _test;
 
@@ -34,10 +36,12 @@ namespace BloodborneLauncher.Views
                 () => Ini.Get("seamless_enabled") == "1", v =>
                 {
                     Ini.Set("seamless_enabled", v ? "1" : "0");
+                    DimSeamless();
                     if (!v || Ini.Get("online_enabled") == "1") return;
                     Ini.Set("online_enabled", "1");
                     _online.IsChecked = true;
                 });
+            var seamlessStart = Body.Children.Count;
             _role = ComboRow(SymbolRegular.Crown24, L.T("Role"), L.T("One player hosts, the others join the host's world"),
                 Choices.SeamlessRoles, () => Ini.Get("seamless_role", "guest"), v => { Ini.Set("seamless_role", v); ShowRoom(); });
             _connection = ComboRow(SymbolRegular.PlugConnected24, L.T("Connection"),
@@ -77,6 +81,8 @@ namespace BloodborneLauncher.Views
                     v => EngineSwitches.Set(S, item, v ? item.On : item.Off));
             EnsureHostRoom();
             ShowRoom();
+            _seamlessRows.AddRange(Body.Children.Skip(seamlessStart));
+            DimSeamless();
 
             Group(L.T("Server"));
             Add(Card(SymbolRegular.Globe24, L.T("The Hunter's Dream"), L.T("Players online, the map and your hunter's profile"),
@@ -86,7 +92,7 @@ namespace BloodborneLauncher.Views
             Group(L.T("The Hunter's Dream account"));
             _hdButton = SmallButton(L.T("Connect"), SymbolRegular.Person24, async (_, _) => await LinkAsync());
             Add(Card(SymbolRegular.PersonAccounts24, L.T("Hunter's Dream account"), null, _hdButton, out _hdHint));
-            _signInRetry = SmallButton(L.T("Retry"), SymbolRegular.ArrowClockwise24, async (_, _) => await CheckSignInAsync());
+            _signInRetry = SmallButton(L.T("Check again"), SymbolRegular.ArrowClockwise24, async (_, _) => await CheckSignInAsync());
             _signInRow = Add(Card(SymbolRegular.ShieldCheckmark24, L.T("Sign-in"), null, _signInRetry, out _signInHint));
             ShowLink();
 
@@ -412,6 +418,13 @@ namespace BloodborneLauncher.Views
 
         private void IniText(SymbolRegular icon, string title, string? hint, string placeholder, string key, double width = 300) =>
             TextRow(icon, title, hint, placeholder, () => Ini.Get(key), v => Ini.Set(key, v.Trim()), width: width);
+
+        /// <summary>Seamless co-op's own rows can be read but not changed while it is off.</summary>
+        private void DimSeamless()
+        {
+            var on = Ini.Get("seamless_enabled") == "1";
+            foreach (var row in _seamlessRows) row.IsEnabled = on; // each row greys itself when off
+        }
 
         public override void OnShown()
         {

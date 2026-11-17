@@ -129,13 +129,15 @@ namespace BloodborneLauncher.Views
             set
             {
                 _severity = value;
-                var (colour, symbol) = value switch
+                var (fallback, key, symbol) = value switch
                 {
-                    InfoBarSeverity.Error => (Color.FromRgb(0xFF, 0x6B, 0x6B), SymbolRegular.ErrorCircle24),
-                    InfoBarSeverity.Warning => (Color.FromRgb(0xF2, 0xB8, 0x4B), SymbolRegular.Warning24),
-                    InfoBarSeverity.Success => (Color.FromRgb(0x5F, 0xD3, 0x8A), SymbolRegular.CheckmarkCircle24),
-                    _ => (Color.FromRgb(0x4C, 0x9D, 0xFF), SymbolRegular.Info16),
+                    InfoBarSeverity.Error => (Color.FromRgb(0xFF, 0x6B, 0x6B), "DangerTextBrush", SymbolRegular.ErrorCircle24),
+                    InfoBarSeverity.Warning => (Color.FromRgb(0xF2, 0xB8, 0x4B), "WarningTextBrush", SymbolRegular.Warning24),
+                    InfoBarSeverity.Success => (Color.FromRgb(0x5F, 0xD3, 0x8A), "GoodTextBrush", SymbolRegular.CheckmarkCircle24),
+                    _ => (Color.FromRgb(0x4C, 0x9D, 0xFF), "AccentTextFillColorPrimaryBrush", SymbolRegular.Info16),
                 };
+                // The theme's own colour for it, so a notice matches the page around it.
+                var colour = LauncherTheme.Brush(key) is ISolidColorBrush { Color: var themed } ? themed : fallback;
                 Background = new SolidColorBrush(Color.FromArgb(0x26, colour.R, colour.G, colour.B));
                 BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, colour.R, colour.G, colour.B));
                 _icon.Symbol = symbol;

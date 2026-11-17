@@ -63,7 +63,8 @@ namespace BloodborneLauncher.Views
             ComboRow(SymbolRegular.ArrowTrendingLines24, L.T("Echoes from kills"), L.T("Enemies already loaded give the new amount after you rest at a lamp or reload"),
                 new[] { new Choice(L.T("Normal"), "1"), new Choice("x2", "2"), new Choice("x5", "5"), new Choice("x10", "10") },
                 () => Ini.Get("cheat_echo_multiplier", "1"), v => Ini.Set("cheat_echo_multiplier", v));
-            Add(Card(SymbolRegular.Add24, L.T("Add echoes or insight"), L.T("In the in-game menu (Insert or L3 + R3): +1,000, +10,000, +100,000 echoes and +1 insight"), null, out _));
+            Add(Card(SymbolRegular.Add24, L.T("Add echoes or insight"), null, null, out var echoes));
+            SetHint(echoes, L.T("In the in-game menu (Insert or L3 + R3): +1,000, +10,000, +100,000 echoes and +1 insight"));
         }
 
         private void Cheat(SymbolRegular icon, string title, string key, string amountKey)

@@ -6,6 +6,7 @@ namespace BloodborneLauncher.Views
         public static LauncherPage Create(Type type) => type.Name switch
         {
             nameof(PlayPage) => new PlayPage(),
+            nameof(GamePage) => new GamePage(),
             nameof(SavesPage) => new SavesPage(),
             nameof(DisplayPage) => new DisplayPage(),
             nameof(GraphicsPage) => new GraphicsPage(),

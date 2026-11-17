@@ -54,6 +54,12 @@ namespace BloodborneLauncher.Views
                 Margin = new Thickness(0, 0, 0, 3);
             }
             PlainBackground();
+            // A setting that does nothing right now (frame generation's options while it is off)
+            // looks it, whatever its control is: segmented buttons do not grey themselves.
+            PropertyChanged += (_, e) =>
+            {
+                if (e.Property == IsEffectivelyEnabledProperty) Opacity = IsEffectivelyEnabled ? 1 : 0.45;
+            };
 
             Icon = new SymbolIcon(icon)
             {
@@ -75,7 +81,7 @@ namespace BloodborneLauncher.Views
                 titleLine.Children.Add(mark);
             }
 
-            Hint = new TextBlock { FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0), IsVisible = false };
+            Hint = new TextBlock { FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0), IsVisible = false };
             Hint.SetResourceReference(TextBlock.ForegroundProperty, "TextFillColorTertiaryBrush");
 
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
@@ -217,7 +223,7 @@ namespace BloodborneLauncher.Views
 
         public Segmented(IReadOnlyList<Choice> choices, Func<Choice, bool>? enabled = null)
         {
-            CornerRadius = new CornerRadius(14);
+            CornerRadius = new CornerRadius(4);
             Padding = new Thickness(3);
             this.SetResourceReference(BackgroundProperty, "PillTrackBrush");
 
@@ -233,11 +239,13 @@ namespace BloodborneLauncher.Views
                     FontSize = 12.5,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center,
-                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    // Two lines in a narrow window rather than "Purple lant…".
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center,
                 };
                 var item = new Border
                 {
-                    CornerRadius = new CornerRadius(11),
+                    CornerRadius = new CornerRadius(3),
                     Padding = new Thickness(8, 5, 8, 5),
                     Child = label,
                     Cursor = new Cursor(StandardCursorType.Hand),
@@ -412,22 +420,36 @@ namespace BloodborneLauncher.Views
             var children = Body.Children.ToList();
             Body.Children.Clear();
             StackPanel? box = null;
+            StackPanel Frame(Thickness margin)
+            {
+                var rows = new StackPanel { Margin = new Thickness(0, -1, 0, 0) };
+                var frame = new Border
+                {
+                    CornerRadius = new CornerRadius(4),
+                    BorderThickness = new Thickness(1),
+                    Margin = margin,
+                    ClipToBounds = true, // to the rounded shape: the first row's divider stays inside the corners
+                    Child = rows,
+                };
+                frame.SetResourceReference(Border.BackgroundProperty, "GlassPaneBrush");
+                frame.SetResourceReference(Border.BorderBrushProperty, "GlassPaneStrokeBrush");
+                // No empty box when every row in it is hidden (an engine update card that is not needed).
+                void Update() => frame.IsVisible = rows.Children.Count == 0 || rows.Children.Any(c => c.IsVisible);
+                rows.Children.CollectionChanged += (_, e) =>
+                {
+                    foreach (var added in e.NewItems?.OfType<Control>() ?? Enumerable.Empty<Control>())
+                        added.PropertyChanged += (_, p) => { if (p.Property == IsVisibleProperty) Update(); };
+                    Update();
+                };
+                Body.Children.Add(frame);
+                return rows;
+            }
             foreach (var child in children)
             {
                 if (child is TextBlock { Tag: "group" })
                 {
                     Body.Children.Add(child);
-                    box = new StackPanel { Margin = new Thickness(0, -1, 0, 0) };
-                    var frame = new Border
-                    {
-                        CornerRadius = new CornerRadius(16),
-                        BorderThickness = new Thickness(1),
-                        ClipToBounds = true, // to the rounded shape: the first row's divider stays inside the corners
-                        Child = box,
-                    };
-                    frame.SetResourceReference(Border.BackgroundProperty, "GlassPaneBrush");
-                    frame.SetResourceReference(Border.BorderBrushProperty, "GlassPaneStrokeBrush");
-                    Body.Children.Add(frame);
+                    box = Frame(new Thickness(0));
                     continue;
                 }
                 var fits = child is SettingRow || child is StackPanel || child is WrapPanel ||
@@ -437,6 +459,16 @@ namespace BloodborneLauncher.Views
                     if (child is TextBlock caption) caption.Margin = new Thickness(14, 8, 14, 4);
                     if (child is WrapPanel wrap) wrap.Margin = new Thickness(10, 4, 10, 10);
                     box.Children.Add(child);
+                }
+                else if (child is SettingRow row)
+                {
+                    // A row with no box open (before the first header, or after something that ended
+                    // the box, such as a preview or an info bar): a box of its own, where the row's
+                    // own spacing goes.
+                    var margin = row.Margin;
+                    row.Margin = new Thickness(0);
+                    box = Frame(margin.Top > 0 ? margin : new Thickness(0, 8, 0, 0));
+                    box.Children.Add(row);
                 }
                 else
                 {
@@ -708,7 +740,8 @@ namespace BloodborneLauncher.Views
             var culture = System.Globalization.CultureInfo.InvariantCulture;
             var value = new TextBox
             {
-                Width = Math.Max(valueWidth + 24, 66),
+                // One width for every number box ("1000 nits" the widest), so the sliders of a panel line up.
+                Width = Math.Max(valueWidth + 24, 110),
                 MinHeight = 0,
                 Padding = new Thickness(6, 3, 6, 3),
                 TextAlignment = TextAlignment.Right,

@@ -50,26 +50,27 @@ namespace BloodborneLauncher
         private readonly Run _titlePage = new("");
         private readonly StackPanel _titleTools = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
         private readonly Button _titleUpdate = new() { IsVisible = false, Margin = new Thickness(0, 0, 6, 0) };
-        private readonly TextBlock _titleUpdateText = new() { FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
+        private readonly TextBlock _titleUpdateText = new() { FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
         private readonly Button _titlePlay = new() { Margin = new Thickness(0, 0, 6, 0) };
         private readonly SymbolIcon _titlePlayIcon = new(SymbolRegular.Play24) { FontSize = 13, Margin = new Thickness(0, 0, 5, 0) };
-        private readonly TextBlock _titlePlayText = new() { FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center };
+        private readonly TextBlock _titlePlayText = new() { FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
         private readonly Border _sidebar = new() { Width = 196, IsVisible = false, BorderThickness = new Thickness(0, 0, 1, 0) };
-        private readonly Border _tabStrip = new() { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 12, 0, 4), Padding = new Thickness(4), CornerRadius = new CornerRadius(20), BorderThickness = new Thickness(1) };
+        private readonly Border _tabStrip = new() { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 12, 0, 4), Padding = new Thickness(4), CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1) };
         private readonly ContentControl _pageHost = new() { Focusable = false, HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
         private readonly Border _logPanel = new() { Height = 140, IsVisible = false, BorderThickness = new Thickness(0, 1, 0, 0) };
         private readonly ScrollViewer _logScroller = new() { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Padding = new Thickness(16, 8, 48, 8) };
         private readonly Ellipse _statusDot = new() { Width = 5, Height = 5, VerticalAlignment = VerticalAlignment.Center };
-        private readonly TextBlock _statusText = new() { FontSize = 10.5, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 620 };
-        private readonly TextBlock _savedText = new() { FontSize = 10.5, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
-        private readonly TextBlock _logCount = new() { FontSize = 10.5, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
-        private readonly TextBlock _versionText = new() { FontSize = 10.5, VerticalAlignment = VerticalAlignment.Center };
-        private readonly Border _searchResults = new() { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Width = 420, Padding = new Thickness(4), CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1), IsVisible = false, ZIndex = 10 };
+        private readonly TextBlock _statusText = new() { FontSize = 12, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 620 };
+        private readonly TextBlock _savedText = new() { FontSize = 12, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        private readonly TextBlock _logCount = new() { FontSize = 12, Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        private readonly TextBlock _versionText = new() { FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+        private readonly Border _searchResults = new() { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Width = 420, Padding = new Thickness(4), CornerRadius = new CornerRadius(4), BorderThickness = new Thickness(1), IsVisible = false, ZIndex = 10 };
         private readonly StackPanel _searchList = new();
 
         // The tabs (Modern) and the sidebar's entries (Classic), by page.
         private readonly List<RadioButton> _tabs = new(), _classic = new();
         private RadioButton _savesItem = null!, _classicSaves = null!;
+        private RadioButton _gameItem = null!, _classicGame = null!;
         private RadioButton _playItem = null!, _controlsItem = null!, _onlineItem = null!, _settingsItem = null!, _moreItem = null!;
         private RadioButton _classicPlay = null!, _classicControls = null!, _classicMods = null!, _classicOnline = null!,
             _classicSettings = null!, _classicSettingsBottom = null!, _classicEngine = null!, _classicOutput = null!;
@@ -106,6 +107,7 @@ namespace BloodborneLauncher
             LauncherTheme.Install(glass: !SettingRow.Classic);
 
             Content = Build();
+            FitMaximized(); // a window that opens maximized
 
             _logScroller.Content = new ItemsControl
             {
@@ -288,7 +290,7 @@ namespace BloodborneLauncher
             root.Children.Add(_logPanel);
 
             // ==================== Status bar ====================
-            var status = new Border { Height = 24, Cursor = new Cursor(StandardCursorType.Hand), BorderThickness = new Thickness(0, 1, 0, 0) };
+            var status = new Border { Height = 28, Cursor = new Cursor(StandardCursorType.Hand), BorderThickness = new Thickness(0, 1, 0, 0) };
             status.SetResourceReference(Border.BackgroundProperty, "PillTrackBrush");
             status.SetResourceReference(Border.BorderBrushProperty, "CardStrokeColorDefaultBrush");
             status.SetTip(L.T("Show or hide activity"));
@@ -428,7 +430,7 @@ namespace BloodborneLauncher
                 return button;
             }
             _winMinimize = Caption(L.T("Minimize"), "M 0,0.5 L 10,0.5", () => WindowState = WindowState.Minimized);
-            _winMaximize = Caption(L.T("Maximize"), "M 0.5,0.5 L 9.5,0.5 L 9.5,9.5 L 0.5,9.5 Z", ToggleMaximize);
+            _winMaximize = Caption(L.T("Maximize"), MaximizeGlyph, ToggleMaximize);
             _winClose = Caption(L.T("Close"), "M 0,0 L 10,10 M 10,0 L 0,10", Close, close: true);
             grid.Children.Add(_winButtons);
 
@@ -481,7 +483,7 @@ namespace BloodborneLauncher
             _searchArea.Children.Add(_searchClear);
             grid.Children.Add(_searchArea);
 
-            var title = new TextBlock { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 12, IsHitTestVisible = false };
+            var title = new TextBlock { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 13, IsHitTestVisible = false };
             var name = new Run("Lantern Engine") { FontWeight = FontWeight.SemiBold };
             name.Bind(TextElement.ForegroundProperty, this.GetResourceObservable("TextFillColorPrimaryBrush"));
             _titlePage.Bind(TextElement.ForegroundProperty, this.GetResourceObservable("TextFillColorTertiaryBrush"));
@@ -523,7 +525,7 @@ namespace BloodborneLauncher
         /// <summary>Modern: the tabs across the top.</summary>
         private Control Tabs()
         {
-            var strip = new StackPanel { Orientation = Orientation.Horizontal };
+            var strip = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
             RadioButton Tab(string label, Type page)
             {
                 var tab = new RadioButton { Content = label, Tag = page, GroupName = "Pages" };
@@ -534,6 +536,7 @@ namespace BloodborneLauncher
                 return tab;
             }
             _playItem = Tab(L.T("Play"), typeof(PlayPage));
+            _gameItem = Tab(L.T("Game"), typeof(GamePage));
             _savesItem = Tab(L.T("Saves"), typeof(SavesPage));
             Tab(L.T("Display"), typeof(DisplayPage));
             Tab(L.T("Graphics"), typeof(GraphicsPage));
@@ -583,6 +586,7 @@ namespace BloodborneLauncher
             // The hunt, how it looks, the workshop's mods and cheats, the Lantern Engine itself.
             Header(L.T("HUNT"));
             _classicPlay = Item(SymbolRegular.Play24, L.T("Play"), typeof(PlayPage));
+            _classicGame = Item(SymbolRegular.Folder24, L.T("Game"), typeof(GamePage));
             _classicSaves = Item(SymbolRegular.Save24, L.T("Saves"), typeof(SavesPage));
             _classicControls = Item(SymbolRegular.XboxController24, L.T("Controls"), typeof(ControlsPage));
             Item(SymbolRegular.Sparkle24, L.T("Looks"), typeof(LooksPage));
@@ -890,8 +894,13 @@ namespace BloodborneLauncher
                     var x = (int)Math.Round(settings.Int("window_x") * scale);
                     var y = (int)Math.Round(settings.Int("window_y") * scale);
                     var title = new PixelPoint(x + (int)(120 * scale), y + (int)(20 * scale));
-                    if (Screens.All.Any(s => s.Bounds.Contains(title)))
+                    if (Screens.All.FirstOrDefault(s => s.Bounds.Contains(title)) is { } screen)
                     {
+                        // Moved back inside that screen's free area if it would reach under the
+                        // taskbar or past an edge (the size was already kept within it above).
+                        var area = screen.WorkingArea;
+                        x = Math.Clamp(x, area.X, Math.Max(area.X, area.Right - (int)Math.Round(width * scale)));
+                        y = Math.Clamp(y, area.Y, Math.Max(area.Y, area.Bottom - (int)Math.Round(height * scale)));
                         WindowStartupLocation = WindowStartupLocation.Manual;
                         Position = new PixelPoint(x, y);
                     }
@@ -1088,6 +1097,53 @@ namespace BloodborneLauncher
             _searchResults.Margin = new Thickness(left, 2, 0, 0);
         }
 
+        private const string MaximizeGlyph = "M 0.5,0.5 L 9.5,0.5 L 9.5,9.5 L 0.5,9.5 Z";
+        private const string RestoreGlyph = "M 2.5,2.5 L 2.5,0.5 L 9.5,0.5 L 9.5,7.5 L 7.5,7.5 M 0.5,2.5 L 7.5,2.5 L 7.5,9.5 L 0.5,9.5 Z";
+
+        protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+        {
+            base.OnPropertyChanged(change);
+            if (change.Property == WindowStateProperty || change.Property == OffScreenMarginProperty || change.Property == ClientSizeProperty)
+                FitMaximized();
+        }
+
+        /// <summary>
+        /// Maximized, Windows makes a window bigger than the screen by its (here invisible) resize
+        /// border on every side, 8 px at 100%: drawing its own title bar, the launcher lost that much
+        /// at the top and sides and its status bar went under the taskbar. The content is inset by
+        /// that margin while maximized. The maximize button shows Restore then, as Windows' own do.
+        /// </summary>
+        private void FitMaximized()
+        {
+            if (Content is not Control root) return;
+            var maximized = WindowState == WindowState.Maximized;
+            var margin = new Thickness(0);
+            if (maximized && OperatingSystem.IsWindows())
+            {
+                margin = OffScreenMargin;
+                // Some setups report no margin: worked out from the screen's free area instead.
+                if (margin == default && Screens.ScreenFromWindow(this) is { } screen)
+                {
+                    var scale = RenderScaling;
+                    var area = screen.WorkingArea;
+                    var left = Position.X;
+                    var top = Position.Y;
+                    var right = left + ClientSize.Width * scale;
+                    var bottom = top + ClientSize.Height * scale;
+                    margin = new Thickness(
+                        Math.Max(0, area.X - left) / scale, Math.Max(0, area.Y - top) / scale,
+                        Math.Max(0, right - area.Right) / scale, Math.Max(0, bottom - area.Bottom) / scale);
+                }
+            }
+            root.Margin = margin;
+            if (_winMaximize?.Content is Avalonia.Controls.Shapes.Path glyph)
+            {
+                glyph.Data = Geometry.Parse(maximized ? RestoreGlyph : MaximizeGlyph);
+                _winMaximize.SetTip(maximized ? L.T("Restore down") : L.T("Maximize"));
+            }
+            _macMaximize?.SetTip(maximized ? L.T("Restore down") : L.T("Maximize"));
+        }
+
         private void ToggleMaximize() =>
             WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
@@ -1133,6 +1189,8 @@ namespace BloodborneLauncher
             var page = PageOf(pageType);
             if (!ReferenceEquals(_pageHost.Content, page)) _pageHost.Content = page;
             page.OnShown();
+            // The title bar's Play is for every other page: on Play, its own button is the one.
+            _titlePlay.IsVisible = page is not PlayPage;
             var name = ItemName(item);
             _titlePage.Text = string.IsNullOrEmpty(name) ? "" : $" — {name}";
         }
@@ -1150,7 +1208,7 @@ namespace BloodborneLauncher
             {
                 // A pane over the backdrop, as the tab strip is.
                 _sidebar.Margin = new Thickness(12, 12, 0, 12);
-                _sidebar.CornerRadius = new CornerRadius(14);
+                _sidebar.CornerRadius = new CornerRadius(4);
                 _sidebar.BorderThickness = new Thickness(1);
                 _sidebar.SetResourceReference(Border.BackgroundProperty, "PillTrackBrush");
                 _sidebar.SetResourceReference(Border.BorderBrushProperty, "GlassPaneStrokeBrush");
@@ -1204,6 +1262,7 @@ namespace BloodborneLauncher
             var item = _sidebarNav
                 ? page switch
                 {
+                    "game" => _classicGame,
                     "saves" => _classicSaves,
                     "output" => _classicOutput,
                     "online" => _classicOnline,
@@ -1216,6 +1275,7 @@ namespace BloodborneLauncher
                 }
                 : page switch
                 {
+                    "game" => _gameItem,
                     "saves" => _savesItem,
                     "online" => _onlineItem,
                     "advanced" => _settingsItem,

@@ -44,7 +44,7 @@ namespace BloodborneLauncher.Views
             _sharpnessCard = (SettingRow)Body.Children[^1];
             SliderRow(SymbolRegular.Image24, L.T("Texture mip bias"),
                 L.T("Added to the texture detail the upscaler asks for: below 0 sharper textures (more shimmer), above 0 softer. 0 is the upscaler's own"),
-                -2, 1, 0.05, () => ParseDouble(Ini.Get("mip_bias", "0"), 0), v => Ini.Set("mip_bias", Fmt(v)), format: "+0.00;-0.00;0.00", valueWidth: 56);
+                -2, 1, 0.05, () => ParseDouble(Ini.Get("mip_bias", "0"), 0), v => Ini.Set("mip_bias", Fmt(v)), format: "+0.00;-0.00;0.00");
             _mipBiasCard = (SettingRow)Body.Children[^1];
             IniToggle(SymbolRegular.ArrowMove24, L.T("Object motion vectors"), L.T("Less ghosting on characters; costs about 10% FPS"), "object_motion");
 
