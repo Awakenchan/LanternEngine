@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from bbport_assets import fsr411_problem
 from bbport_i18n import language, set_language, tr
@@ -157,39 +158,191 @@ INI_DEFAULTS = {
 
 def load_settings():
     settings = dict(DEFAULTS)
-    try:
-        settings.update(json.loads(CONFIG_FILE.read_text()))
-    except (OSError, ValueError):
-        pass
+    _state, saved = load_json(CONFIG_FILE)
+    settings.update(saved)
     return settings
 
 
 def save_settings(settings):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(settings, indent=2, ensure_ascii=False))
+    update_json(CONFIG_FILE, lambda _before: settings)
 
 
 def ini_path():
     return Path(os.environ.get("BB_CONFIG", DATA_DIR / "bbport.ini"))
 
 
+TEXT_READ, TEXT_ABSENT, TEXT_UNREADABLE = "read", "absent", "unreadable"
+READ_ATTEMPTS = 20
+REPLACE_ATTEMPTS = 20
+LOCK_ATTEMPTS = 100
+RETRY_PAUSE_SECONDS = 0.01
+_temporary_count = 0
+
+
+class SettingsUnreadable(OSError):
+    def __init__(self, path):
+        super().__init__(f"{path.name} could not be read, so it was not written; "
+                         "your changes are kept until it can be read")
+
+
+def read_text(path):
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        try:
+            return TEXT_READ, path.read_text(encoding="utf-8-sig")
+        except FileNotFoundError:
+            return TEXT_ABSENT, ""
+        except (OSError, UnicodeDecodeError) as error:
+            if attempt == READ_ATTEMPTS:
+                print(f"bbport: {path.name} unreadable after {READ_ATTEMPTS} tries: {error}", file=sys.stderr)
+                return TEXT_UNREADABLE, ""
+            time.sleep(RETRY_PAUSE_SECONDS)
+
+
+def replace_text(path, text):
+    global _temporary_count
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _temporary_count += 1
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{_temporary_count}.tmp")
+    try:
+        with open(temporary, "x", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(1, REPLACE_ATTEMPTS + 1):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError:
+                if attempt == REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(RETRY_PAUSE_SECONDS)
+        if os.name != "nt":
+            folder = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(folder)
+            finally:
+                os.close(folder)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            print(f"bbport: {temporary.name} could not be removed: {error}", file=sys.stderr)
+
+
+class SettingsBusy(OSError):
+    def __init__(self, path):
+        super().__init__(f"{path.name} is being written by another program, so it was not written; "
+                         "your changes are kept and are written with the next save")
+
+
+class settings_lock:
+    def __init__(self, path):
+        self.path = path.with_name(path.name + ".lock")
+        self.handle = None
+
+    def __enter__(self):
+        if os.name == "nt":
+            return self
+        import fcntl
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        for attempt in range(1, LOCK_ATTEMPTS + 1):
+            try:
+                fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if attempt == LOCK_ATTEMPTS:
+                    os.close(self.handle)
+                    self.handle = None
+                    raise SettingsBusy(self.path) from None
+                time.sleep(RETRY_PAUSE_SECONDS)
+        return self
+
+    def __exit__(self, *_):
+        if self.handle is not None:
+            os.close(self.handle)
+            self.handle = None
+
+
+_loaded_unreadable = set()
+
+
+def load_json(path):
+    state, text = read_text(path)
+    if state == TEXT_UNREADABLE:
+        _loaded_unreadable.add(str(path))
+        return state, {}
+    _loaded_unreadable.discard(str(path))
+    if state == TEXT_ABSENT:
+        return state, {}
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return state, data
+        why = "not a JSON object"
+    except ValueError as error:
+        why = str(error)
+    broken = path.with_name(path.name + ".broken")
+    try:
+        replace_text(broken, text)
+    except OSError as error:
+        print(f"bbport: {path.name} could not be parsed ({why}) and its copy failed ({error}); "
+              "it is not written over", file=sys.stderr)
+        _loaded_unreadable.add(str(path))
+        return TEXT_UNREADABLE, {}
+    print(f"bbport: {path.name} could not be parsed ({why}); kept as {broken.name}", file=sys.stderr)
+    return TEXT_ABSENT, {}
+
+
+def update_json(path, build):
+    if str(path) in _loaded_unreadable:
+        raise SettingsUnreadable(path)
+    with settings_lock(path):
+        state, before = load_json(path)
+        if state == TEXT_UNREADABLE:
+            raise SettingsUnreadable(path)
+        text = json.dumps(build(before), indent=2, ensure_ascii=False) + "\n"
+        current_state, current = read_text(path)
+        if current_state == TEXT_UNREADABLE:
+            raise SettingsUnreadable(path)
+        if current_state == TEXT_READ:
+            if current == text:
+                return
+            replace_text(path.with_name(path.name + ".bak"), current)
+        replace_text(path, text)
+
+
 def load_ini():
     values = dict(INI_DEFAULTS)
-    lines = []
-    try:
-        lines = ini_path().read_text().splitlines()
-    except OSError:
-        pass
+    path = ini_path()
+    state, text = read_text(path)
+    if state == TEXT_UNREADABLE:
+        _loaded_unreadable.add(str(path))
+    else:
+        _loaded_unreadable.discard(str(path))
+    lines = text.splitlines()
     for line in lines:
         if "=" in line and not line.lstrip().startswith("#"):
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
-    return values, lines
+    return values, lines, state
 
 
-def save_ini(values, lines):
+def save_ini(values):
     """Rewrites the edited keys in place, appends missing ones, keeps comments and others; a key
     whose value is None is removed (a control binding back to its default)."""
+    path = ini_path()
+    if str(path) in _loaded_unreadable:
+        raise SettingsUnreadable(path)
+    with settings_lock(path):
+        _save_ini_locked(path, values)
+
+
+def _save_ini_locked(path, values):
+    state, before = read_text(path)
+    if state == TEXT_UNREADABLE:
+        raise SettingsUnreadable(path)
+    lines = before.splitlines()
     written = set()
     out = []
     for line in lines:
@@ -206,7 +359,10 @@ def save_ini(values, lines):
     for key, value in values.items():
         if key not in written and value is not None:
             out.append(f"{key}={value}")
-    ini_path().write_text("\n".join(out) + "\n")
+    text = "\n".join(out) + "\n"
+    if state == TEXT_READ and before != text:
+        replace_text(path.with_name(path.name + ".bak"), before)
+    replace_text(path, text)
 
 
 def patches_dir(settings):
@@ -396,7 +552,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.set_default_size(760, 820)
         self.settings = load_settings()
         set_language(self.settings.get("ui_language", ""))
-        self.ini, self.ini_lines = load_ini()
+        self.ini, _, self.ini_state = load_ini()
+        self.ini_warned = False
+        self.save_warned = False
         self.process = None
         self.stream = None
         self.fsr411_build = None  # tools/fsr4cap/build_assets.sh while it runs
@@ -699,7 +857,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         self.store()
         self.settings["ui_language"] = choice
-        save_settings(self.settings)
+        self.saved(lambda: save_settings(self.settings))
         if self.process:
             # The log keeps streaming into the current page; rebuild on the next start.
             set_language(choice)
@@ -899,7 +1057,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["mods_enabled"] = self.mods_enabled_row.get_active()
         self.save_mod_profile()
         self.save_patch_profile()
-        save_settings(s)
+        self.saved(lambda: save_settings(s))
         self.ini.update({
             "upscaler": combo_value(self.upscaler_row),
             "preset": str(combo_value(self.preset_row)),
@@ -912,8 +1070,15 @@ class LauncherWindow(Adw.ApplicationWindow):
             "live_resolution": combo_value(self.live_row),
             **{key: "1" if row.get_active() else "0" for key, row in self.effect_rows.items()},
         })
-        save_ini(self.ini, self.ini_lines)
-        self.ini, self.ini_lines = load_ini()
+        try:
+            save_ini(self.ini)
+        except OSError as error:
+            if not self.ini_warned:
+                self.ini_warned = True
+                self.toasts.add_toast(Adw.Toast(title=str(error), timeout=10))
+            return
+        self.ini_warned = False
+        self.ini, _, self.ini_state = load_ini()
 
     def environment(self):
         return game_environment(self.settings)
@@ -923,20 +1088,27 @@ class LauncherWindow(Adw.ApplicationWindow):
     def mods_dir(self):
         return Path(self.settings.get("mods_dir") or DATA_DIR / "mods").expanduser()
 
+    def saved(self, write):
+        try:
+            write()
+        except OSError as error:
+            if not self.save_warned:
+                self.save_warned = True
+                self.toasts.add_toast(Adw.Toast(title=str(error), timeout=10))
+            return False
+        self.save_warned = False
+        return True
+
     def save_mod_profile(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
         rows = self.mod_list.rows
         profile = {"order": [name for name, _ in rows],
                    "disabled": [name for name, row in rows if not row.get_active()]}
-        (DATA_DIR / "mods.json").write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n")
+        return self.saved(lambda: update_json(DATA_DIR / "mods.json", lambda _before: profile))
 
     def refresh_mods(self):
         self.mod_list.clear()
         self.mods_folder_row.set_subtitle(str(self.mods_dir()))
-        try:
-            profile = json.loads((DATA_DIR / "mods.json").read_text())
-        except (OSError, ValueError):
-            profile = {}
+        _state, profile = load_json(DATA_DIR / "mods.json")
         available = discover_mods(self.mods_dir())
         order = list(dict.fromkeys(n for n in [*profile.get("order", []), *available] if n in available))
         for name in order:
@@ -979,25 +1151,17 @@ class LauncherWindow(Adw.ApplicationWindow):
         for key, row in self.patch_list.rows:
             if row.get_active() != row.default:
                 (enabled if row.get_active() else disabled).append(key)
-        path = DATA_DIR / "patches.json"
-        try:
-            profile = json.loads(path.read_text())
-        except (OSError, ValueError):
-            profile = {}
-        # Patches of files not listed now (another folder) keep their choice.
         shown = {key for key, _ in self.patch_list.rows}
-        profile = {"enabled": sorted({k for k in profile.get("enabled", []) if k not in shown} | set(enabled)),
-                   "disabled": sorted({k for k in profile.get("disabled", []) if k not in shown} | set(disabled))}
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n")
+
+        def merged(profile):
+            return {"enabled": sorted({k for k in profile.get("enabled", []) if k not in shown} | set(enabled)),
+                    "disabled": sorted({k for k in profile.get("disabled", []) if k not in shown} | set(disabled))}
+        return self.saved(lambda: update_json(DATA_DIR / "patches.json", merged))
 
     def refresh_patches(self):
         self.patch_list.clear()
         directory = patches_dir(self.settings)
-        try:
-            profile = json.loads((DATA_DIR / "patches.json").read_text())
-        except (OSError, ValueError):
-            profile = {}
+        _state, profile = load_json(DATA_DIR / "patches.json")
         found = external_patches(directory)
         for key, _path, meta in found:
             default = meta.get("isEnabled", "false").lower() == "true"

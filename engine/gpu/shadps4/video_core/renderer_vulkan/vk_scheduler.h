@@ -17,6 +17,7 @@
 #include <vector>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #include <queue>
 
 #include "bbport_copy.h"
@@ -29,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/renderer_vulkan/vk_submit_result.h"
 
 namespace tracy {
 class VkCtxScope;
@@ -915,11 +917,17 @@ public:
     /// (vk_breadcrumbs.h): on a GPU hang they say which one never finished.
     template <typename Func>
     void RecordCrumb(const Breadcrumbs::Crumb& crumb, Func&& func) {
-        if (!Breadcrumbs::Enabled()) {
+        RecordCrumb([&crumb] { return crumb; }, std::forward<Func>(func));
+    }
+
+    template <typename MakeCrumb, typename Func>
+        requires std::is_invocable_r_v<Breadcrumbs::Crumb, MakeCrumb&>
+    void RecordCrumb(MakeCrumb&& make_crumb, Func&& func) {
+        if (!Breadcrumbs::Enabled()) [[likely]] {
             Record(std::forward<Func>(func));
             return;
         }
-        const u32 id = Breadcrumbs::Note(crumb_stream, crumb);
+        const u32 id = Breadcrumbs::Note(crumb_stream, make_crumb());
         Record([func = std::forward<Func>(func), stream = crumb_stream,
                 id](vk::CommandBuffer cmdbuf) mutable {
             Breadcrumbs::Mark(cmdbuf, stream, id, false);
@@ -1131,6 +1139,10 @@ public:
         return work_semaphore.CurrentTick();
     }
 
+    [[nodiscard]] u32 CurrentSegment() const noexcept {
+        return current_segment;
+    }
+
     /// Returns true when a tick has been triggered by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) noexcept {
         if (work_semaphore.IsFree(tick)) {
@@ -1188,6 +1200,7 @@ private:
     /// BB_ASYNC_SUBMIT: hands the submission to the recording threads (it goes out once its
     /// segments are recorded) instead of waiting for them here.
     void SubmitAsync(SubmitInfo& info);
+    [[nodiscard]] SubmitResult::Relief RelieveSubmitMemory();
 
     std::unique_ptr<RecordChunk> AcquireChunk();
 
@@ -1331,6 +1344,7 @@ private:
     std::vector<std::unique_ptr<SubmissionBatch>> all_batches;
     std::vector<SubmissionBatch*> free_batches; ///< guarded by recorder_mutex
     bool async_submit = false; ///< BB_ASYNC_SUBMIT (default on)
+    bool oom_retry = false;
     std::atomic<u64> submitted_tick{0}; ///< the last tick handed to the queue (WaitSubmitted)
     u32 current_segment = 0;
     std::atomic<u32> active_worker{0}; ///< the worker of current_segment (it spins for work)

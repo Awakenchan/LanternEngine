@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <mutex>
 #include <cctype>
 #include <cfloat>
@@ -20,14 +21,19 @@
 #include "../bbnet/thd/thd.h"
 #include "bbport_menu_i18n.h"
 #include "bbport_settings.h"
+#include "lantern_frame_gen_pacing.h"
 #include "bbport_usage.h"
 #include "bbport_looks.h"
 #include "engine/cheats.h"
+#include "engine/fog_scale.h"
+#include "engine/fps_box.h"
 #include "engine/graphics.h"
 #include "engine/online_fixes.h"
 #include "input/input.h"
 #include "voice.h"
 #include "hud_gauge.h"
+#include "lantern_frame_clock.h"
+#include "lantern_steps.h"
 #include "face_shot.h"
 #include "imgui_internal.h"
 #include "imgui.h"
@@ -106,6 +112,7 @@ extern "C" const unsigned char bb_font_name_end[];
 #endif
 
 extern "C" void runtime_restart(void);
+extern "C" uint64_t runtime_process_time_us(void);
 
 namespace Vulkan {
 extern std::atomic<u64> g_bb_compile_ns_total;
@@ -115,6 +122,20 @@ extern std::atomic<u32> g_bb_compiles_total;
 namespace BbOverlay {
 
 namespace {
+
+void LogFrameStartPacing(bool on) {
+    const std::time_t wall = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    const bool known = localtime_s(&local, &wall) == 0;
+#else
+    const bool known = localtime_r(&wall, &local) != nullptr;
+#endif
+    char clock[16] = "??:??:??";
+    if (known) std::strftime(clock, sizeof clock, "%H:%M:%S", &local);
+    std::printf("Frame rate: frame start pacing %s (Insert menu) at %s, %.1f s since start\n", on ? "on" : "off", clock,
+                double(runtime_process_time_us()) / 1e6);
+}
 
 std::mutex imgui_mutex;
 bool initialized = false;
@@ -641,6 +662,7 @@ void PictureSection() {
     slider("Saturation", "Насыщенность", s.graphics_saturation, 0.0f, 3.0f);
     slider("Hue", "Оттенок", s.graphics_hue, -180.0f, 180.0f, "%.0f");
     slider("Fog", "Туман", s.graphics_fog, 0.0f, 3.0f);
+    if (const float fog = s.graphics_fog; BbEngine::FogScale::SnapToOne(fog) != fog) Store(s.graphics_fog, 1.0f, true);
     slider("Bloom", nullptr, s.graphics_bloom, 0.0f, 3.0f);
     if (const char* label = Item("Vignette", "Виньетка")) {
         Checkbox(label, s.graphics_vignette);
@@ -652,6 +674,21 @@ void PictureSection() {
     slider("Reflection strength", "Сила отражений", s.graphics_ssr_intensity, 0.0f, 3.0f);
     slider("Volumetric sunlight strength", "Сила объёмного света", s.graphics_volumetric_intensity, 0.0f, 3.0f);
     slider("Lamp fog strength", "Сила тумана ламп", s.graphics_point_fog_intensity, 0.0f, 3.0f);
+    if (const char* label = Item("Lamp fog falloff", "Спад тумана ламп")) {
+        const char* modes[] = {BbSettings::MenuText("Classic", "Классический"),
+                               BbSettings::MenuText("Inverse-square", "Обратный квадрат")};
+        int mode = std::clamp(s.graphics_point_fog_falloff.load(), 0, 1);
+        if (ImGui::Combo(label, &mode, modes, 2)) {
+            Store(s.graphics_point_fog_falloff, mode, true);
+        }
+        Hint(BbSettings::MenuText(
+            "Classic is the original lamp fog. Inverse-square gives a bright, tight glow at each flame that falls off fast, and costs more GPU time than classic. Needs Fog around lamps.",
+            "Классический — исходный туман ламп. Обратный квадрат даёт яркое плотное свечение у каждого огня, быстро спадающее, и нагружает GPU сильнее классического. Нужен туман вокруг ламп."));
+    }
+    ImGui::BeginDisabled(s.graphics_point_fog_falloff.load() != BbSettings::PointFogFalloffInverseSquare);
+    slider("Lamp fog glow size", "Размер свечения тумана ламп", s.graphics_point_fog_glow_size,
+           BbSettings::PointFogGlowSizeMin, BbSettings::PointFogGlowSizeMax, "%.3f");
+    ImGui::EndDisabled();
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         const auto& effect = BbSettings::Effects[e];
         if (const char* label = Item(effect.label, effect.label_ru)) {
@@ -719,6 +756,7 @@ void PictureSection() {
             Store(s.graphics_ssr_intensity, 1.0f, true);
             Store(s.graphics_volumetric_intensity, 1.0f, true);
             Store(s.graphics_point_fog_intensity, 1.0f, true);
+            Store(s.graphics_point_fog_glow_size, BbSettings::PointFogGlowSizeDefault, true);
         }
     }
     ImGui::EndDisabled();
@@ -864,14 +902,21 @@ void UpscalerSection() {
                 "когда отбросить прошлые кадры. Меняются сразу, без перезапуска."));
         }
     }
-    const char* frame_gens[] = {BbSettings::MenuText("Off", "Выкл"), "FSR 3.1", "DLSS (NVIDIA)"};
+    const char* frame_gens[] = {BbSettings::MenuText("Off", "Выкл"), "FSR 3.1", "DLSS (NVIDIA)",
+                                "FSR Frame Generation (AMD)"};
     static_assert(std::size(frame_gens) == BbSettings::FrameGenCount);
     const int frame_gen = std::clamp(s.frame_gen.load(), 0, BbSettings::FrameGenCount - 1);
     const bool dlss_loaded = s.streamline_loaded.load();
     const bool dlss_fg = s.dlss_fg_supported.load();
+    const bool fsr_running = s.fsr_fg_running.load();
     if (const char* label = Item("Frame generation", "Генерация кадров")) {
         if (ImGui::BeginCombo(label, frame_gens[frame_gen])) {
             for (int i = 0; i < BbSettings::FrameGenCount; ++i) {
+#ifndef _WIN32
+                if (i == BbSettings::FrameGenFsr && i != frame_gen) {
+                    continue;
+                }
+#endif
                 const bool unavailable = i == BbSettings::FrameGenDlss && dlss_loaded && !dlss_fg;
                 ImGui::BeginDisabled(unavailable);
                 if (ImGui::Selectable(frame_gens[i], i == frame_gen)) {
@@ -882,9 +927,23 @@ void UpscalerSection() {
                     ImGui::SameLine();
                     ImGui::TextDisabled("%s", BbSettings::MenuText("— not supported by this GPU",
                                                                    "— не поддерживается видеокартой"));
+                } else if (i != frame_gen &&
+                           BbSettings::FrameGenNeedsRestart(i, s.startup_frame_gen, fsr_running)) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", BbSettings::MenuText("— applies after a restart",
+                                                                   "— после перезапуска игры"));
                 }
             }
             ImGui::EndCombo();
+        }
+        if (fsr_running && frame_gen != BbSettings::FrameGenFsr) {
+            ImGui::PushTextWrapPos();
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                               BbSettings::MenuText("AMD FSR Frame Generation stays on until the game restarts; "
+                                                    "this choice applies at the next start.",
+                                                    "AMD FSR Frame Generation работает до перезапуска игры; "
+                                                    "этот выбор применится при следующем запуске."));
+            ImGui::PopTextWrapPos();
         }
         if (frame_gen == BbSettings::FrameGenDlss) {
             Hint(BbSettings::MenuText(
@@ -896,12 +955,71 @@ void UpscalerSection() {
                 "интерфейса игры, подачу ведёт драйвер, с NVIDIA Reflex. RTX 40 (один кадр) или RTX 50 "
                 "(до пяти); должно быть включено аппаратное планирование GPU. Загружается, если игра "
                 "запущена с этим выбором. Не работает в меню, роликах и с HDR."));
+        } else if (frame_gen == BbSettings::FrameGenFsr) {
+            Hint(BbSettings::MenuText(
+                "AMD FSR Frame Generation from the AMD FSR SDK: AMD's swapchain shows a generated frame "
+                "between the game's own and paces them. FSR 4 (ML) frame generation on RX 9000 with "
+                "Windows 11, FSR 3.1 frame generation on other GPUs. Loaded when the game starts: chosen "
+                "here, it applies after a restart. Off in menus, movies, loading screens and with HDR output.",
+                "AMD FSR Frame Generation из AMD FSR SDK: цепочка показа AMD выводит сгенерированный кадр "
+                "между кадрами игры и сама задаёт темп. FSR 4 (ML) на RX 9000 с Windows 11, FSR 3.1 на "
+                "других видеокартах. Загружается при запуске игры: выбранная здесь, применится после "
+                "перезапуска. Не работает в меню, роликах, на загрузках и с HDR."));
+            ImGui::PushTextWrapPos();
+            if (!fsr_running && s.startup_frame_gen != BbSettings::FrameGenFsr) {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                                   BbSettings::MenuText("Applies after restarting the game; until then the built-in "
+                                                        "FSR 3.1 frame generation runs.",
+                                                        "Применится после перезапуска игры; до этого работает "
+                                                        "встроенная генерация кадров FSR 3.1."));
+            } else if (!fsr_running) {
+                const char* problem = s.fsr_fg_problem.load();
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+                                   BbSettings::MenuText("AMD FSR Frame Generation unavailable, built-in FSR 3.1 instead: %s",
+                                                        "AMD FSR Frame Generation недоступна, вместо неё встроенная FSR 3.1: %s"),
+                                   problem ? BbSettings::MenuText(problem)
+                                           : BbSettings::MenuText("restart the game to load it",
+                                                                  "перезапустите игру, чтобы загрузить её"));
+            } else if (const char* version = s.fsr_fg_version.load()) {
+                ImGui::TextDisabled("%s", version);
+            }
+            ImGui::PopTextWrapPos();
         } else {
             Hint(BbSettings::MenuText(
                 "Shows an extra frame between the game's own (2x smoother motion). Adds a little input "
                 "lag. Needs an upscaler; off in menus, movies and with HDR output.",
                 "Показывает дополнительный кадр между кадрами игры (движение в 2 раза плавнее). Немного "
                 "увеличивает задержку ввода. Нужен апскейлер; не работает в меню, роликах и с HDR."));
+            const unsigned notes = s.frame_gen_active.load() ? s.frame_gen_notes.load() : 0u;
+            if (frame_gen == BbSettings::FrameGenFsr3 && notes) {
+                ImGui::PushTextWrapPos();
+                const ImVec4 warn(1.0f, 0.75f, 0.3f, 1.0f);
+                if (notes & LanternFrameGenPacing::NoteUnshowable) {
+                    ImGui::TextColored(warn, "%s", BbSettings::MenuText(
+                        "The display's refresh rate cannot show every generated frame.",
+                        "Частота экрана не позволяет показать каждый сгенерированный кадр."));
+                }
+                if (notes & LanternFrameGenPacing::NoteUneven) {
+                    ImGui::TextColored(warn, "%s", BbSettings::MenuText(
+                        "This frame rate does not divide the refresh rate evenly: some frames stay on screen "
+                        "longer. Half the refresh rate paces evenly.",
+                        "Эта частота кадров не делит частоту экрана поровну: часть кадров держится на экране "
+                        "дольше. Ровно идёт половина частоты экрана."));
+                }
+                if (notes & LanternFrameGenPacing::NoteHeld) {
+                    ImGui::TextColored(warn, "%s", BbSettings::MenuText(
+                        "The game runs at half the refresh rate, below the chosen frame rate, so every "
+                        "generated frame can be shown.",
+                        "Игра идёт на половине частоты экрана, ниже выбранной частоты кадров, чтобы каждый "
+                        "сгенерированный кадр был показан."));
+                }
+                if (notes & LanternFrameGenPacing::NoteLowReal) {
+                    ImGui::TextColored(warn, "%s", BbSettings::MenuText(
+                        "The game runs under 40 FPS: generated frames look and feel worse.",
+                        "Игра идёт ниже 40 FPS: сгенерированные кадры выглядят и ощущаются хуже."));
+                }
+                ImGui::PopTextWrapPos();
+            }
         }
         if (frame_gen == BbSettings::FrameGenDlss) {
             ImGui::PushTextWrapPos();
@@ -968,7 +1086,7 @@ void UpscalerSection() {
     }
     if (const char* label = Item("Frame generation: game at a share of the refresh rate",
                                  "Генерация кадров: игра на доле частоты экрана")) {
-        ImGui::BeginDisabled(frame_gen == BbSettings::FrameGenOff);
+        ImGui::BeginDisabled(frame_gen == BbSettings::FrameGenOff || frame_gen == BbSettings::FrameGenFsr3);
         Checkbox(label, s.frame_gen_cap);
         ImGui::EndDisabled();
         Hint(BbSettings::MenuText(
@@ -1118,18 +1236,16 @@ void DlssSection() {
     }
     Section("DLSS");
     if (const char* label = Item("DLSS model", "Модель DLSS")) {
-        static constexpr int presets[] = {BbSettings::DlssPresetAuto, 11, 10, 13, 12, 5, 6,
+        static constexpr int presets[] = {BbSettings::DlssPresetAuto, 11, 10, 13, 12,
                                           BbSettings::DlssPresetDefault};
         const char* names[] = {
-            BbSettings::MenuText("Auto: K, M for Performance, L for Ultra Performance",
-                                 "Авто: K, M для Performance, L для Ultra Performance"),
+            BbSettings::MenuText("Auto: NVIDIA's choice for the quality mode and GPU",
+                                 "Авто: выбор NVIDIA по режиму качества и GPU"),
             BbSettings::MenuText("K: transformer (default)", "K: трансформер (по умолчанию)"),
             BbSettings::MenuText("J: transformer", "J: трансформер"),
             BbSettings::MenuText("M: transformer, 2nd generation", "M: трансформер 2-го поколения"),
             BbSettings::MenuText("L: transformer, 2nd generation (Ultra Performance)",
                                  "L: трансформер 2-го поколения (Ultra Performance)"),
-            BbSettings::MenuText("E: CNN", "E: CNN"),
-            BbSettings::MenuText("F: CNN (Ultra Performance, DLAA)", "F: CNN (Ultra Performance, DLAA)"),
             BbSettings::MenuText("The DLL's default", "По умолчанию DLL"),
         };
         static_assert(std::size(presets) == std::size(names));
@@ -1151,11 +1267,13 @@ void DlssSection() {
         }
         Hint(BbSettings::MenuText(
             "Which NVIDIA model DLSS runs; it changes at once (a brief pause). K keeps thin and moving "
-            "objects steadier; E is a little faster on RTX 20 and 30 cards but softer in motion. M and L "
+            "objects steadier. Auto follows NVIDIA: K for DLAA, Quality and Balanced, M for Performance, "
+            "L for Ultra Performance, and K for all on RTX 20 and 30 cards, where M is much slower. M and L "
             "need a DLSS 4.5 nvngx_dlss.dll (310.5 or newer). A preset the DLL refuses runs its default. "
             "The launcher's Graphics page has the same setting.",
             "Какую модель NVIDIA запускает DLSS; меняется сразу (короткая пауза). K устойчивее на тонких "
-            "и движущихся объектах; E чуть быстрее на RTX 20 и 30, но мягче в движении. Для M и L нужен "
+            "и движущихся объектах. Авто следует NVIDIA: K для DLAA, Quality и Balanced, M для Performance, "
+            "L для Ultra Performance, а на RTX 20 и 30, где M намного медленнее, везде K. Для M и L нужен "
             "nvngx_dlss.dll из DLSS 4.5 (310.5 или новее). Пресет, который DLL не принимает, заменяется "
             "её пресетом по умолчанию. Та же настройка есть на странице «Графика» лаунчера."));
         const int applied = s.dlss_applied_preset;
@@ -1296,8 +1414,7 @@ void MaskSection() {
                               ? BbSettings::MenuText("XeSS uses it as its responsive pixel mask.",
                                                      "XeSS берёт её как маску отзывчивых пикселей.")
                           : s.upscaler == BbSettings::UpscalerDlss
-                              ? BbSettings::MenuText("Current DLSS models do not use it, only the deprecated preset F.",
-                                                     "Текущие модели DLSS её не используют, только устаревший пресет F.")
+                              ? BbSettings::MenuText("DLSS does not use it.", "DLSS её не использует.")
                           : BbSettings::IsFsr4(s.upscaler)
                               ? BbSettings::MenuText("FSR 4 has no mask input: the marked pixels are blended with "
                                                      "this frame after it.",
@@ -1619,6 +1736,22 @@ void FpsSection() {
     if (const char* label = Item("FPS counter in corner", "Счётчик FPS в углу")) {
         Checkbox(label, s.show_fps);
     }
+    if (const char* label = Item("Frame start pacing", "Начало кадра по часам вывода")) {
+        bool pacing = LanternFrameClock::Live().load();
+        if (ImGui::Checkbox(label, &pacing)) {
+            LanternFrameClock::Live().store(pacing);
+            LogFrameStartPacing(pacing);
+        }
+        Hint(BbSettings::MenuText(
+            "With a fixed frame rate each game frame starts on the clock the frames are shown by, so the "
+            "game's steps match the time each frame is on screen. Takes effect at once, for this run "
+            "only; LANTERN_FRAME_START_PACING=0 starts with it off. Compare the two with the Frame "
+            "pacing+ line of BB_FRAME_STATS=1.",
+            "При фиксированной частоте каждый кадр игры начинается по часам вывода кадров, и шаги игры "
+            "совпадают со временем показа каждого кадра. Действует сразу, только в этом запуске; "
+            "LANTERN_FRAME_START_PACING=0 запускает с выключенным. Сравните оба режима по строке "
+            "Frame pacing+ при BB_FRAME_STATS=1."));
+    }
     if (const char* label = Item("Note while shaders build", "Надпись при сборке шейдеров")) {
         Checkbox(label, s.show_compile_note);
         Hint(BbSettings::MenuText(
@@ -1938,7 +2071,74 @@ void CoopSection() {
                               "Ставит ваш знак в мире хозяина, пока он вас не призовёт. Колокол не нужен."));
 }
 
-enum Tab : int { TabUpscaling, TabDisplay, TabPicture, TabGameplay, TabInterface, TabCoop, TabCount };
+bool LastSettingsWriteFailed() {
+    return BbSettings::LastSaveFailed();
+}
+
+void StepRow(Lantern::StepId id) {
+    const Lantern::StepInfo& info = Lantern::Info(id);
+    const std::string name(info.name);
+    if (!Shown(name.c_str())) return;
+    ImGui::PushID(int(id));
+    const Lantern::StepState state = Lantern::Steps::State(id);
+    const bool live = Lantern::LivenessOf(id) == Lantern::Liveness::Live;
+    const std::string_view sw = Lantern::Row(info.sw).name;
+    if (state == Lantern::StepState::Disabled) {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s: %s", name.c_str(),
+                           BbSettings::MenuText("turned itself off after a difference"));
+        char text[768];
+        Lantern::Steps::FirstDifferenceText(id, text, sizeof text);
+        ImGui::PushTextWrapPos();
+        ImGui::TextDisabled("%s", text);
+        ImGui::PopTextWrapPos();
+    } else if (state == Lantern::StepState::Unavailable) {
+        const char* why = Lantern::Steps::UnavailableReason(id);
+        ImGui::TextDisabled("%s: %s (%s)", name.c_str(), BbSettings::MenuText("unavailable"),
+                            why ? why : BbSettings::MenuText("no reason given"));
+    } else if (!live || info.wiring == Lantern::Wiring::Registry) {
+        const char* now = state == Lantern::StepState::Off       ? "off"
+                          : state == Lantern::StepState::Compare ? "compare"
+                                                                 : "on";
+        ImGui::TextDisabled("%s: %s", name.c_str(), now);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s LANTERN_STEPS_OFF=%s", BbSettings::MenuText("next start, Extra variables:"),
+                            name.c_str());
+        ImGui::TextDisabled("%s", BbSettings::MenuText("applies at the next start"));
+        Hint(BbSettings::MenuText(info.wiring == Lantern::Wiring::Registry
+                                      ? "This build does not switch this step yet; the line takes effect once it does."
+                                      : "This step reads its switch when the game starts. Put the line into the launcher's "
+                                        "Extra variables to start without it."));
+    } else {
+        bool on = state != Lantern::StepState::Off;
+        const std::string label = name + (state == Lantern::StepState::Compare ? "  (compare)" : "");
+        if (ImGui::Checkbox(label.c_str(), &on)) {
+            Lantern::Steps::SetFromMenu(id, on ? Lantern::Mode::On : Lantern::Mode::Off);
+        }
+        const std::string hint = std::string(BbSettings::MenuText("Takes effect at once, for this run only. Switch: ")) +
+                                 std::string(sw);
+        Hint(hint.c_str());
+    }
+    ImGui::PopID();
+}
+
+void StepsSection() {
+    Section("Engine steps");
+    if (const char* label = Item("Bisect line")) {
+        char line[512];
+        Lantern::Steps::FormatStepsOffLine(line, sizeof line);
+        ImGui::TextDisabled("%s: %s", label, line);
+        Hint(BbSettings::MenuText(
+            "Steps that differed in this run are added to the line. Copy it into the launcher's Extra variables "
+            "and start again to run without them."));
+    }
+    for (int i = 0; i < Lantern::kStepCount; ++i) StepRow(Lantern::StepId(i));
+}
+
+enum Tab : int { TabUpscaling, TabDisplay, TabPicture, TabGameplay, TabInterface, TabCoop, TabSteps, TabCount };
+
+int VisibleTabs() {
+    return Lantern::Switches::Get().steps_menu ? TabCount : TabSteps;
+}
 
 const char* TabTitle(int tab) {
     switch (tab) {
@@ -1947,6 +2147,7 @@ const char* TabTitle(int tab) {
     case TabPicture: return BbSettings::MenuText("Picture", "Изображение");
     case TabGameplay: return BbSettings::MenuText("Gameplay", "Игра");
     case TabCoop: return BbSettings::MenuText("Co-op", "Совместная игра");
+    case TabSteps: return BbSettings::MenuText("Steps");
     default: return BbSettings::MenuText("Interface", "Интерфейс");
     }
 }
@@ -1978,6 +2179,9 @@ void DrawTab(int tab) {
         CoopSection();
         CoopOptionsSection();
         VoiceSection();
+        break;
+    case TabSteps:
+        StepsSection();
         break;
     default:
         FpsSection();
@@ -2062,7 +2266,8 @@ void Menu() {
         const bool next = ImGui::IsKeyPressed(ImGuiKey_GamepadR2, false) ||
                           ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_PageDown, ImGuiInputFlags_RouteGlobal);
         if (previous != next) {
-            pending_tab = (current_tab + (next ? 1 : TabCount - 1)) % TabCount;
+            const int tabs = VisibleTabs();
+            pending_tab = (current_tab + (next ? 1 : tabs - 1)) % tabs;
         }
     }
     static float footer_height = 0.0f;
@@ -2070,7 +2275,7 @@ void Menu() {
     shown_items = 0;
     if (!Searching()) {
         if (ImGui::BeginTabBar("##tabs")) {
-            for (int tab = 0; tab < TabCount; ++tab) {
+            for (int tab = 0; tab < VisibleTabs(); ++tab) {
                 const std::string label = std::string(TabTitle(tab)) + "###tab" + std::to_string(tab);
                 const ImGuiTabItemFlags flags = tab == pending_tab ? ImGuiTabItemFlags_SetSelected : 0;
                 if (ImGui::BeginTabItem(label.c_str(), nullptr, flags)) {
@@ -2087,7 +2292,7 @@ void Menu() {
         pending_tab = -1;
     } else {
         if (ImGui::BeginChild("##results", page, ImGuiChildFlags_NavFlattened)) {
-            for (int tab = 0; tab < TabCount; ++tab) {
+            for (int tab = 0; tab < VisibleTabs(); ++tab) {
                 DrawTab(tab);
             }
             if (shown_items == 0) {
@@ -2106,6 +2311,7 @@ void Menu() {
         s.graphics_ao_quality != s.startup_ao_quality ||
         s.graphics_shadow_resolution != s.startup_shadow_resolution ||
         s.graphics_local_shadow_resolution != s.startup_local_shadow_resolution ||
+        BbSettings::FrameGenNeedsRestart(s.frame_gen, s.startup_frame_gen, s.fsr_fg_running) ||
         BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= BbSettings::EffectChangeNeedsRestart(e, s.effects[e], s.startup_effects[e]);
@@ -2148,6 +2354,10 @@ void Menu() {
     ImGui::SameLine();
     ImGui::TextDisabled("%s", BbSettings::MenuText("Settings are saved to lantern.ini",
                                              "Настройки сохраняются в lantern.ini"));
+    if (LastSettingsWriteFailed()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s",
+                           BbSettings::MenuText("The last settings write failed; lantern.ini keeps its old values"));
+    }
     ImGui::PushTextWrapPos();
     ImGui::TextDisabled("%s", BbSettings::MenuText(
                                   "Tabs: L2 / R2 or Ctrl+PgUp / Ctrl+PgDn. Search: Ctrl+F, Esc clears it. "
@@ -2421,12 +2631,16 @@ void Announcement() {
 
 void FpsCounter() {
     const auto& s = BbSettings::Get();
-    char text[128];
+    char text[192];
     int n = 0;
     if (s.show_fps_rate) {
         const float game = s.frame_gen_game_fps.load(), shown = s.frame_gen_shown_fps.load();
         if (s.frame_gen_active && game > 1.0f && shown >= game) {
             n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS (game %.0f, frame gen %.1fx)", shown, game, shown / game);
+            const float reached = s.frame_gen_reached_pct.load();
+            if (s.frame_gen.load() == BbSettings::FrameGenFsr3 && reached >= 0.0f) {
+                n += std::snprintf(text + n, sizeof(text) - n, "  frame gen: %.0f%% of generated frames shown", reached);
+            }
         } else {
             n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
                                frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f);
@@ -2468,19 +2682,24 @@ void FpsCounter() {
                     : right ? viewport->WorkPos.x + viewport->WorkSize.x - pad
                             : viewport->WorkPos.x + pad;
     const float y = bottom ? viewport->WorkPos.y + viewport->WorkSize.y - pad : viewport->WorkPos.y + pad;
-    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always,
-                            ImVec2(centre ? 0.5f : right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f));
-    static float min_width = 0.0f;
-    static size_t min_width_key = 0;
-    const size_t width_key = size_t(s.show_fps_rate) | size_t(s.show_fps_frame_time) << 1 |
-                             size_t(s.show_fps_upscaler) << 2 | size_t(s.show_fps_cpu) << 3 |
-                             size_t(s.show_fps_gpu) << 4 | size_t(s.frame_gen_active) << 5 |
-                             size_t(s.upscaler) << 6 | size_t(s.fps_scale * 100.0f) << 12;
-    if (width_key != min_width_key) {
-        min_width = 0.0f;
-        min_width_key = width_key;
+    const float pivot = centre ? 0.5f : right ? 1.0f : 0.0f;
+    static ImFont* text_font = nullptr;
+    static float text_size = 0.0f;
+    static float text_scale = 1.0f;
+    static BbEngine::FpsBox::Fit fit;
+    const float scale = std::clamp(s.fps_scale.load(), 0.75f, 2.0f);
+    if (text_font && text_size > 0.0f) {
+        const float size = text_size * scale / text_scale;
+        const float text_width = text_font->CalcTextSizeA(size, FLT_MAX, 0.0f, shown).x;
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        const float width = BbEngine::FpsBox::Width(fit, size_t(size * 64.0f), std::strlen(shown), text_width,
+                                                    ImGui::GetStyle().WindowPadding.x, std::int64_t(now_ms));
+        ImGui::SetNextWindowPos(ImVec2(BbEngine::FpsBox::Left(x, width, pivot), y), ImGuiCond_Always,
+                                ImVec2(0.0f, bottom ? 1.0f : 0.0f));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0.0f), ImVec2(width, FLT_MAX));
+    } else {
+        ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always, ImVec2(pivot, bottom ? 1.0f : 0.0f));
     }
-    ImGui::SetNextWindowSizeConstraints(ImVec2(min_width, 0.0f), ImVec2(FLT_MAX, FLT_MAX));
     const auto colour = [](unsigned rgb, float alpha) {
         return ImVec4(float((rgb >> 16) & 0xFF) / 255.0f, float((rgb >> 8) & 0xFF) / 255.0f,
                       float(rgb & 0xFF) / 255.0f, alpha);
@@ -2492,9 +2711,11 @@ void FpsCounter() {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::SetWindowFontScale(std::clamp(s.fps_scale.load(), 0.75f, 2.0f));
+    ImGui::SetWindowFontScale(scale);
+    text_font = ImGui::GetFont();
+    text_size = ImGui::GetFontSize();
+    text_scale = scale;
     ImGui::TextUnformatted(shown);
-    min_width = std::max(min_width, ImGui::GetWindowWidth());
     fps_box_min = ImGui::GetWindowPos();
     fps_box_max = ImVec2(fps_box_min.x + ImGui::GetWindowWidth(), fps_box_min.y + ImGui::GetWindowHeight());
     ImGui::End();

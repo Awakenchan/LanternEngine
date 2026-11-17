@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_fsr4.h"
+#include "video_core/renderer_vulkan/upscaler_skips.h"
 #include "video_core/renderer_vulkan/vk_hdr_native.h"
 #include "video_core/renderer_vulkan/vk_xess.h"
 #include "video_core/texture_cache/image.h"
@@ -234,6 +235,13 @@ private:
     float applied_scale = 0.0f; ///< bbport: PresetScale of applied_preset (the Custom ratio moves)
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;
+    u32 unresolved_frames = 0;
+    UpscalerSkips::Path frame_path = UpscalerSkips::Path::None;
+    UpscalerSkips::Reason frame_reason = UpscalerSkips::Reason::NoUiDraw;
+    UpscalerSkips::Window path_window{};
+    std::chrono::steady_clock::time_point path_window_start = std::chrono::steady_clock::now();
+    UpscalerSkips::AfterLoad after_load{};
+    void NoteResolvedFrame(bool active);
     bool last_active = false, last_jitter = false;
 
 
@@ -260,6 +268,7 @@ private:
     std::array<float, 2> jitter{};
     u32 jitter_index = 0;
     bool reset = true;
+    u32 history_cuts_seen = 0;
     u64 frame_id = 0;
     std::chrono::steady_clock::time_point last_frame{};
 

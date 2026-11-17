@@ -15,6 +15,9 @@ layout(binding = 3, std430) writeonly buffer NextFrame { uint next_frame[]; };
 layout(binding = 1, rg16f) uniform writeonly image2D motion_img; // pixels, previous - current
 // Object motion from the G-buffer: rg pixels, b = valid, a = written depth.
 layout(binding = 2) uniform texture2D object_tex;
+#ifdef CLEAN_COLOR
+layout(binding = 3, rgba16f) uniform image2D color_img;
+#endif
 #endif
 
 layout(push_constant) uniform Constants {
@@ -33,6 +36,12 @@ void main() {
     if (pixel.x >= int(size.x) || pixel.y >= int(size.y)) {
         return;
     }
+#ifdef CLEAN_COLOR
+    const vec4 color = imageLoad(color_img, pixel);
+    if (any(isnan(color)) || any(isinf(color))) {
+        imageStore(color_img, pixel, vec4(0.0));
+    }
+#endif
     const float depth = texelFetch(depth_tex, pixel, 0).r;
     const vec2 uv = (vec2(pixel) + 0.5) / size;
     // Depth was rasterised through a shifted viewport. Reconstruct its unjittered

@@ -12,6 +12,7 @@
 #include "core/libraries/np/np_handler/np_handler.h"
 #include "core/libraries/system/systemservice.h"
 #include "imgui/invitation_prompt_layer.h"
+#include "test_sandbox.h"
 
 namespace Libraries::Np {
 
@@ -98,6 +99,9 @@ bool NpHandler::SendSessionInvitation(s32 user_id, const std::string& session_id
     const std::string path = "/v1/sessions/" + session_id + "/invitations";
     const std::string content_type = "multipart/mixed; boundary=" + boundary;
 
+    if (!LanternSandbox::AllowUrl(base_url, "guest invitation request")) {
+        return false;
+    }
     httplib::Client cli(base_url);
     cli.set_connection_timeout(5);
     cli.set_read_timeout(10);

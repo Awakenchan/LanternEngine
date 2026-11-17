@@ -114,7 +114,7 @@ int main(void) {
     if (file) { fprintf(file, "dvdroot_ps4/msg/porbr/menu.msgbnd.dcx\t%s\n", custom); fclose(file); }
     variable("BB_MOD_FILES", list);
     snprintf(path, sizeof(path), "%s/user", root);
-    sys_file_configure(root, path);
+    EXPECT(!sys_file_configure(root, path));
     resolves("/app0/dvdroot_ps4/msg/engus/menu.msgbnd.dcx", custom);
     /* A per-file mount for the selected language is resolved as usual too. */
     EXPECT(!sys_file_mount("/app0/dvdroot_ps4/sound/sprj_c1020_ptb.fsb", custom));

@@ -75,6 +75,7 @@ private:
     float bias_m = 0.04f;
     bool tried = false;
     bool failed = false;
+    u64 skipped_flushes = 0;
 };
 
 }

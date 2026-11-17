@@ -1,6 +1,6 @@
 # Localization checks
 
-On Windows with the .NET 8 Desktop SDK, run from the repository root:
+With the .NET 8 SDK, run from the repository root:
 
 ```powershell
 dotnet run --project launcher/tests/LocalizationChecks -- en
@@ -24,8 +24,8 @@ To check only game-language choices (including PS4 language 17, Brazilian Portug
 the native display name and the in-memory settings value, independently of catalog coverage:
 
 ```powershell
-dotnet run --project launcher/windows/tests/LocalizationChecks -- en --game-languages-only
-dotnet run --project launcher/windows/tests/LocalizationChecks -- pt-BR --game-languages-only
+dotnet run --project launcher/tests/LocalizationChecks -- en --game-languages-only
+dotnet run --project launcher/tests/LocalizationChecks -- pt-BR --game-languages-only
 ```
 
 ## Adding a language

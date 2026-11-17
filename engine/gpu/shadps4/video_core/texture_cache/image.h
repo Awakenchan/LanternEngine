@@ -169,6 +169,9 @@ public:
     /// before this tick; each failure doubles the wait (store_failures).
     u64 store_retry_tick = 0;
     u8 store_failures = 0;
+    u32 gc_seen_recent = 0;
+    u32 gc_seen_tiled = 0;
+    u32 gc_seen_refused = 0;
     ImageId depth_id{};
     u64 depth_uid{};
     u64 image_uid{};

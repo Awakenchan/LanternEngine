@@ -29,6 +29,7 @@ layout(binding = 2) uniform texture2D prev_tex;
 layout(binding = 3, rgba16f) uniform writeonly image2D gi_img;
 layout(binding = 4) uniform texture2D albedo_tex;
 layout(binding = 5) uniform accelerationStructureEXT scene;
+layout(binding = 6) uniform texture2D motion_tex;
 
 #define gi_size (floor((size + 1.0) * 0.5))
 
@@ -59,7 +60,7 @@ bool historyCoord(vec3 pos, out vec2 hf, out float zp) {
     return true;
 }
 
-vec3 sampleHistory(vec2 hf, float zp, out float conf) {
+vec3 sampleHistory(vec2 hf, float zp, float tolerance, out float conf) {
     const ivec2 gmax = ivec2(gi_size) - 1;
     const ivec2 b = ivec2(floor(hf));
     const vec2 f = hf - vec2(b);
@@ -72,7 +73,7 @@ vec3 sampleHistory(vec2 hf, float zp, out float conf) {
             continue;
         }
         const vec4 pv = texelFetch(prev_tex, t, 0);
-        if (pv.a <= 0.0 || abs(pv.a - zp) > HISTORY_TOLERANCE * zp) {
+        if (pv.a <= 0.0 || abs(pv.a - zp) > HISTORY_TOLERANCE * tolerance * zp) {
             continue;
         }
         const float w = (o.x == 0 ? 1.0 - f.x : f.x) * (o.y == 0 ? 1.0 - f.y : f.y);
@@ -163,9 +164,28 @@ void main() {
         vec2 hf;
         float zp;
         if (historyCoord(pos, hf, zp)) {
+            float tolerance = 1.0;
+            float keep = 1.0;
+            if ((history & 4u) != 0u) {
+                const vec2 here = vec2(pixel) + 0.5 - jitter;
+                vec2 motion = hf * 2.0 + 0.5 - prev_jitter - here;
+                const vec4 object = texelFetch(motion_tex, pixel, 0);
+                const float object_z = proj.w / min(object.a - proj.z, -1e-8);
+                if (object.b > 0.99 && !any(isnan(object.rg)) && !any(isinf(object.rg)) &&
+                    abs(object_z - z) < 0.05 + 0.02 * z) {
+                    motion = object.rg;
+                    hf = ((here + motion + prev_jitter) - 0.5) * 0.5;
+                    tolerance = 3.0;
+                }
+                keep = clamp(1.0 - length(motion) / 48.0, 0.35, 1.0);
+            }
             float conf;
-            const vec3 hist = sampleHistory(hf, zp, conf);
-            gi = mix(gi, hist, (1.0 - TEMPORAL) * clamp(conf, 0.0, 1.0));
+            const vec3 hist = sampleHistory(hf, zp, tolerance, conf);
+            float weight = (1.0 - TEMPORAL) * clamp(conf, 0.0, 1.0);
+            if ((history & 4u) != 0u) {
+                weight *= keep * clamp(conf, 0.0, 1.0);
+            }
+            gi = mix(gi, hist, weight);
         }
     }
     imageStore(gi_img, h, vec4(gi, z));

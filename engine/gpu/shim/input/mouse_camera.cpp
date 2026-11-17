@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mouse_camera.h"
+#include "../engine/hook_entries.h"
 #include "input.h"
 #include "mouse_turn.h"
 #include "../engine/engine_hooks.h"
@@ -113,8 +114,7 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::size_t kUpdate = 0x143ac60;
 
-constexpr std::uint8_t kUpdateEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                         0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0xd8, 0x03, 0x00, 0x00};
+constexpr const auto& kUpdateEntry = BbEngine::HookEntries::kMouseCameraUpdateEntry;
 constexpr std::size_t kFreeStore = 0x143ce54, kAfterStore = 0x143ce67;
 
 constexpr std::uint8_t kFreeStoreCode[] = {0xc4, 0xc1, 0x7a, 0x11, 0x85, 0x40, 0x01, 0x00, 0x00, 0xc4,
@@ -175,14 +175,23 @@ std::uint8_t* At(std::size_t offset) { return g_image + offset; }
 
 void HoldAutoRotation(bool hold) {
     if (g_patched_out || hold == g_auto_rotation_nops) return;
+    std::array<BbEngine::CodePatch, std::size(kAutoRotation)> patches;
+    std::size_t count = 0;
     for (std::size_t i = 0; i < std::size(kAutoRotation); ++i) {
         const AutoRotationStore& s = kAutoRotation[i];
-        if (s.held_by_mouse && g_store_is_games[i]) BbEngine::WriteCode(At(s.at), hold ? kNops : s.code, sizeof s.code);
+        if (!s.held_by_mouse || !g_store_is_games[i]) continue;
+        patches[count++] = {g_image, s.at, hold ? std::span(s.code) : std::span(kNops), hold ? std::span(kNops) : std::span(s.code)};
+    }
+    if (const BbEngine::WriteResult result = BbEngine::WriteCode(std::span<const BbEngine::CodePatch>(patches).first(count));
+        result != BbEngine::WriteResult::Applied) {
+        g_patched_out = true;
+        host_log("mouse camera: the game's auto-rotation stays on: its code %s", BbEngine::Describe(result));
+        return;
     }
     g_auto_rotation_nops = hold;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnCameraUpdate(std::uint64_t, const std::uint64_t*) {
+std::int64_t __attribute__((sysv_abi)) OnCameraUpdate(std::uint64_t, std::uint64_t*) noexcept {
     {
         std::scoped_lock lock(g_counts_lock);
         g_update_x = g_count_x;
@@ -205,15 +214,17 @@ std::int64_t __attribute__((sysv_abi)) OnCameraUpdate(std::uint64_t, const std::
     return 0;
 }
 
-bool JumpFrom(std::uint8_t* site, std::size_t size, void (*to)()) {
-    std::uint8_t code[32];
-    std::memset(code, 0xcc, sizeof code);
+constexpr std::size_t kJumpBytes = 14;
+using JumpCode = std::array<std::uint8_t, 32>;
+JumpCode JumpTo(void (*to)()) {
+    JumpCode code;
+    code.fill(0xcc);
     const auto target = reinterpret_cast<std::uint64_t>(to);
     code[0] = 0xff;
     code[1] = 0x25;
-    std::memset(code + 2, 0, 4);
-    std::memcpy(code + 6, &target, 8);
-    return size >= 14 && size <= sizeof code && BbEngine::WriteCode(site, code, size);
+    std::memset(code.data() + 2, 0, 4);
+    std::memcpy(code.data() + 6, &target, 8);
+    return code;
 }
 }
 
@@ -240,23 +251,22 @@ bool Install(std::uint8_t* image, std::size_t size) {
         patched = patched || matches(s.at, kNops, sizeof kNops);
     }
     BbEngine::Hook entry;
-    if (!BbEngine::Prepare(entry, image, size, kUpdate, kUpdateEntry, OnCameraUpdate)) {
+    if (!BbEngine::Prepare(entry, image, size, kUpdate, BbEngine::SiteKind::Entry, kUpdateEntry, OnCameraUpdate)) {
         host_log("mouse camera: off, the follow camera's update is not 1.09's");
         return false;
     }
     g_patched_out = patched;
     lantern_free_camera_resume = reinterpret_cast<std::uint64_t>(At(kAfterStore));
-    bool placed = JumpFrom(At(kFreeStore), sizeof kFreeStoreCode, lantern_free_camera_site);
-    for (const FastTurnExit& exit : kFastTurnExits) placed = placed && JumpFrom(At(exit.at), sizeof exit.code, lantern_fast_turn_exit);
-    if (!placed) {
-
-        BbEngine::WriteCode(At(kFreeStore), kFreeStoreCode, sizeof kFreeStoreCode);
-        for (const FastTurnExit& exit : kFastTurnExits) BbEngine::WriteCode(At(exit.at), exit.code, sizeof exit.code);
-        BbEngine::Discard(entry);
-        host_log("mouse camera: off, the follow camera's code could not be written");
+    static_assert(sizeof kFreeStoreCode >= kJumpBytes && sizeof kFreeStoreCode <= sizeof(JumpCode));
+    static_assert(sizeof FastTurnExit::code >= kJumpBytes && sizeof FastTurnExit::code <= sizeof(JumpCode));
+    const JumpCode free_jump = JumpTo(lantern_free_camera_site), turn_jump = JumpTo(lantern_fast_turn_exit);
+    std::vector<BbEngine::CodePatch> jumps{{image, kFreeStore, kFreeStoreCode, std::span(free_jump).first(sizeof kFreeStoreCode)}};
+    for (const FastTurnExit& exit : kFastTurnExits)
+        jumps.push_back({image, exit.at, exit.code, std::span(turn_jump).first(sizeof exit.code)});
+    if (const BbEngine::WriteResult result = BbEngine::Commit(std::span(&entry, 1), jumps); result != BbEngine::WriteResult::Applied) {
+        host_log("mouse camera: off, the follow camera's code %s", BbEngine::Describe(result));
         return false;
     }
-    BbEngine::Commit(std::span(&entry, 1));
     g_installed = true;
     host_log("mouse camera: %.3f degrees a count at sensitivity 5, after the stick and only without it; a flick "
              "switches the lock-on target%s",

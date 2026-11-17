@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "shadnet/client.h" // socket platform typedefs + protocol constants
 #include "shadnet/server_probe.h"
+#include "test_sandbox.h"
 
 #ifdef _WIN32
 #pragma comment(lib, "Ws2_32.lib")
@@ -51,6 +52,9 @@ ProbeInfo ProbeServer(const std::string& host, u16 port, u32 timeout_ms) {
 
     ProbePlatformInit();
 
+    if (!LanternSandbox::AllowHost(host, "shadNet probe")) {
+        return info;
+    }
     struct addrinfo hints{}, *res_list = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -66,6 +70,7 @@ ProbeInfo ProbeServer(const std::string& host, u16 port, u32 timeout_ms) {
         ::freeaddrinfo(res_list);
         return info; // Unreachable
     }
+    LanternSandbox::NoteSocket();
 
 #ifdef _WIN32
     {

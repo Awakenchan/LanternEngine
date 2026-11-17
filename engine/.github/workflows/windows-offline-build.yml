@@ -125,6 +125,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_windows_frame_rate.py'
           python -m unittest discover -s tests -p 'test_engine_assets.py'
           python -m unittest discover -s tests -p 'test_online.py'
+          python -m unittest discover -s tests -p 'test_online_golden.py'
           python -m unittest discover -s tests -p 'test_upscaler_assets.py'
           python -m unittest discover -s tests -p 'test_fsr4cap_dll_info.py'
 

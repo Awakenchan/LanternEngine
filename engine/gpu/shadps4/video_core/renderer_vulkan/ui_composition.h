@@ -21,6 +21,11 @@ constexpr Background Choose(bool scaled, bool ui_draw, bool scene_ready, bool fs
     return scene_ready && fsr_active ? Background::Temporal : Background::Copy;
 }
 
+template <typename Format>
+constexpr bool FrameFormat(Format format) {
+    return format == Format::eR8G8B8A8Unorm || format == Format::eR8G8B8A8Srgb;
+}
+
 // The game's UI movie viewport: 1920x1080, or with Widescreen on a screen of another shape that
 // shape around it (2520x1080 at 21:9, 1920x1200 at 16:10; scripts/patches.py ui_size, passed as
 // BB_UI_SIZE; with Sharp UI the output's own size). Scaleform then shows the 1920x1080 stage whole

@@ -479,6 +479,8 @@ extern "C" int bbgpu_pc_input(BbPcPad* d, const bool* keys, int nkeys, int gamep
         pad = PadState{};
         g_wants_relative = false;
     } else {
+        host_bindings_pad_actions(d->actions);
+        if (menu && d->actions) pad.buttons |= PadBits::kCircle;
         AddKeyboardAndMouse(pad, keys, nkeys, mouse, menu, keys_move_hunter, camera);
     }
     SpectateButton(pad.buttons);

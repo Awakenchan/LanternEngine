@@ -488,6 +488,20 @@ bool IsInstanceExtensionEnabled(std::string_view name) {
            enabled_instance_extensions.end();
 }
 
+bool QueueFamilyCanPresent(vk::Instance instance, vk::PhysicalDevice physical, u32 family) {
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    const auto supported = reinterpret_cast<PFN_vkGetPhysicalDeviceWin32PresentationSupportKHR>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
+            static_cast<VkInstance>(instance), "vkGetPhysicalDeviceWin32PresentationSupportKHR"));
+    return supported && supported(static_cast<VkPhysicalDevice>(physical), family) == VK_TRUE;
+#else
+    (void)instance;
+    (void)physical;
+    (void)family;
+    return false;
+#endif
+}
+
 const char* FullScreenExclusiveExtensionName() {
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     return VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME;

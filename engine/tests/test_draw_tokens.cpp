@@ -39,6 +39,16 @@ void RoundTrip(BbNativeCalls::DrawRecord r) {
         DrawRecord ignored;
         Expect(!DecodeRecordNop(bad, ignored), "a changed word is rejected");
     }
+    const bool room = StampSlot(r.kind, r.flags) != 0;
+    Expect(room == (!r.flags || r.kind == DrawAuto), "a stamp word in every record but indexed ones carrying values");
+    u32 stamp = 1;
+    Expect(RecordStamp(out, stamp) == room && stamp == 0, "a fresh record carries no stamp");
+    Expect(SealRecordNop(out, 0x8000'0005u) == room, "sealed when there is a stamp word");
+    Expect(out[n] == 0xababababu, "sealing writes nothing past the record");
+    Expect(DecodeRecordNop(out, back) && Same(r, back), "a sealed record decodes to the same draw");
+    Expect(RecordStamp(out, stamp) == room && stamp == (room ? 0x8000'0005u : 0), "the stamp reads back");
+    Expect(SealRecordNop(out, 6) == room && RecordStamp(out, stamp) == room && stamp == (room ? 6u : 0),
+           "a reused record takes the newer stamp");
 }
 
 void OldFormatUnchanged() {

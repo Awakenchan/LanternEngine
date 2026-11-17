@@ -1,0 +1,445 @@
+[offline]
+result: offline
+env:
+BB_ONLINE=0
+BB_NET_BACKEND unset
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT unset
+SHADPS4_HTTP_HOST_OVERRIDES_JSON unset
+BB_SIGN_TIMEOUT unset
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+(none)
+[thd-default]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=thd
+BB_THD_SERVER=https://thehuntersdream.com:18671
+BB_THD_AUTH=https://thehuntersdream.com
+BB_THD_TOKEN=test-token-0123456789
+BB_THD_ONLINE_ID=TestHunter
+BB_THD_RULESET=vanilla
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=3658
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=30
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "https://thehuntersdream.com",
+  "bb-playlog-prod.s3.amazonaws.com": "https://thehuntersdream.com:18671",
+  "bb-playlog-test.s3.amazonaws.com": "https://thehuntersdream.com:18671"
+}
+[thd-custom]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=thd
+BB_THD_SERVER=https://game.example:18671
+BB_THD_AUTH=https://game.example
+BB_THD_TOKEN=test-token-0123456789
+BB_THD_ONLINE_ID=TestHunter
+BB_THD_RULESET=patch.lamp2lamp
+BB_THD_TRACE=1
+BBHOST_NP_TRACE=1
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=32000
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=600
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "https://game.example",
+  "bb-playlog-prod.s3.amazonaws.com": "https://game.example:18671",
+  "bb-playlog-test.s3.amazonaws.com": "https://game.example:18671"
+}
+[thd-lamp2lamp-patch]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=thd
+BB_THD_SERVER=https://thehuntersdream.com:18671
+BB_THD_AUTH=https://thehuntersdream.com
+BB_THD_TOKEN=test-token-0123456789
+BB_THD_ONLINE_ID=TestHunter
+BB_THD_RULESET=patch.lamp2lamp
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=3658
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=45
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "https://thehuntersdream.com",
+  "bb-playlog-prod.s3.amazonaws.com": "https://thehuntersdream.com:18671",
+  "bb-playlog-test.s3.amazonaws.com": "https://thehuntersdream.com:18671"
+}
+[thd-signed-out]
+result: error: Sign in to The Hunter's Dream with Discord on the launcher's Online page
+env:
+BB_ONLINE unset
+BB_NET_BACKEND unset
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER=inherited.example:1
+BB_SHADNET_WEBAPI=http://inherited.example:2
+BB_SHADNET_NPID=inherited
+BB_SHADNET_PASSWORD=inherited-password
+BB_SHADNET_TOKEN=inherited-token
+BB_UPNP=1
+BB_P2P_PORT unset
+SHADPS4_HTTP_HOST_OVERRIDES_JSON unset
+BB_SIGN_TIMEOUT unset
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+(none)
+[seamless-host]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=room
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=3658
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=30
+BB_ROOM_SERVER=https://185-244-28-175.sslip.io
+BB_ROOM_NAME=host-room-code
+BB_ROOM_PLAYER=Lady Maria of th
+BB_ROOM_HOST=1
+BB_ROOM_HTTP_PORT=3659
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD=room-pass
+BB_ROOM_HOST_PASSWORD=room-pass
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "http://127.0.0.1:3659",
+  "https://ss4.scej-network.jp:20443": "http://127.0.0.1:3659",
+  "bb-playlog-prod.s3.amazonaws.com": "http://127.0.0.1:3659",
+  "bb-playlog-test.s3.amazonaws.com": "http://127.0.0.1:3659"
+}
+[seamless-guest-visitor]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=room
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=65535
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=0
+BB_ROOM_SERVER=https://185-244-28-175.sslip.io
+BB_ROOM_NAME=guest-room-code
+BB_ROOM_PLAYER=Djura
+BB_ROOM_HOST=0
+BB_ROOM_HTTP_PORT=65534
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR=1
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "http://127.0.0.1:65534",
+  "https://ss4.scej-network.jp:20443": "http://127.0.0.1:65534",
+  "bb-playlog-prod.s3.amazonaws.com": "http://127.0.0.1:65534",
+  "bb-playlog-test.s3.amazonaws.com": "http://127.0.0.1:65534"
+}
+[seamless-direct-host]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=room
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=3658
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=30
+BB_ROOM_SERVER=ws://127.0.0.1:39000
+BB_ROOM_NAME=direct-room
+BB_ROOM_PLAYER=Hunter
+BB_ROOM_HOST=1
+BB_ROOM_HTTP_PORT=3659
+BB_ROOM_LOCAL_PORT=39000
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD=direct-pass
+BB_ROOM_HOST_PASSWORD=direct-pass
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "http://127.0.0.1:3659",
+  "https://ss4.scej-network.jp:20443": "http://127.0.0.1:3659",
+  "bb-playlog-prod.s3.amazonaws.com": "http://127.0.0.1:3659",
+  "bb-playlog-test.s3.amazonaws.com": "http://127.0.0.1:3659"
+}
+[seamless-direct-guest]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=room
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=3658
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=30
+BB_ROOM_SERVER=ws://192.0.2.10:38765
+BB_ROOM_NAME=direct-room
+BB_ROOM_PLAYER=Hunter
+BB_ROOM_HOST=0
+BB_ROOM_HTTP_PORT=3659
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "http://127.0.0.1:3659",
+  "https://ss4.scej-network.jp:20443": "http://127.0.0.1:3659",
+  "bb-playlog-prod.s3.amazonaws.com": "http://127.0.0.1:3659",
+  "bb-playlog-test.s3.amazonaws.com": "http://127.0.0.1:3659"
+}
+[seamless-ws-server-falls-back]
+result: online
+env:
+BB_ONLINE=1
+BB_NET_BACKEND=room
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT=3658
+SHADPS4_HTTP_HOST_OVERRIDES_JSON=<data>/network/host_overrides.json
+BB_SIGN_TIMEOUT=30
+BB_ROOM_SERVER=https://185-244-28-175.sslip.io
+BB_ROOM_NAME=relay-room
+BB_ROOM_PLAYER=Hunter
+BB_ROOM_HOST=0
+BB_ROOM_HTTP_PORT=3659
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+{
+  "*.scej-network.jp": "http://127.0.0.1:3659",
+  "https://ss4.scej-network.jp:20443": "http://127.0.0.1:3659",
+  "bb-playlog-prod.s3.amazonaws.com": "http://127.0.0.1:3659",
+  "bb-playlog-test.s3.amazonaws.com": "http://127.0.0.1:3659"
+}
+[shadnet-default]
+result: offline
+env:
+BB_ONLINE=0
+BB_NET_BACKEND unset
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT unset
+SHADPS4_HTTP_HOST_OVERRIDES_JSON unset
+BB_SIGN_TIMEOUT unset
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+(none)
+[supermedo]
+result: offline
+env:
+BB_ONLINE=0
+BB_NET_BACKEND unset
+BB_THD_SERVER unset
+BB_THD_AUTH unset
+BB_THD_TOKEN unset
+BB_THD_ONLINE_ID unset
+BB_THD_RULESET unset
+BB_THD_TRACE unset
+BBHOST_NP_TRACE unset
+BB_SHADNET_SERVER unset
+BB_SHADNET_WEBAPI unset
+BB_SHADNET_NPID unset
+BB_SHADNET_PASSWORD unset
+BB_SHADNET_TOKEN unset
+BB_UPNP unset
+BB_P2P_PORT unset
+SHADPS4_HTTP_HOST_OVERRIDES_JSON unset
+BB_SIGN_TIMEOUT unset
+BB_ROOM_SERVER unset
+BB_ROOM_NAME unset
+BB_ROOM_PLAYER unset
+BB_ROOM_HOST unset
+BB_ROOM_HTTP_PORT unset
+BB_ROOM_LOCAL_PORT unset
+BB_ROOM_VISITOR unset
+BB_ROOM_PASSWORD unset
+BB_ROOM_HOST_PASSWORD unset
+BB_ONLINE_PAUSED=0
+UNRELATED=keep
+host_overrides.json:
+(none)

@@ -239,6 +239,7 @@ static SYS_ABI size_t guest_strlen(const char *text) {
 
 static SYS_ABI __attribute__((noreturn)) void guest_exit(int status) {
     printf("Runtime: guest requested exit(%d)\n", status);
+    runtime_flush_settings();
     runtime_finalize(NULL);
     sys_report();
     exit(status);

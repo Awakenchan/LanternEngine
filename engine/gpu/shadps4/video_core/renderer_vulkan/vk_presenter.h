@@ -96,6 +96,10 @@ public:
         return swapchain.HasHDR();
     }
 
+    PresentPolicy::PresentMode PacingPresentMode() const {
+        return swapchain.PacingPresentMode();
+    }
+
     /// The game's own HDR request (VideoOut, every flip). bbport: off (Swapchain::HasHDR is
     /// false), so it leaves the HDR output (hdr in lantern.ini, PresentHdr) and pp_settings alone.
     void SetHDR(bool enable) {
@@ -123,7 +127,7 @@ public:
 
     Frame* PrepareBlankFrame(bool present_thread);
 
-    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    bool Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
     Frame* PrepareLastFrame();
 
     /// bbport: frame generation: a flip was queued for the swap thread (+1) or reached it (-1).
@@ -142,7 +146,7 @@ private:
     Frame* TakeGeneratedFrame();
     /// Shows the generated frame of `frame` (if made and in time), then waits for the real one's
     /// slot. True when it was shown.
-    bool PresentGenerated(Frame* frame, Frame* generated);
+    bool PresentGenerated(Frame* frame, Frame* generated, bool& reached);
 
     /// bbport: HDR output. A swapchain-sized image of the SDR format (the frame letterboxed into
     /// it, or the menu layer drawn into it), sampled by the HDR encode pass.
@@ -186,6 +190,7 @@ private:
     /// bbport: while a generated frame is presented, the real frame whose gain map it uses
     /// (PresentGenerated, PresentHdr; present thread).
     const Frame* hdr_gain_source = nullptr;
+    bool presenting_generated = false;
     int hdr_logged_mode = -1;   ///< bbport: LogHdrState (present thread)
     int hdr_native_state = -1;  ///< native mode: the last frame had a gain map (1) or not (0)
     int hdr_logged_native = -1; ///< ... as last logged

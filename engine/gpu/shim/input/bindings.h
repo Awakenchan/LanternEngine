@@ -54,6 +54,15 @@ void host_bindings_mouse_held(std::uint32_t inputs, bool held[kBindCount]);
 
 void host_bindings_apply(const bool held[kBindCount], bool strong, PadState& pad);
 bool host_bindings_dodge(std::uint64_t now_ms, bool menu, PadState& pad);
+void host_bindings_pad_actions(std::uint8_t actions);
+
+#ifdef LANTERN_PAD_ACTIONS_MUTANTS
+inline int g_pad_actions_mutant = 0;
+inline constexpr int kPadActionsMutants = 4;
+#define LANTERN_PAD_ACTIONS_PICK(n, wrong, right) (::g_pad_actions_mutant == (n) ? (wrong) : (right))
+#else
+#define LANTERN_PAD_ACTIONS_PICK(n, wrong, right) (right)
+#endif
 
 void host_bind_capture_begin(int action);
 int host_bind_capturing();

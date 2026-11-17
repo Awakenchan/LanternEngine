@@ -1154,20 +1154,20 @@ namespace BloodborneLauncher
             var ini = ws.Ini;
             // A connected Hunter's Dream account plays in its own co-op pool (the engine's thd backend);
             // decided here, not only when the Online page is opened.
-            SuperMedo.Apply(ini, s);
-            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1" && SuperMedo.Selected(ini) &&
-                ini.Get("seamless_enabled") != "1" && SuperMedo.Problem(ini, s) is { } medoProblem)
-            {
-                Prompt.Tell(L.T("Online"), medoProblem + L.T("\n\nOr turn \"Play online\" off to play offline."));
-                Show("online");
-                return;
-            }
+            OnlineSettings.ChoosePool(ini, s);
             var seamlessRoom = ini.Get("seamless_enabled") == "1";
             if (seamlessRoom)
             {
                 var host = ini.Get("seamless_role", "guest") == "host";
                 var direct = ini.Get("seamless_direct") == "1";
-                var missing = direct ? !host && ini.Get("seamless_direct_host").Length == 0 : ini.Get("seamless_room").Length == 0;
+                if (SeamlessPlay.NeedsHostRoom(host, direct, ini.Get("seamless_host_room"), s.SeamlessHostPassword))
+                {
+                    ini.Set("seamless_host_room", SeamlessPlay.RandomText(SeamlessPlay.RoomLength));
+                    s.SeamlessHostPassword = SeamlessPlay.RandomText(SeamlessPlay.PasswordLength);
+                    ws.SaveNow();
+                }
+                var missing = SeamlessPlay.Missing(host, direct, ini.Get("seamless_room"), ini.Get("seamless_host_room"),
+                                                   s.SeamlessHostPassword, ini.Get("seamless_direct_host"));
                 if (missing)
                 {
                     Prompt.Tell(L.T("Seamless co-op"), host
@@ -1177,7 +1177,7 @@ namespace BloodborneLauncher
                     return;
                 }
             }
-            if (!HuntersDream.OnlinePaused && !seamlessRoom && ini.Get("online_enabled") == "1" && !SuperMedo.Selected(ini) && ini.Get("online_pool") != "huntersdream")
+            if (!HuntersDream.OnlinePaused && !seamlessRoom && ini.Get("online_enabled") == "1" && ini.Get("online_pool") != "huntersdream")
             {
                 // Online play is The Hunter's Dream's: without its account the engine stays offline.
                 Prompt.Tell(L.T("Online"), L.T("Connect your Hunter's Dream account on the Online page first (with Discord, or without it).") +
@@ -1240,9 +1240,6 @@ namespace BloodborneLauncher
                 ws.Log(choice == 1 ? L.F($"{names}: kept on while online; Play online will not reach the server.")
                     : L.F($"{names}: left out while online; it applies again with online off."), LogLevel.Step);
             }
-
-            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1")
-                await Online.PrepareTrustAsync();
 
             // A third-party resolution patch while the output resolution sets the game's resolution
             // and UI itself: it would keep its own shape (black bars) and stop the widescreen hooks.

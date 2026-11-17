@@ -2,6 +2,9 @@
 #include "loading.h"
 #include "engine_hooks.h"
 #include "bbport_platform.h"
+#include "bbport_settings.h"
+#include "dlss_rules.h"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -32,6 +35,7 @@ bool g_bench_on = false, g_bench_list = false, g_bench_said_settled = false;
 Clock::time_point g_bench_since;
 std::uint8_t* g_image = nullptr;
 std::atomic<bool> g_up{false};
+bool g_asked = false;
 Clock::time_point g_started, g_load_began;
 std::uint64_t g_frames = 0;
 bool g_world_seen = false;
@@ -56,11 +60,17 @@ bool CutscenePlaying() {
 
 void SetLoadingPace(bool on) {
     if (on == g_fast_set || !g_fast_allowed) return;
-    for (int i = 0; i < 4; ++i) {
-        std::uint8_t* imm = g_image + kTargetStores[i] + sizeof kTargetStore;
-        if (on) std::memcpy(&g_game_targets[i], imm, sizeof(float));
-        const float value = on ? g_loading_target : g_game_targets[i];
-        WriteCode(imm, &value, sizeof value);
+    std::array<CodePatch, std::size(kTargetStores)> patches;
+    for (std::size_t i = 0; i < std::size(kTargetStores); ++i) {
+        const std::size_t imm = kTargetStores[i] + sizeof kTargetStore;
+        if (on) std::memcpy(&g_game_targets[i], g_image + imm, sizeof(float));
+        const auto loading = AsCode(std::span(&g_loading_target, 1)), game = AsCode(std::span(&g_game_targets[i], 1));
+        patches[i] = {g_image, imm, on ? game : loading, on ? loading : game};
+    }
+    if (const WriteResult result = WriteCode(patches); result != WriteResult::Applied) {
+        g_fast_allowed = false;
+        std::printf("Loading: fast loading off: the frame pacer's targets %s\n", Describe(result));
+        return;
     }
     g_fast_set = on;
     g_fast_this_load |= on;
@@ -163,6 +173,8 @@ void Tick(std::uint64_t pacer) {
     const bool world = helper && ((Peek(helper + kWorldShownA, &shown_a) && shown_a) ||
                                   (Peek(helper + kWorldShownB, &shown_b) && shown_b));
     const bool loading = asked && !world;
+    if (BbDlss::LoadArrived(g_asked, asked != 0)) BbSettings::Get().history_cuts.fetch_add(1, std::memory_order_relaxed);
+    g_asked = asked != 0;
     const auto now = Clock::now();
     ++g_frames;
     const bool was = g_up.exchange(loading, std::memory_order_relaxed);

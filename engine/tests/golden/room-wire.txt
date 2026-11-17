@@ -1,0 +1,32 @@
+connection 1 client to room:
+  handshake: GET /room/926e1e01671fddb4143ba3624064ae8093d2d332a5b6d3330f98ae4ce5c8620a/<member> HTTP/1.1 | Host: 127.0.0.1 | Upgrade: websocket | Connection: Upgrade | Sec-WebSocket-Key: <nonce> | Sec-WebSocket-Version: 13 | User-Agent: LanternEngine | X-Lantern-Room: 17
+  fin masked text {"t":"host"}
+  fin masked binary route 2 nonce <nonce> sealed 42 bytes opens as 686f73742d746f2d6775657374
+  fin masked binary route 0 nonce <nonce> sealed 40 bytes opens as 686f73742d746f2d616c6c
+  fin masked text {"t":"leave"}
+  end of stream
+connection 1 room to client:
+  handshake: HTTP/1.1 101 Switching Protocols | Upgrade: websocket | Connection: Upgrade | Sec-WebSocket-Accept: <nonce>
+  fin plain text {"host":0,"lossy":true,"members":[],"slot":1,"t":"welcome"}
+  fin plain text {"slot":1,"t":"host"}
+  fin plain text {"slot":2,"t":"join"}
+  fin plain binary from 2 nonce <nonce> sealed 42 bytes opens as 67756573742d746f2d686f7374
+  fin plain binary from 2 nonce <nonce> sealed 40 bytes opens as 67616d652d62756e646c65
+  fin plain binary from 2 nonce <nonce> sealed 40 bytes opens as 67756573742d7061636564
+  fin plain binary from 2 nonce <nonce> sealed 40 bytes opens as 67756573742d6c6f737379
+  fin plain text {"slot":2,"t":"leave"}
+  end of stream
+connection 2 client to room:
+  handshake: GET /room/926e1e01671fddb4143ba3624064ae8093d2d332a5b6d3330f98ae4ce5c8620a/<member> HTTP/1.1 | Host: 127.0.0.1 | Upgrade: websocket | Connection: Upgrade | Sec-WebSocket-Key: <nonce> | Sec-WebSocket-Version: 13 | User-Agent: LanternEngine | X-Lantern-Room: 17
+  fin masked binary route 1 nonce <nonce> sealed 42 bytes opens as 67756573742d746f2d686f7374
+  fin masked binary route 129 nonce <nonce> sealed 40 bytes opens as 67616d652d62756e646c65
+  fin masked binary route 1 nonce <nonce> sealed 40 bytes opens as 67756573742d7061636564
+  fin masked binary route 1 nonce <nonce> sealed 40 bytes opens as 67756573742d6c6f737379
+  fin masked text {"t":"leave"}
+  end of stream
+connection 2 room to client:
+  handshake: HTTP/1.1 101 Switching Protocols | Upgrade: websocket | Connection: Upgrade | Sec-WebSocket-Accept: <nonce>
+  fin plain text {"host":1,"lossy":true,"members":[1],"slot":2,"t":"welcome"}
+  fin plain binary from 1 nonce <nonce> sealed 42 bytes opens as 686f73742d746f2d6775657374
+  fin plain binary from 1 nonce <nonce> sealed 40 bytes opens as 686f73742d746f2d616c6c
+  end of stream

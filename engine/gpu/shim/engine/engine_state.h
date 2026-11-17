@@ -23,6 +23,8 @@ bool player_stat_set(const char* name, std::int64_t value);
 bool player_origin(int* origin);
 bool world_player_block(std::uint32_t* block);
 bool event_flag_get(std::uint32_t id, bool* value);
+bool event_flag_get_own(std::uint32_t id, bool* value);
+bool event_flag_mode(std::int32_t* mode);
 bool event_flag_set(std::uint32_t id, bool value);
 
 int menu_steps_watch(std::uint64_t type, const char16_t* name);

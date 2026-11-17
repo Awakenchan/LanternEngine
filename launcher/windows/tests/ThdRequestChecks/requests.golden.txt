@@ -1,0 +1,2 @@
+phase 1, launcher open with a token held: the Online page's sign-in check (HuntersDream.WhoAmIAsync, once per launcher run when the page is first shown): 1
+  CONNECT thehuntersdream.com:443

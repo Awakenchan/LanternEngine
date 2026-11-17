@@ -23,7 +23,16 @@ int main() {
     std::stringstream text;
     text << file.rdbuf();
     const auto accepted = GpuCacheStamp::Accepted(text.str());
-    Check(accepted.size() == 1 && accepted[0] == "gpu 10318a912f823da3", "the shipped list holds exactly 0.9.41's stamp");
+    Check(accepted.size() == 4 && accepted[0] == "gpu 10318a912f823da3" && accepted[1] == "gpu a410a047846bfbe5" &&
+              accepted[2] == "gpu a28a48baf16d4909" && accepted[3] == "gpu 192d70662d65bd13",
+          "the shipped list holds 0.9.41's stamp, the trunk's before the frame statistics readers left the id, the trunk's before "
+          "the shader settings record, and the trunk's before the driver cache save changed hashed sources but not stored contents");
+    Check(Decide("gpu a410a047846bfbe5", now, legacy, accepted) == Action::Restamp,
+          "the trunk's cache from before the frame statistics change: kept and stamped again");
+    Check(Decide("gpu a28a48baf16d4909", now, legacy, accepted) == Action::Restamp,
+          "a cache from before the shader settings record: kept and stamped again");
+    Check(Decide("gpu 192d70662d65bd13", now, legacy, accepted) == Action::Restamp,
+          "the trunk's cache from before the driver cache save: kept and stamped again");
     Check(Decide(now, now, legacy, accepted) == Action::Keep, "same stamp: kept");
     Check(Decide("gpu 10318a912f823da3", now, legacy, accepted) == Action::Restamp, "0.9.41's cache: kept and stamped again");
     Check(Decide(legacy, now, legacy, accepted) == Action::Restamp, "legacy stamp: kept and stamped again");

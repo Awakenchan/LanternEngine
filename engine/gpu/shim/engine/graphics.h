@@ -12,4 +12,5 @@ bool InstallDirectionalShadows(std::uint8_t* image, std::size_t size);
 float DirectionalShadowBlend();
 bool InstallDirectionalShadowResolution(std::uint8_t* image, std::size_t size);
 bool Enabled();
+std::uint64_t YebisRecords();
 }

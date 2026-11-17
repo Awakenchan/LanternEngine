@@ -3,4 +3,5 @@
 
 namespace LanternFrameReport {
 void OnFlip();
+void OnExit();
 }

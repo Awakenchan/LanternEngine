@@ -173,10 +173,10 @@ void TestDroppedHunters() {
     const std::string name = "dropped-room", password = "secret";
     const int port = 38767;
     const std::string server = "ws://127.0.0.1:" + std::to_string(port);
-    const std::string base = RoomUrl(server, Derive(name, password).room_id) + "/";
+    const std::string base = RoomUrl(server, Derive(name, password)->room_id) + "/";
     LocalRoom room;
     std::string error;
-    Check(room.Start(port, Derive(name, password).room_id, error), "the dropped-hunter room opens");
+    Check(room.Start(port, Derive(name, password)->room_id, error), "the dropped-hunter room opens");
     Link host, first;
     host.SetHost(true);
     host.Start(server, name, password);
@@ -237,7 +237,7 @@ void TestSevenHunters() {
     const std::string server = "ws://127.0.0.1:" + std::to_string(port);
     LocalRoom room;
     std::string error;
-    Check(room.Start(port, Derive(name, password).room_id, error, 7), "a room for seven opens");
+    Check(room.Start(port, Derive(name, password)->room_id, error, 7), "a room for seven opens");
     std::vector<std::unique_ptr<Link>> hunters;
     for (int i = 0; i < 7; ++i) {
         hunters.push_back(std::make_unique<Link>());
@@ -261,9 +261,9 @@ int main() {
     const std::string server = "ws://127.0.0.1:" + std::to_string(port);
     LocalRoom room;
     std::string error;
-    Check(room.Start(port, Derive(name, password).room_id, error), "the room opens its port");
+    Check(room.Start(port, Derive(name, password)->room_id, error), "the room opens its port");
     LocalRoom second;
-    Check(!second.Start(port, Derive(name, password).room_id, error) && !error.empty(), "a port in use is refused with a reason");
+    Check(!second.Start(port, Derive(name, password)->room_id, error) && !error.empty(), "a port in use is refused with a reason");
 
     Link host, guest, other;
     host.SetHost(true);
@@ -299,7 +299,7 @@ int main() {
     Check(!Await(other, Event::Kind::Data, nullptr, 300), "and nobody else");
 
     const std::string member = std::string(32, 'a');
-    const std::string own_url = RoomUrl(server, Derive(name, password).room_id) + "/" + member;
+    const std::string own_url = RoomUrl(server, Derive(name, password)->room_id) + "/" + member;
     std::atomic<int> first_slot{0}, next_slot{0};
     WebSocket original, replacement;
     Check(original.Connect(own_url, 5, error), "a member connects with its token");
@@ -349,7 +349,7 @@ int main() {
     Link fourth, sixth;
     fourth.Start(server, name, password);
     Check(Await(fourth, Event::Kind::Connected), "a fourth hunter is welcomed");
-    const std::string fifth_url = RoomUrl(server, Derive(name, password).room_id) + "/" + std::string(32, 'b');
+    const std::string fifth_url = RoomUrl(server, Derive(name, password)->room_id) + "/" + std::string(32, 'b');
     std::atomic<int> fifth_slot{0}, back_slot{0};
     std::atomic<bool> back_refused{false};
     WebSocket fifth;
@@ -384,7 +384,7 @@ int main() {
     back_run.join();
     fourth.Stop();
 
-    const std::string old_ask = "GET /room/" + Derive(name, password).room_id +
+    const std::string old_ask = "GET /room/" + Derive(name, password)->room_id +
                                 " HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-Lantern-Room: ";
     const std::string old_answer = Exchange(port, old_ask + std::to_string(kRoomProtocol - 1) + "\r\n\r\n");
     Check(old_answer.rfind("HTTP/1.1 426", 0) == 0 && old_answer.find("X-Lantern-Room: " + std::to_string(kRoomProtocol) + "\r\n") != std::string::npos,
@@ -414,7 +414,7 @@ int main() {
     host.Stop();
     room.Stop();
     LocalRoom again;
-    Check(again.Start(port, Derive(name, password).room_id, error), "the port opens again after the room stops");
+    Check(again.Start(port, Derive(name, password)->room_id, error), "the port opens again after the room stops");
     again.Stop();
 
     TestDroppedHunters();

@@ -21,6 +21,10 @@ typedef sigjmp_buf RuntimeRecoverBuf;
 #endif
 extern __thread RuntimeRecoverBuf *runtime_fault_recover;
 void runtime_restart(void);
+void bbport_settings_flush_for_exit(void) __attribute__((weak));
+static inline void runtime_flush_settings(void) {
+    if (bbport_settings_flush_for_exit) bbport_settings_flush_for_exit();
+}
 #define ABI __attribute__((sysv_abi))
 typedef void (ABI *GuestCallback)(void);
 void runtime_finalize(void *dso);

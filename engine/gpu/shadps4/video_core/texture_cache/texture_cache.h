@@ -440,7 +440,7 @@ private:
     /// Lantern Engine: stores a GPU-written tiled image into guest memory in its tiled layout,
     /// synchronously, so the collector may free it. False when this image cannot be stored (its
     /// layout, other GPU data over it, a mapping lost meanwhile): it then stays resident.
-    bool StoreTiledImage(ImageId image_id);
+    bool StoreTiledImage(ImageId image_id, bool partial = false);
 
     /// Thread function for copying downloaded images out to CPU memory.
     void DownloadedImagesThread(const std::stop_token& token);
@@ -540,7 +540,7 @@ private:
     u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
     /// bbport (image write-back GC): tiled images written back / kept (write-back refused or
     /// failed) since the last pressure report.
-    u64 gc_tiled_written = 0, gc_tiled_kept = 0;
+    u64 gc_tiled_written = 0, gc_tiled_kept = 0, gc_tiled_refused = 0;
     std::chrono::steady_clock::time_point gc_report_time{};
     /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
     std::array<u64, 64> gc_tick_at_second{};
@@ -553,6 +553,10 @@ private:
     u64 static_pressure_gc_memory = 0;
     u64 static_critical_gc_memory = 0;
     u64 gc_budget_second = ~0ull;
+    u64 gc_non_image_memory = 0;
+    u32 gc_report_id = 1;
+    bool gc_hysteresis = false;
+    bool gc_pressure_latched = false;
     u64 total_used_samplers = 0;
     u64 sampler_generation = 0; ///< bbport: samplers freed so far (SamplerGeneration)
     u64 trigger_gc_samplers = 0;

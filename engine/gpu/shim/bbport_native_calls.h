@@ -155,6 +155,50 @@ inline bool DecodeRecordNop(const u32* packet, DrawRecord& r) {
     return true;
 }
 
+constexpr u32 StampSlot(u32 kind, u32 flags) {
+    const u32 n = RecordDwords(kind, flags);
+    const u32 slot = ExtraSlot(kind) + (flags ? 2 : 0);
+    return n && slot + 2 < n ? slot : 0;
+}
+
+inline bool RecordLayout(const u32* packet, u32& stamp_slot, u32& payload) {
+    DrawRecord r;
+    if (!DecodeRecordNop(packet, r)) {
+        return false;
+    }
+    stamp_slot = StampSlot(r.kind, r.flags);
+    payload = RecordDwords(r.kind, r.flags) - 1;
+    return true;
+}
+
+inline u32 TokenKey(const u32* packet, u32 stamp_slot, u32 payload) {
+    return stamp_slot ? packet[1 + stamp_slot] : packet[payload];
+}
+
+inline void Seal(u32* packet, u32 stamp_slot, u32 payload, u32 stamp) {
+    packet[1 + stamp_slot] = stamp;
+    packet[payload] = RecordCheck(packet + 1, payload - 1);
+}
+
+inline bool RecordStamp(const u32* packet, u32& stamp) {
+    u32 stamp_slot = 0, payload = 0;
+    stamp = 0;
+    if (!RecordLayout(packet, stamp_slot, payload) || !stamp_slot) {
+        return false;
+    }
+    stamp = TokenKey(packet, stamp_slot, payload);
+    return true;
+}
+
+inline bool SealRecordNop(u32* packet, u32 stamp) {
+    u32 stamp_slot = 0, payload = 0;
+    if (!RecordLayout(packet, stamp_slot, payload) || !stamp_slot) {
+        return false;
+    }
+    Seal(packet, stamp_slot, payload, stamp);
+    return true;
+}
+
 inline bool RecordsEnabled() {
     static const bool on = GetMode() == Mode::Native;
     return on;

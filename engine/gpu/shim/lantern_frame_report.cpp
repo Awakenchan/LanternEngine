@@ -6,10 +6,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <thread>
 #include <vector>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <dirent.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -17,7 +20,13 @@
 #include "bbport_heap_sites.h"
 #include "engine/const_census.h"
 #include "engine/gx_objects.h"
+#include "engine/gx_records.h"
+#include "engine/gx_owed_check.h"
+#include "engine/gx_whole_route.h"
 #include "engine/ring_constants.h"
+#include "engine/vertex_census.h"
+#include "engine/pipe_census.h"
+#include "engine/graphics.h"
 #include "engine/batch.h"
 #include "bbport_platform.h"
 #include "bbport_toggles.h"
@@ -25,6 +34,11 @@
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "lantern_frame_report.h"
+#include "lantern_meter.h"
+#include "lantern_pacing_stats.h"
+#include "lantern_steps.h"
+#include "lantern_switches.h"
+#include "engine/loading.h"
 #include "sys/video_out.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/page_manager.h"
@@ -40,6 +54,8 @@ extern "C" void sys_sema_census(uint64_t* live, uint64_t* found, uint64_t* steps
 extern "C" void runtime_thread_census(uint64_t* made, uint64_t* finished, uint64_t* found, uint64_t* steps);
 extern "C" uint64_t runtime_memory_regions(void);
 extern "C" uint64_t runtime_heap_growths(void);
+extern "C" uint64_t runtime_process_time_us(void);
+extern "C" uint64_t runtime_tsc_frequency(void);
 
 namespace Vulkan {
 extern std::atomic<u64> g_bb_compile_ns, g_bb_compile_ns_total;
@@ -51,6 +67,50 @@ void OcclusionDumpCounts(u64& dumps, u64& in_order);
 }
 
 namespace LanternFrameReport {
+
+static void PrintGxWhole() {
+    char line[4096];
+    bool route_suspect = false;
+    if (BbEngine::GxWholeRoute::Line(line, sizeof line, &route_suspect)) {
+        std::printf("%s\n", line);
+        if (route_suspect) {
+            std::printf("GX whole stage A: INSTRUMENT SUSPECT\n");
+        }
+    }
+    bool suspect = false;
+    if (!BbEngine::GxRecords::WholeLine(line, sizeof line, &suspect)) {
+        return;
+    }
+    std::printf("%s\n", line);
+    if (suspect) {
+        std::printf("GX whole: INSTRUMENT SUSPECT\n");
+    }
+}
+
+static void PrintPipeCensus(u64 frames, double seconds, u64 stage_a_us) {
+    namespace Census = BbEngine::PipeCensus;
+    static Census::Window last;
+    static u64 last_yebis = 0;
+    const Census::Window w = Census::Take(last);
+    const u64 yebis = BbEngine::Graphics::YebisRecords();
+    Census::FrameInputs in;
+    in.frames = frames;
+    in.seconds = seconds;
+    in.tsc_hz = double(runtime_tsc_frequency());
+    in.stage_a_cpu_us = double(stage_a_us);
+    in.yebis_records = yebis - last_yebis;
+    in.commit = Census::BuildCommit();
+    last_yebis = yebis;
+    char line[2048];
+    Census::FormatPipe(line, sizeof line, "5 s", w, in);
+    std::printf("%s\n", line);
+    Census::FormatPreparation(line, sizeof line, "5 s", w, in);
+    std::printf("%s\n", line);
+    char names[Census::kWaitSlots][Census::kWaitNameBytes];
+    for (u32 slot = 0; slot < Census::kWaitSlots; ++slot) Census::WaitName(slot, names[slot], sizeof names[slot]);
+    Census::FormatWaits(line, sizeof line, "5 s", w, in, names);
+    std::printf("%s\n", line);
+}
 
 static void PrintMemory() {
 #ifndef _WIN32
@@ -199,13 +259,82 @@ static void LogLoad(double seconds, u64 flips, double worst_ms, u64 slow) {
     last = now;
 }
 
+namespace {
+struct StepsReport {
+    bool printed_start = false;
+    std::chrono::steady_clock::time_point first_flip{};
+    std::chrono::steady_clock::time_point last_minute{};
+    std::chrono::steady_clock::time_point last_flip{};
+    char started[32] = {};
+};
+StepsReport g_steps_report;
+
+void StepsOnFlip() {
+    StepsReport& r = g_steps_report;
+    const auto now = std::chrono::steady_clock::now();
+    const u64 period_ns = r.printed_start ? u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now - r.last_flip).count()) : 0;
+    r.last_flip = now;
+    Lantern::Steps::OnFlip({u64(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()),
+                            BbEngine::Loading::ScreenUp(), period_ns});
+    if (!r.printed_start) {
+        r.printed_start = true;
+        r.first_flip = r.last_minute = now;
+        const std::time_t wall = std::time(nullptr);
+        std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &wall);
+#else
+        localtime_r(&wall, &local);
+#endif
+        std::strftime(r.started, sizeof r.started, "%Y-%m-%dT%H:%M:%S", &local);
+        Lantern::Steps::PrintStepsAtStart();
+    }
+    Lantern::Steps::PrintNewFirstDifferences();
+    if (now - r.last_minute >= std::chrono::seconds(60)) {
+        const double seconds = std::chrono::duration<double>(now - r.last_minute).count();
+        r.last_minute = now;
+        Lantern::Steps::PrintMinuteTable(seconds, false);
+        Lantern::Diag::PrintWarnings();
+    }
+}
+
+void StepsOnExit() {
+    StepsReport& r = g_steps_report;
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = r.printed_start ? std::chrono::duration<double>(now - r.first_flip).count() : 0.0;
+    Lantern::Steps::PrintNewFirstDifferences();
+    Lantern::Steps::PrintMinuteTable(seconds, true);
+    Lantern::Diag::PrintWarnings();
+    Lantern::Diagnosis::Inputs in;
+#ifdef _WIN32
+    in.pid = long(_getpid());
+    in.os = "Windows";
+#else
+    in.pid = long(getpid());
+    in.os = "Linux";
+#endif
+    in.started = r.started[0] ? r.started : "before the first frame";
+    in.engine_id = BbEngine::PipeCensus::BuildCommit();
+    in.ended = "exit";
+    in.minutes_tenths = u64(seconds / 6.0);
+    in.frames = Lantern::g_frame.load(std::memory_order_relaxed);
+    in.areas = Lantern::Steps::Area();
+    in.fps_tenths = seconds > 0 ? u64(double(in.frames) * 10.0 / seconds) : 0;
+    if (!Lantern::Diagnosis::WriteFile(in)) {
+        Lantern::Log(Lantern::LogChannel::Always, "Diagnosis: not written at this exit");
+    }
+}
+}
+
 void OnFlip() {
+    StepsOnFlip();
     {
         static auto next_ram = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         static auto load_start = std::chrono::steady_clock::now(), load_last = load_start;
         static u64 load_flips = 0, load_slow = 0;
         static double load_worst_ms = 0.0;
         const auto flip_time = std::chrono::steady_clock::now();
+        Lantern::Meter::OnFlip(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(flip_time.time_since_epoch()).count()));
         const double flip_ms =
             std::chrono::duration<double, std::milli>(flip_time - load_last).count();
         load_last = flip_time;
@@ -224,8 +353,7 @@ void OnFlip() {
         }
     }
 
-    static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
-    if (frame_stats) {
+    if (Lantern::Switches::Get().frame_stats) {
         using Clock = std::chrono::steady_clock;
         static Clock::time_point window_start = Clock::now(), last = window_start;
         static u32 frames;
@@ -424,6 +552,15 @@ void OnFlip() {
                                            ? double(gpu_us - window_gpu_us) / (all_draws - window_draws)
                                            : 0.0;
             const double draws_per_frame = frames ? double(all_draws - window_draws) / frames : 0.0;
+            const u64 stage_a_us = gpu_us - window_gpu_us;
+            const u64 ring_window_draws = window_draws;
+            static u64 last_idle_ns = 0, last_tick_ns = 0, last_frame_wait_ns = 0;
+            const auto taken = [](const std::atomic<u64>& total, u64& last) {
+                const u64 now_total = total.load(std::memory_order_relaxed);
+                const u64 d = now_total >= last ? now_total - last : 0;
+                last = now_total;
+                return d;
+            };
             window_draws = all_draws;
             window_gpu_us = gpu_us;
             std::printf("Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
@@ -436,25 +573,68 @@ void OnFlip() {
                         compile_ns / 1e6, static_cast<unsigned long long>(direct),
                         faults / window, static_cast<long long>(BbStats::hot_pages.load()),
                         us_per_draw, draws_per_frame,
-                        BbStats::gpu_idle_ns.exchange(0) / (window * 1e7),
+                        taken(BbStats::gpu_idle_ns, last_idle_ns) / (window * 1e7),
                         BbStats::sync_recording_ns.exchange(0) / (window * 1e7),
                         BbStats::host_copies_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::host_copy_waits.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::host_copy_waits_skipped.exchange(0)) / frames : 0.0,
                         BbStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
-                        BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
+                        taken(BbStats::tick_wait_ns, last_tick_ns) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
-            BbEngine::Batch::Report("5 s");
-            if (BbEngine::RingConstants::g_mode == BbEngine::RingConstants::Compare) {
-                namespace Ring = BbEngine::RingConstants;
-                static Ring::Window last;
-                const Ring::Window w = Ring::Take(last);
-                std::printf("Ring constants (compare): %.0f/frame", w.counts[Ring::Compared] / (frames ? double(frames) : 1.0));
-                for (int c = Ring::Clamped; c < Ring::kCounters; ++c) {
-                    std::printf(", %s %llu", Ring::kCounterNames[c], static_cast<unsigned long long>(w.counts[c]));
+            {
+                const double per = frames ? 1.0 / frames : 0.0;
+                const u64 sync_calls = BbStats::motion_sync_calls.exchange(0);
+                const u64 sync_waits = BbStats::motion_sync_waits.exchange(0);
+                const u64 sync_ns = BbStats::motion_sync_ns.exchange(0);
+                const u64 sync_max = BbStats::motion_sync_max_ns.exchange(0);
+                const u64 start_waits = BbStats::motion_frame_waits.exchange(0);
+                const u64 start_ns = BbStats::motion_frame_wait_ns.exchange(0);
+                const u64 start_max = BbStats::motion_frame_wait_max_ns.exchange(0);
+                const u64 recorder_syncs = BbStats::sync_recording_calls.exchange(0);
+                if (sync_calls || start_waits) {
+                    std::printf("Object motion waits: submissions %.1f/frame, %.1f/frame waited for bb:Motion, "
+                                "%.3f ms/frame, longest %.0f us; frame start waits for the GPU 4 frames back "
+                                "%.2f/frame, %.3f ms/frame, longest %.0f us; recorder syncs %.1f/frame, direct "
+                                "recordings %.1f/frame\n",
+                                sync_calls * per, sync_waits * per, sync_ns * per / 1e6, sync_max / 1e3,
+                                start_waits * per, start_ns * per / 1e6, start_max / 1e3,
+                                recorder_syncs * per, direct * per);
                 }
-                std::printf("\n");
+            }
+            BbEngine::Batch::Report("5 s");
+            if (BbEngine::VertexCensus::On()) {
+                static BbEngine::VertexCensus::Window last;
+                BbEngine::VertexCensus::Print("5 s", BbEngine::VertexCensus::Take(last));
+                BbEngine::GxObjects::PrintSeals("so far");
+            }
+            if (BbEngine::PipeCensus::On()) {
+                PrintPipeCensus(frames, window, stage_a_us);
+            }
+            PrintGxWhole();
+            BbEngine::GxWhole::OwedCheck::Print(frames);
+            {
+                namespace Ring = BbEngine::RingConstants;
+                static Ring::Counts last;
+                const Ring::Counts w = Ring::Take(Ring::g_totals, last);
+                const bool counting = Ring::g_totals.counting.load(std::memory_order_relaxed);
+                Ring::FrameInputs in;
+                in.frames = frames;
+                in.draws = all_draws - ring_window_draws;
+                in.stage_a_us = stage_a_us;
+                std::uint64_t ring_base = 0, ring_bytes = 0;
+                in.ring_known = BbEngine::GxObjects::UploadArena(&ring_base, &ring_bytes);
+                char line[1024];
+                Ring::Format(line, sizeof line, Ring::g_mode, counting, w, in);
+                std::printf("%s\n", line);
+                if (const char* why = Ring::Suspect(Ring::g_mode, counting, w)) {
+                    std::printf("Ring constants: INSTRUMENT SUSPECT (%s)\n", why);
+                }
+                Ring::Difference first;
+                if (Ring::TakeFirst(Ring::g_totals, first)) {
+                    Ring::FormatDifference(line, sizeof line, first);
+                    std::printf("%s\n", line);
+                }
             }
             if (BbEngine::ConstCensus::g_on) {
                 namespace Census = BbEngine::ConstCensus;
@@ -605,12 +785,18 @@ void OnFlip() {
                         BbStats::submits_allowed_queries.exchange(0) / double(frames),
                         BbStats::submits_refused.exchange(0) / double(frames),
                         BbStats::gnm_frame_waits.exchange(0) / double(frames),
-                        BbStats::gnm_frame_wait_ns.exchange(0) / (1e6 * double(frames)),
+                        taken(BbStats::gnm_frame_wait_ns, last_frame_wait_ns) / (1e6 * double(frames)),
                         BbStats::asc_submits.exchange(0) / double(frames));
-            std::printf("EOP fences: %llu decoded, %llu labels written, %lld pending\n",
-                        (unsigned long long)BbStats::eop_decoded.load(),
-                        (unsigned long long)BbStats::eop_written.load(),
-                        (long long)(BbStats::eop_decoded.load() - BbStats::eop_written.load()));
+            {
+                static u64 last_decoded = 0, last_written = 0;
+                const u64 decoded = BbStats::eop_decoded.load(), written = BbStats::eop_written.load();
+                std::printf("EOP fences: %.1f decoded/frame, %.1f labels written/frame, %lld pending\n",
+                            frames ? double(decoded - last_decoded) / frames : 0.0,
+                            frames ? double(written - last_written) / frames : 0.0,
+                            (long long)(decoded - written));
+                last_decoded = decoded;
+                last_written = written;
+            }
             if (const u64 early = BbStats::idle_flushes.exchange(0)) {
                 std::printf("Honest labels: %.1f submissions/frame sent early (GPU idle)\n",
                             early / double(frames));
@@ -641,6 +827,14 @@ void OnFlip() {
                             frames ? double(Vulkan::Scheduler::producer_wakes.exchange(0)) / frames : 0.0,
                             frames ? double(Vulkan::Scheduler::peer_wakes_done.exchange(0)) / frames : 0.0);
             }
+            if (const u32 reliefs = Vulkan::SubmitResult::EngineRetries().relief_requests.load(
+                    std::memory_order_relaxed)) {
+                const auto& retry = Vulkan::SubmitResult::EngineRetries();
+                std::printf("Submit out of memory (LANTERN_SUBMIT_OOM_RETRY): %u so far, %u "
+                            "retried, %u recovered\n",
+                            reliefs, retry.retries.load(std::memory_order_relaxed),
+                            retry.recovered.load(std::memory_order_relaxed));
+            }
             BbWaitTrace::Report(window);
             if (intervals.size() > 2) {
                 std::vector<double> sorted = intervals;
@@ -659,6 +853,12 @@ void OnFlip() {
                             median, std::sqrt(std::max(0.0, sq / intervals.size() - mean * mean)),
                             sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
             }
+            {
+                char pacing[640];
+                if (LanternPacingStats::Line(pacing, sizeof pacing, double(runtime_process_time_us()) / 1e6)) {
+                    std::printf("%s\n", pacing);
+                }
+            }
             intervals.clear();
             window_start = now;
             frames = 0;
@@ -667,4 +867,17 @@ void OnFlip() {
     }
 }
 
+void OnExit() {
+    if (BbEngine::VertexCensus::On()) {
+        BbEngine::VertexCensus::Print("in all", BbEngine::VertexCensus::Read());
+    }
+    PrintGxWhole();
+    Lantern::Meter::OnExit();
+    StepsOnExit();
+}
+
 } // namespace LanternFrameReport
+
+extern "C" void bbgpu_pacing_pad_read(void) {
+    LanternPacingStats::PadRead();
+}

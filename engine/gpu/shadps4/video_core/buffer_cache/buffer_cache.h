@@ -132,7 +132,10 @@ public:
         return ResidencyGeneration() ^ (u64(arenas.size()) << 48);
     }
     [[nodiscard]] bool MemoAllowed() const noexcept;
-    void MarkCpuModified(VAddr address, u64 size);
+    enum class MemoGate : u8 { Open, Shadows, ChunkBuffers, BufferStats, HleObtain };
+    [[nodiscard]] MemoGate MemoRefusal() const noexcept;
+    enum class CpuModifiedBy : u8 { Write, Fault, Asset, ImageStore, Eviction, Demotion, CopyBack, Promotion };
+    void MarkCpuModified(VAddr address, u64 size, CpuModifiedBy by = CpuModifiedBy::Write);
     [[nodiscard]] bool StillClean(VAddr address, u64 size, bool in_place) noexcept;
     [[nodiscard]] bool InPlaceRange(VAddr address, u64 size) const {
         return IsInPlace(address, size);
@@ -200,6 +203,7 @@ public:
 
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
+    [[nodiscard]] bool IsRegionGpuWrittenTracked(VAddr addr, size_t size);
 
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
@@ -634,6 +638,8 @@ private:
     /// 0 room, 1 tight (idle VRAM copies go back sooner), 2 full (no new ones either).
     std::atomic<int> vram_level{0};
     u32 vram_full_until = 0; ///< a failed VRAM allocation counts as full until then
+    u32 oom_relief_seen = 0;
+    u32 oom_relief_reports = 0;
     u32 vram_level_reports = 0;
     /// bbport: the second a shader last read the game's memory through the page table
     /// (SynchronizeDmaBuffers). Those reads do not mark blocks as used, so nothing leaves VRAM

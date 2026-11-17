@@ -3,15 +3,22 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <stop_token>
+#include <thread>
 #include <unordered_map>
 #include <mutex>
 #include <shared_mutex>
 #include <variant>
 #include <boost/container/static_vector.hpp>
 #include <tsl/robin_map.h>
+#include "engine/batch.h"
+#include "engine/pipeline_memo.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
+#include "video_core/renderer_vulkan/driver_cache_save.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -161,7 +168,8 @@ public:
 
     /// bbport: GPU-thread side: the pipeline for a prepared draw after checking that registers
     /// and flattened user data match; null to take the regular path.
-    const GraphicsPipeline* TryPreparedPipeline(const PreparedDraw& prepared);
+    const GraphicsPipeline* TryPreparedPipeline(const PreparedDraw& prepared,
+                                                BbEngine::PipelineMemo::Prepared& reason);
 
     [[nodiscard]] u32 GxUnfilled() const noexcept {
         return gx_unfilled;
@@ -169,6 +177,12 @@ public:
     /// bbport: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {
         return used_prepared;
+    }
+    [[nodiscard]] BbEngine::PipelineMemo::Prepared PreparedReason() const noexcept {
+        return prepared_reason;
+    }
+    [[nodiscard]] bool FreshFlatsOn() const noexcept {
+        return fresh_flats_on;
     }
 
     const ComputePipeline* GetComputePipeline();
@@ -191,6 +205,20 @@ public:
 private:
     void CreateNativeCache();
     void SaveNativeCache();
+    enum class DriverCacheRead : u8 { Read, Off, Failed };
+    struct DriverCacheSnapshot {
+        DriverCacheRead status = DriverCacheRead::Off;
+        vk::Result result = vk::Result::eSuccess;
+        std::vector<u8> payload;
+    };
+    [[nodiscard]] DriverCacheSnapshot SnapshotDriverCache();
+    static std::mutex& DriverCacheSaveMutex();
+    void NoteDriverCachePipeline() noexcept;
+    void StartDriverCacheSaver();
+    void StopDriverCacheSaver();
+    void RunDriverCacheSaver(std::stop_token stop);
+    DriverCacheSave::Step TrySaveDriverCache();
+    void ReportDriverCacheSaves() const;
     // Only pipeline creation and shutdown snapshots take this lock, never cache hits.
     std::mutex native_cache_mutex;
     static std::mutex progress_mutex;
@@ -228,6 +256,18 @@ private:
     std::shared_mutex programs_mutex;
     u64 prepared_hits = 0, prepared_misses = 0;
     const PreparedDraw* used_prepared = nullptr;
+    BbEngine::PipelineMemo::Prepared prepared_reason = BbEngine::PipelineMemo::Rejected;
+    BbEngine::PipelineMemo::FreshFlats fresh_flats;
+    bool fresh_flats_on = true;
+    BbEngine::Batch::Mode memo_mode = BbEngine::Batch::Off;
+    BbEngine::Batch::Step* memo_step = nullptr;
+    BbEngine::PipelineMemo::Memo memo;
+    BbEngine::PipelineMemo::KeyBuilder memo_key;
+    u64 memo_draws = 0;
+    bool MemoKey(const DrawIndirectParams& params, u64& key);
+    const GraphicsPipeline* SelectGraphicsPipeline(const DrawIndirectParams params,
+                                                   const PreparedDraw* prepared, u64 gx_record);
+    void NoteMemo();
     struct GxPipeline {
         const GraphicsPipeline* pipeline = nullptr;
         Shader::Info* vertex = nullptr;
@@ -241,11 +281,13 @@ private:
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
     PipelineSelection sel{}; ///< GPU thread selection state
+    friend class GxWholeKeyAccess;
     /// bbport: the warm-up's loaded stages: where each one's bindings start (its specialization)
     /// and how many it has; `warmup_mip_bindings`: one has an image bound per mip level, whose
     /// count needs the draw's descriptor.
     std::array<Shader::Backend::Bindings, MaxShaderStages> warmup_start{}, warmup_count{};
     bool warmup_mip_bindings = false;
+    u8 warmup_stale_key = 0;
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
     bool object_motion_enabled{};
@@ -255,6 +297,27 @@ private:
     tsl::robin_map<vk::ShaderModule,
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
+
+    struct DriverCacheSaves {
+        u64 last_save_ns = 0;
+        u64 saved_through = 0;
+        u64 saved = 0;
+        u64 failed = 0;
+        u64 too_few = 0;
+        u64 too_soon = 0;
+        u64 compiling = 0;
+        u64 dropped = 0;
+        bool closed = false;
+    };
+    DriverCacheSaves driver_cache_saves;
+    std::atomic<u64> driver_cache_created{0};
+    std::atomic<u64> driver_cache_last_new_ns{0};
+    bool driver_cache_loaded = false;
+    bool driver_cache_save_in_play = false;
+    std::atomic<bool> driver_cache_shutdown{false};
+    std::mutex driver_cache_wake_mutex;
+    std::condition_variable_any driver_cache_wake;
+    std::jthread driver_cache_saver;
 };
 
 } // namespace Vulkan

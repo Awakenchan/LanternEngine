@@ -1,11 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
 namespace BbEngine::KeptTravel {
+
+#ifdef LANTERN_KEPT_TRAVEL_MUTANTS
+enum class Mutant : int { None = 0, IgnoreMembers, MembersOnlyWhenSettled, kCount };
+inline int g_mutant = 0;
+inline bool Is(Mutant m) { return g_mutant == int(m); }
+#define LANTERN_KT_MUTANT(name) (::BbEngine::KeptTravel::Is(::BbEngine::KeptTravel::Mutant::name))
+#else
+#define LANTERN_KT_MUTANT(name) false
+#endif
 
 constexpr std::uint32_t kDreamArea = 21, kDungeonArea = 29;
 constexpr std::uint32_t kFlagsMagic = 0x45464e49u;
@@ -56,6 +66,52 @@ constexpr bool StoryWarp(std::int32_t event) {
     case kSnatcherEvent: return true;
     default: return false;
     }
+}
+
+enum class WarpChoice { Pass, Drop, Hold, Ask, Solo, Stay };
+constexpr std::int64_t kStoryHoldMs = 15000, kNotHeld = -1;
+
+constexpr WarpChoice GuestWarpChoice(bool client, std::int32_t script, std::uint32_t lamp, bool following, std::int64_t held_since, std::int64_t now,
+                                     bool keep_session) {
+    if (!client) return WarpChoice::Pass;
+    if (script == kSnatcherEvent) return WarpChoice::Stay;
+    const WarpChoice alone = keep_session && CanKeep(lamp) ? WarpChoice::Ask : WarpChoice::Solo;
+    if (!StoryWarp(script)) return alone;
+    if (following) return WarpChoice::Drop;
+    if (held_since == kNotHeld || now - held_since < kStoryHoldMs) return WarpChoice::Hold;
+    return alone;
+}
+
+class StoryHold {
+public:
+    WarpChoice Warp(bool client, std::int32_t script, std::uint32_t lamp, bool following, std::int64_t now, bool keep_session) {
+        const WarpChoice choice = GuestWarpChoice(client, script, lamp, following, kNotHeld, now, keep_session);
+        if (choice == WarpChoice::Hold && !lamp_.load(std::memory_order_acquire)) {
+            since_.store(now, std::memory_order_relaxed);
+            script_.store(script, std::memory_order_relaxed);
+            lamp_.store(lamp, std::memory_order_release);
+        }
+        return choice;
+    }
+    WarpChoice Tick(bool client, bool following, std::int64_t now, bool keep_session, std::uint32_t& lamp) {
+        lamp = lamp_.load(std::memory_order_acquire);
+        if (!lamp) return WarpChoice::Pass;
+        const WarpChoice choice = client ? GuestWarpChoice(true, script_.load(std::memory_order_relaxed), lamp, following, since_.load(std::memory_order_relaxed), now, keep_session)
+                                         : WarpChoice::Pass;
+        if (choice != WarpChoice::Hold) lamp_.store(0, std::memory_order_relaxed);
+        return choice;
+    }
+    std::uint32_t Followed() { return lamp_.exchange(0, std::memory_order_relaxed); }
+    bool Held() const { return lamp_.load(std::memory_order_relaxed) != 0; }
+
+private:
+    std::atomic<std::uint32_t> lamp_{0};
+    std::atomic<std::int64_t> since_{kNotHeld};
+    std::atomic<std::int32_t> script_{0};
+};
+
+constexpr bool LeaveChecksHeld(std::int64_t rejoin_until, bool kept_active, std::int64_t now) {
+    return kept_active || now < rejoin_until;
 }
 
 constexpr bool HoldForHost(bool link_up, bool host_here, bool past_limit) {
@@ -112,14 +168,16 @@ public:
     static constexpr Seconds kLoadStart{30}, kLoadLimit{300}, kSettle{2}, kBuildAnyway{20}, kBuildEvery{3}, kBackLimit{120};
 
     void Begin(Time now) {
+        members_left_ = false;
         state_ = State::Asked;
         begun_ = now;
         placed_ = rebuilt_ = Time{};
     }
     bool Active() const { return state_ != State::Off; }
     bool LoadOver() const { return state_ == State::Placed; }
+    bool MembersLeft() const { return members_left_; }
 
-    Step Tick(Time now, bool loading, bool placed, bool session, bool others_here, int missing) {
+    Step Tick(Time now, bool loading, bool placed, bool session, bool others_here, int missing, bool members_in = true) {
         if (state_ == State::Off) return Step::Wait;
         if (!session) return Finish(Step::GiveUp);
         if (loading) {
@@ -135,6 +193,10 @@ public:
             return Step::Wait;
         }
         const auto since = now - placed_;
+        if (!members_in && !LANTERN_KT_MUTANT(IgnoreMembers) && !(LANTERN_KT_MUTANT(MembersOnlyWhenSettled) && since < kSettle)) {
+            members_left_ = true;
+            return Finish(Step::GiveUp);
+        }
         if (since < kSettle) return Step::Wait;
         if (missing == 0 && others_here) return Finish(Step::Done);
         if (since > kBackLimit) return Finish(Step::GiveUp);
@@ -153,6 +215,7 @@ private:
     }
     State state_ = State::Off;
     Time begun_{}, placed_{}, rebuilt_{};
+    bool members_left_ = false;
 };
 
 }

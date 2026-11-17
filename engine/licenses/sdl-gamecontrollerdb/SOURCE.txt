@@ -1,0 +1,1 @@
+LICENSE: https://github.com/mdqinc/SDL_GameControllerDB/blob/master/LICENSE (engine/gamecontrollerdb.txt names this project and the zlib license)

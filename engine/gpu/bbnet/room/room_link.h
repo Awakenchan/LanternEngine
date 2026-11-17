@@ -11,10 +11,17 @@
 #include <thread>
 #include <vector>
 
+#include "room_counters.h"
 #include "room_crypto.h"
 #include "room_ws.h"
 
 namespace BbRoom {
+
+constexpr int kLossyRoute = 0x80;
+constexpr int kMostRoute = 0xff;
+constexpr int kMostGameTarget = kLossyRoute - 1;
+
+constexpr int RouteByte(int target, bool lossy) { return lossy ? (target | kLossyRoute) : target; }
 
 struct Event {
     enum class Kind { Connected, Joined, Left, Host, Data, Disconnected, Refused, GaveUp, Announcement, Visitor, Away };
@@ -40,6 +47,7 @@ public:
     bool SendPaced(int target, const std::uint8_t* data, std::size_t size);
     void SetHost(bool host);
     void SetVisitor(bool visitor) { visitor_ = visitor; }
+    void SetCounters(NetCounts::Counters* counters) { counters_ = counters; }
     void SetOpen(bool open);
     bool OpenListed() const { return open_listed_.load(); }
     bool IsVisitor(int slot) const;
@@ -52,15 +60,24 @@ public:
     bool IsDev(int slot) const;
     int HostSlot() const { return host_.load(); }
     std::vector<int> Members() const;
-    const std::string& RoomId() const { return secret_.room_id; }
-    const std::string& LastError() const { return last_error_; }
+    std::string RoomId() const { return secret_.room_id; }
+    bool LossyRoutes() const { return lossy_targets_.load(); }
+    std::string LastError() const;
 
 private:
+    enum class Delivery : std::uint8_t { Reliable, Lossy, Paced };
+
+    bool SendFrame(int target, int most_target, bool lossy_route, Delivery delivery, std::size_t most_backlog,
+                   const std::uint8_t* data, std::size_t size);
+    bool SendText(const std::string& text);
+    std::shared_ptr<WebSocket> CurrentSocket();
+    void SetError(std::string error);
     void Run();
     bool Session();
     void Handle(const std::string& text);
     void Push(Event event);
     void SendOpen(WebSocket& socket);
+    bool Counted(NetCounts::Kind kind, std::size_t bytes);
 
     std::string url_;
     Secret secret_;
@@ -76,6 +93,8 @@ private:
     std::atomic<bool> open_listed_{false};
     std::atomic<bool> full_{false};
     std::atomic<int> full_most_{kMaxMembers};
+    std::atomic<NetCounts::Counters*> counters_{nullptr};
+    bool welcomed_once_ = false;
     std::string name_;
     std::string password_;
     mutable std::mutex mutex_;
@@ -84,9 +103,9 @@ private:
     std::vector<int> members_;
     std::vector<int> devs_;
     std::vector<int> visitors_;
+    std::string last_error_;
     std::mutex socket_mutex_;
     std::shared_ptr<WebSocket> socket_;
-    std::string last_error_;
 };
 
 std::string RoomUrl(const std::string& server, const std::string& room_id, const std::string& path = "room");

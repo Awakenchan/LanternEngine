@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "voice.h"
 #include "voice_gate.h"
+#include "test_sandbox.h"
 #include "bbport_settings.h"
 #include "../bbnet/room/room_service.h"
 #include <SDL3/SDL.h>
@@ -68,7 +69,7 @@ bool Wanted() {
         const char* v = std::getenv("BB_VOICE");
         return v && std::strcmp(v, "0") == 0;
     }();
-    return !off && BbSettings::Get().voice_enabled && BbRoom::Active();
+    return !off && LanternSandbox::AllowVoice() && BbSettings::Get().voice_enabled && BbRoom::Active();
 }
 
 bool PushToTalkHeld() {
@@ -171,7 +172,8 @@ void Loop() {
             mic = nullptr;
             g_speaking = false;
             g_mic_silent = false;
-        } else if (!mic) {
+        } else if (!mic && LanternSandbox::AllowVoice()) {
+            LanternSandbox::counters.recording_opens.fetch_add(1, std::memory_order_relaxed);
             mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, nullptr, nullptr);
             if (mic) {
                 SDL_ResumeAudioStreamDevice(mic);
@@ -284,6 +286,10 @@ void Loop() {
 }
 
 void Start() {
+    if (!LanternSandbox::AllowVoice()) {
+        std::printf("Voice: off (test sandbox)\n");
+        return;
+    }
     if (g_started.exchange(true)) return;
     std::thread(Loop).detach();
 }

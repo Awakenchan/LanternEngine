@@ -3,7 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Windows.Input;
+using Avalonia.Input;
 using BloodborneLauncher.Core;
 
 static void Require(bool condition, string message)
@@ -90,6 +90,13 @@ CheckGameLanguages();
 Require(InputMap.SdlKeyName(Key.Left) == "Left" && InputMap.SdlKeyName(Key.Return) == "Return", "Keyboard protocol names were translated");
 Require(InputMap.Controls.Single(c => c.Name == "switch_right").Default == "Right", "Default keyboard binding was translated");
 Require(PadMap.InputFor(InputMap.Controls.Single(c => c.Name == "switch_item")) == "down", "Controller lookup labels changed");
+Require(PadMap.InputFor(InputMap.Controls.Single(c => c.Name == "sprint")) == "sprint", "Controller split lookups changed");
+Localization.Initialize("en");
+var padStrings = new[] { "dodge", "backstep", "sprint" }.Select(PadMap.SplitTip).Append(Localization.T("Not bound (Circle does it)")).ToList();
+Localization.Initialize(language);
+foreach (var code in listed)
+    foreach (var text in padStrings)
+        Require(Localization.Catalog(code)!.ContainsKey(text), $"{code}: missing controller split string: {text}");
 foreach (var profile in ControlProfiles.BuiltIns)
 {
     var roundtrip = ControlProfiles.Parse(ControlProfiles.ToJson(profile)).Profile;

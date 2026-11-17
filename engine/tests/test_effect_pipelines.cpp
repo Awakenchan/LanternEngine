@@ -16,6 +16,7 @@
 #include "video_core/host_shaders/native_motion_blur_frag.h"
 #include "video_core/host_shaders/point_shadow_comp.h"
 #include "video_core/host_shaders/point_volumetric_comp.h"
+#include "video_core/host_shaders/point_volumetric_falloff_comp.h"
 #include "video_core/host_shaders/ssgi_composite_comp.h"
 #include "video_core/host_shaders/ssgi_denoise_comp.h"
 #include "video_core/host_shaders/ssgi_gather_comp.h"
@@ -161,6 +162,10 @@ int main() {
          POINT_VOLUMETRIC_COMP,
          {eStorageBuffer, eStorageBuffer, eCombinedImageSampler, eStorageImage},
          8},
+        {"point volumetric falloff",
+         POINT_VOLUMETRIC_FALLOFF_COMP,
+         {eStorageBuffer, eStorageBuffer, eCombinedImageSampler, eStorageImage},
+         12},
     };
     u32 built = 0;
     for (const Pass& pass : passes) {

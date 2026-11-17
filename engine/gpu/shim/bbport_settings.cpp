@@ -7,18 +7,37 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_settings.h"
 #include "bbport_menu_i18n.h"
+#include "dlss_rules.h"
 #include "input/ini_bindings.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
-#include <cstdio>
+#include <cerrno>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 namespace BbSettings {
 
@@ -98,6 +117,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         }
     } else if (key == "frame_gen") {
         v.frame_gen = value == "dlss"                     ? FrameGenDlss
+                      : value == "fsr"                    ? FrameGenFsr
                       : (value == "fsr3" || value == "1") ? FrameGenFsr3
                                                           : FrameGenOff;
     } else if (key == "frame_gen_even_pacing") {
@@ -304,6 +324,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.graphics_volumetric_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_point_fog_intensity") {
         v.graphics_point_fog_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
+    } else if (key == "graphics_point_fog_glow_size") {
+        v.graphics_point_fog_glow_size=PointFogGlowSize(f);
+    } else if (key == "graphics_point_fog_falloff") {
+        if (value != "0" && value != "1") {
+            std::printf("Settings: unknown graphics_point_fog_falloff '%s' (expected 0 or 1); classic\n",
+                        value.c_str());
+        }
+        v.graphics_point_fog_falloff = value == "1" ? PointFogFalloffInverseSquare : PointFogFalloffClassic;
     } else if (key == "graphics_ssr_intensity") {
         v.graphics_ssr_intensity=Clamp(std::isfinite(f)?f:1.0f,0.0f,3.0f);
     } else if (key == "graphics_shadow_resolution") {
@@ -470,27 +498,477 @@ const char* MenuText(const char* english, const char* russian) {
     }
 }
 
+namespace {
+
+enum class SettingsFileState { Read, Absent, Unreadable };
+
+struct SettingsFileText {
+    SettingsFileState state = SettingsFileState::Absent;
+    std::string text;
+};
+
+constexpr int SettingsReadAttempts = 4;
+constexpr int SettingsReplaceAttempts = 5;
+constexpr int SettingsLockAttempts = 50;
+constexpr std::chrono::milliseconds SettingsRetryPause{2};
+constexpr std::size_t SettingsReadChunk = 4096;
+constexpr const char* SettingsHeader = "# Lantern Engine settings (in-game menu: Insert / L3+R3)";
+
+constexpr int SaveRetryAttempts = 6;
+constexpr std::chrono::milliseconds SaveRetryFirstDelay{50};
+constexpr std::chrono::milliseconds ExitSaveBound{4000};
+constexpr std::string_view Utf8Bom = "\xEF\xBB\xBF";
+
+using KeyList = std::vector<std::pair<std::string, std::string>>;
+
+KeyList CurrentKeys();
+
+struct SavedKey {
+    std::string loaded;
+    std::optional<std::string> raw;
+};
+
+struct SaveStore {
+    std::mutex mutex;
+    std::map<std::string, SavedKey, std::less<>> baseline;
+    std::map<std::string, std::string, std::less<>> raw;
+    bool load_unreadable = false;
+};
+
+struct SaveQueue {
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::condition_variable idle;
+    KeyList keys;
+    bool pending = false;
+    bool fresh = false;
+    bool busy = false;
+    std::once_flag started;
+};
+
+SaveStore& g_save_store = *new SaveStore;
+SaveQueue& g_save_queue = *new SaveQueue;
+std::atomic<bool> g_settings_write_failed{false};
+std::atomic<std::uint32_t> g_settings_load_failures{0};
+std::atomic<std::uint32_t> g_settings_dropped{0};
+std::atomic<std::uint32_t> g_settings_read_failures{0};
+std::atomic<std::uint32_t> g_settings_replace_failures{0};
+std::atomic<std::uint32_t> g_settings_lock_failures{0};
+std::atomic<std::uint32_t> g_settings_temporaries{0};
+
+struct FileClose {
+    void operator()(FILE* file) const noexcept { std::fclose(file); }
+};
+using FilePtr = std::unique_ptr<FILE, FileClose>;
+
+#ifdef _WIN32
+struct HandleClose {
+    void operator()(HANDLE handle) const noexcept { CloseHandle(handle); }
+};
+using HandlePtr = std::unique_ptr<std::remove_pointer_t<HANDLE>, HandleClose>;
+
+SettingsFileState ReadSettingsOnce(const char* path, std::string& text) {
+    HANDLE raw = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (raw == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? SettingsFileState::Absent
+                                                                                : SettingsFileState::Unreadable;
+    }
+    const HandlePtr file{raw};
+    text.clear();
+    char chunk[SettingsReadChunk];
+    DWORD got = 0;
+    while (true) {
+        if (!ReadFile(file.get(), chunk, DWORD(sizeof chunk), &got, nullptr)) {
+            return SettingsFileState::Unreadable;
+        }
+        if (got == 0) {
+            return SettingsFileState::Read;
+        }
+        text.append(chunk, got);
+    }
+}
+
+bool FlushToDisk(FILE* file) {
+    const intptr_t os_handle = _get_osfhandle(_fileno(file));
+    return os_handle != -1 && FlushFileBuffers(reinterpret_cast<HANDLE>(os_handle)) != 0;
+}
+
+bool FlushFolder(const char*) {
+    return true;
+}
+
+class SettingsFileLock {
+public:
+    explicit SettingsFileLock(const std::string& path) {
+        for (int attempt = 0; attempt < SettingsLockAttempts; ++attempt) {
+            if (attempt > 0) {
+                std::this_thread::sleep_for(SettingsRetryPause);
+            }
+            handle_ = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (handle_ != INVALID_HANDLE_VALUE) {
+                return;
+            }
+        }
+    }
+    ~SettingsFileLock() {
+        if (held()) {
+            CloseHandle(handle_);
+        }
+    }
+    SettingsFileLock(const SettingsFileLock&) = delete;
+    SettingsFileLock& operator=(const SettingsFileLock&) = delete;
+    [[nodiscard]] bool held() const { return handle_ != INVALID_HANDLE_VALUE; }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+};
+
+bool ReplaceSettingsOnce(const char* from, const char* to) {
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
+unsigned long ProcessId() {
+    return GetCurrentProcessId();
+}
+#else
+SettingsFileState ReadSettingsOnce(const char* path, std::string& text) {
+    const FilePtr file{std::fopen(path, "rb")};
+    if (!file) {
+        return errno == ENOENT ? SettingsFileState::Absent : SettingsFileState::Unreadable;
+    }
+    text.clear();
+    char chunk[SettingsReadChunk];
+    std::size_t got = 0;
+    while ((got = std::fread(chunk, 1, sizeof chunk, file.get())) > 0) {
+        text.append(chunk, got);
+    }
+    return std::ferror(file.get()) ? SettingsFileState::Unreadable : SettingsFileState::Read;
+}
+
+bool FlushToDisk(FILE* file) {
+    return fsync(fileno(file)) == 0;
+}
+
+bool FlushFolder(const char* path) {
+    std::string folder(path);
+    const auto slash = folder.find_last_of('/');
+    folder = slash == std::string::npos ? std::string(".") : folder.substr(0, slash == 0 ? 1 : slash);
+    const int handle = open(folder.c_str(), O_RDONLY | O_DIRECTORY);
+    if (handle < 0) {
+        return false;
+    }
+    const bool synced = fsync(handle) == 0;
+    return close(handle) == 0 && synced;
+}
+
+bool ReplaceSettingsOnce(const char* from, const char* to) {
+    return std::rename(from, to) == 0;
+}
+
+class SettingsFileLock {
+public:
+    explicit SettingsFileLock(const std::string& path) {
+        handle_ = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (handle_ < 0) {
+            return;
+        }
+        for (int attempt = 0; attempt < SettingsLockAttempts; ++attempt) {
+            if (attempt > 0) {
+                std::this_thread::sleep_for(SettingsRetryPause);
+            }
+            if (flock(handle_, LOCK_EX | LOCK_NB) == 0) {
+                locked_ = true;
+                return;
+            }
+        }
+    }
+    ~SettingsFileLock() {
+        if (handle_ >= 0) {
+            close(handle_);
+        }
+    }
+    SettingsFileLock(const SettingsFileLock&) = delete;
+    SettingsFileLock& operator=(const SettingsFileLock&) = delete;
+    [[nodiscard]] bool held() const { return locked_; }
+
+private:
+    int handle_ = -1;
+    bool locked_ = false;
+};
+
+unsigned long ProcessId() {
+    return static_cast<unsigned long>(getpid());
+}
+#endif
+
+SettingsFileText ReadSettingsFile(const char* path) {
+    SettingsFileText result;
+    for (int attempt = 0; attempt < SettingsReadAttempts; ++attempt) {
+        if (attempt > 0) {
+            std::this_thread::sleep_for(SettingsRetryPause);
+        }
+        result.state = ReadSettingsOnce(path, result.text);
+        if (result.state != SettingsFileState::Unreadable) {
+            return result;
+        }
+    }
+    result.text.clear();
+    return result;
+}
+
+std::string_view KeyOf(std::string_view line) {
+    const auto eq = line.find('=');
+    if (line.empty() || line.front() == '#' || eq == std::string_view::npos) {
+        return {};
+    }
+    std::string_view key = line.substr(0, eq);
+    const auto first = key.find_first_not_of(" \t");
+    if (first == std::string_view::npos) {
+        return {};
+    }
+    key.remove_prefix(first);
+    key = key.substr(0, key.find_last_not_of(" \t") + 1);
+    return key;
+}
+
+template <typename Visit>
+void ForEachSetting(std::string_view text, Visit&& visit) {
+    if (text.substr(0, Utf8Bom.size()) == Utf8Bom) {
+        text.remove_prefix(Utf8Bom.size());
+    }
+    std::size_t start = 0;
+    while (start < text.size()) {
+        auto end = text.find('\n', start);
+        if (end == std::string_view::npos) {
+            end = text.size();
+        }
+        std::string_view line = text.substr(start, end - start);
+        start = end + 1;
+        const auto last = line.find_last_not_of(" \t\r");
+        line = last == std::string_view::npos ? std::string_view{} : line.substr(0, last + 1);
+        const std::string_view key = KeyOf(line);
+        if (!key.empty()) {
+            visit(key, line.substr(line.find('=') + 1));
+        }
+    }
+}
+
+std::string MergeSettings(std::string_view before, const KeyList& keys) {
+    if (before.substr(0, Utf8Bom.size()) == Utf8Bom) {
+        before.remove_prefix(Utf8Bom.size());
+    }
+    std::string out;
+    std::vector<bool> written(keys.size());
+    std::size_t start = 0;
+    while (start < before.size()) {
+        auto end = before.find('\n', start);
+        if (end == std::string_view::npos) {
+            end = before.size();
+        }
+        std::string_view line = before.substr(start, end - start);
+        start = end + 1;
+        while (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        const std::string_view key = KeyOf(line);
+        const auto it = key.empty() ? keys.end()
+                                    : std::find_if(keys.begin(), keys.end(),
+                                                   [&](const auto& k) { return k.first == key; });
+        if (it != keys.end()) {
+            out += it->first + "=" + it->second + "\n";
+            written[std::size_t(it - keys.begin())] = true;
+            continue;
+        }
+        out.append(line);
+        out += '\n';
+    }
+    if (before.empty()) {
+        out = std::string(SettingsHeader) + "\n";
+    }
+    for (std::size_t k = 0; k < keys.size(); ++k) {
+        if (!written[k]) {
+            out += keys[k].first + "=" + keys[k].second + "\n";
+        }
+    }
+    return out;
+}
+
+bool WriteWholeFile(const std::string& path, std::string_view text) {
+    FilePtr file{std::fopen(path.c_str(), "wb")};
+    if (!file) {
+        return false;
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), file.get()) == text.size();
+    const bool flushed = std::fflush(file.get()) == 0 && FlushToDisk(file.get());
+    const bool closed = std::fclose(file.release()) == 0;
+    return written && flushed && closed;
+}
+
+bool WriteReplace(const char* target, std::string_view text) {
+    const std::string temporary = std::string(target) + "." + std::to_string(ProcessId()) + "." +
+                                  std::to_string(g_settings_temporaries.fetch_add(1, std::memory_order_relaxed)) +
+                                  ".tmp";
+    bool replaced = WriteWholeFile(temporary, text);
+    if (replaced) {
+        replaced = false;
+        for (int attempt = 0; attempt < SettingsReplaceAttempts && !replaced; ++attempt) {
+            if (attempt > 0) {
+                std::this_thread::sleep_for(SettingsRetryPause);
+            }
+            replaced = ReplaceSettingsOnce(temporary.c_str(), target);
+        }
+    }
+    if (!replaced) {
+        std::remove(temporary.c_str());
+        return false;
+    }
+    return FlushFolder(target);
+}
+
+bool Retryable(SaveResult result) {
+    return result == SaveResult::Unreadable || result == SaveResult::NotLocked || result == SaveResult::NotReplaced;
+}
+
+void NoteSaveResult(bool saved, const char* what) {
+    const bool failed_before = g_settings_write_failed.exchange(!saved, std::memory_order_relaxed);
+    if (!saved && !failed_before) {
+        std::printf("Settings: %s lantern.ini; it keeps what it had and the next save tries again\n", what);
+    } else if (saved && failed_before) {
+        std::printf("Settings: lantern.ini written again\n");
+    }
+}
+
+SaveResult SaveKeys(const KeyList& keys) {
+    const std::scoped_lock lock{g_save_store.mutex};
+    if (g_save_store.load_unreadable) {
+        NoteSaveResult(false, "did not read");
+        return SaveResult::LoadUnreadable;
+    }
+    const char* target = Path();
+    const SettingsFileLock file_lock{std::string(target) + ".lock"};
+    if (!file_lock.held()) {
+        g_settings_lock_failures.fetch_add(1, std::memory_order_relaxed);
+        NoteSaveResult(false, "cannot lock");
+        return SaveResult::NotLocked;
+    }
+    const SettingsFileText before = ReadSettingsFile(target);
+    if (before.state == SettingsFileState::Unreadable) {
+        g_settings_read_failures.fetch_add(1, std::memory_order_relaxed);
+        NoteSaveResult(false, "cannot read");
+        return SaveResult::Unreadable;
+    }
+    std::map<std::string, std::string, std::less<>> disk;
+    ForEachSetting(before.text, [&](std::string_view key, std::string_view value) {
+        disk.try_emplace(std::string(key), value);
+    });
+    KeyList write;
+    for (const auto& [key, value] : keys) {
+        const auto base = g_save_store.baseline.find(key);
+        const auto now = disk.find(key);
+        SavedKey late;
+        if (base == g_save_store.baseline.end()) {
+            const auto raw = g_save_store.raw.find(key);
+            late = raw != g_save_store.raw.end() ? SavedKey{raw->second, raw->second} : SavedKey{value, std::nullopt};
+        }
+        const SavedKey& saved = base != g_save_store.baseline.end() ? base->second : late;
+        const bool engine_changed = saved.loaded != value;
+        const bool untouched = now == disk.end() ? !saved.raw.has_value() : saved.raw == now->second;
+        if (engine_changed || untouched) {
+            write.emplace_back(key, value);
+        }
+    }
+    const std::string text = MergeSettings(before.text, write);
+    const bool same = before.state == SettingsFileState::Read && text == before.text;
+    if (!same) {
+        const bool backed_up = before.state != SettingsFileState::Read ||
+                               WriteReplace((std::string(target) + ".bak").c_str(), before.text);
+        if (!backed_up || !WriteReplace(target, text)) {
+            g_settings_replace_failures.fetch_add(1, std::memory_order_relaxed);
+            NoteSaveResult(false, "cannot write");
+            return SaveResult::NotReplaced;
+        }
+    }
+    for (const auto& [key, value] : write) {
+        g_save_store.baseline.insert_or_assign(key, SavedKey{value, value});
+    }
+    NoteSaveResult(true, "");
+    return same ? SaveResult::Unchanged : SaveResult::Written;
+}
+
+void SaveWorker() {
+    auto& queue = g_save_queue;
+    std::unique_lock lock{queue.mutex};
+    int attempt = 0;
+    while (true) {
+        queue.wake.wait(lock, [&] { return queue.pending; });
+        if (queue.fresh) {
+            queue.fresh = false;
+            attempt = 0;
+        }
+        KeyList keys = std::move(queue.keys);
+        queue.keys.clear();
+        queue.pending = false;
+        queue.busy = true;
+        lock.unlock();
+        const SaveResult result = SaveKeys(keys);
+        lock.lock();
+        if (Retryable(result) && attempt < SaveRetryAttempts) {
+            const auto delay = SaveRetryFirstDelay * (1 << attempt);
+            ++attempt;
+            queue.wake.wait_for(lock, delay, [&] { return queue.fresh; });
+            if (!queue.fresh) {
+                queue.keys = std::move(keys);
+            }
+            queue.pending = true;
+            continue;
+        }
+        if (Retryable(result)) {
+            g_settings_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        attempt = 0;
+        queue.busy = false;
+        if (!queue.pending) {
+            queue.idle.notify_all();
+        }
+    }
+}
+
+void LoadBaseline(const SettingsFileText& file) {
+    const std::scoped_lock lock{g_save_store.mutex};
+    g_save_store.load_unreadable = file.state == SettingsFileState::Unreadable;
+    g_save_store.baseline.clear();
+    g_save_store.raw.clear();
+    ForEachSetting(file.text, [&](std::string_view key, std::string_view value) {
+        g_save_store.raw.try_emplace(std::string(key), value);
+    });
+    for (auto& [key, value] : CurrentKeys()) {
+        const auto found = g_save_store.raw.find(key);
+        SavedKey saved{std::move(value), std::nullopt};
+        if (found != g_save_store.raw.end()) {
+            saved.raw = found->second;
+        }
+        g_save_store.baseline.insert_or_assign(key, std::move(saved));
+    }
+}
+
+} // namespace
+
 void SetValue(const std::string& key, const std::string& value) {
     Set(Get(), key, value);
 }
 
 std::string SavedValue(const char* key, const char* fallback) {
-    std::string found = fallback;
-    if (FILE* file = std::fopen(Path(), "r")) {
-        char line[512];
-        const std::size_t length = std::strlen(key);
-        while (std::fgets(line, sizeof line, file)) {
-            if (!std::strncmp(line, key, length) && line[length] == '=') {
-                found = line + length + 1;
-                while (!found.empty() && (found.back() == '\n' || found.back() == '\r')) {
-                    found.pop_back();
-                }
-                break;
-            }
+    std::optional<std::string> found;
+    const SettingsFileText file = ReadSettingsFile(Path());
+    ForEachSetting(file.text, [&](std::string_view name, std::string_view value) {
+        if (!found && name == key) {
+            found = std::string(value);
         }
-        std::fclose(file);
-    }
-    return found;
+    });
+    return found.value_or(fallback);
 }
 
 void Load() {
@@ -510,19 +988,16 @@ void Load() {
         }
         v.menu_language = LanguageOfLocale(lang);
     }
-    if (FILE* file = std::fopen(Path(), "r")) {
-        char line[256];
-        while (std::fgets(line, sizeof(line), file)) {
-            std::string text{line};
-            text.erase(text.find_last_not_of(" \t\r\n") + 1);
-            const auto eq = text.find('=');
-            if (text.empty() || text[0] == '#' || eq == std::string::npos) {
-                continue;
-            }
-            Set(v, text.substr(0, eq), text.substr(eq + 1));
-        }
-        std::fclose(file);
+    const SettingsFileText file = ReadSettingsFile(Path());
+    if (file.state == SettingsFileState::Read) {
+        ForEachSetting(file.text, [&](std::string_view key, std::string_view value) {
+            Set(v, std::string(key), std::string(value));
+        });
         std::printf("Settings: %s\n", Path());
+    } else if (file.state == SettingsFileState::Unreadable) {
+        g_settings_load_failures.fetch_add(1, std::memory_order_relaxed);
+        g_settings_write_failed.store(true, std::memory_order_relaxed);
+        std::printf("Settings: lantern.ini could not be read; the defaults are used and nothing is saved this run\n");
     }
     if (const char* env = std::getenv("BB_UPSCALER")) {
         v.upscaler = UpscalerOff;
@@ -569,6 +1044,7 @@ void Load() {
     v.startup_hdr = v.hdr;
     v.startup_optiscaler = {v.optiscaler_compat, v.optiscaler_ngx_lock, v.optiscaler_clean_thread,
                             v.optiscaler_sync_submit};
+    LoadBaseline(file);
 }
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss, bool fsr_sdk, bool fsr4_to_sdk,
@@ -629,9 +1105,11 @@ bool ResolutionNeedsRestart() {
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
 }
 
-void Save() {
+namespace {
+
+KeyList CurrentKeys() {
     const auto& v = Get();
-    std::vector<std::pair<std::string, std::string>> keys;
+    KeyList keys;
     const auto put = [&](const char* key, std::string value) { keys.emplace_back(key, std::move(value)); };
     const auto fixed = [](float value, int digits) {
         char text[32];
@@ -724,6 +1202,8 @@ void Save() {
     put("graphics_gi_strength",fixed(v.graphics_gi_strength,2));
     put("graphics_volumetric_intensity",fixed(v.graphics_volumetric_intensity,2));
     put("graphics_point_fog_intensity",fixed(v.graphics_point_fog_intensity,2));
+    put("graphics_point_fog_glow_size",fixed(PointFogGlowSize(v.graphics_point_fog_glow_size),3));
+    put("graphics_point_fog_falloff",std::to_string(std::clamp(v.graphics_point_fog_falloff.load(),0,1)));
     put("graphics_ssr_intensity",fixed(v.graphics_ssr_intensity,2));
     put("graphics_shadow_resolution",std::to_string(std::clamp(v.graphics_shadow_resolution.load(),0,2)));
     put("graphics_local_shadow_resolution",std::to_string(std::clamp(v.graphics_local_shadow_resolution.load(),0,2)));
@@ -773,52 +1253,59 @@ void Save() {
     }
 
     BbInputConfig::Append(keys);
-    std::string out;
-    bool had_lines = false;
-    std::vector<bool> written(keys.size());
-    if (FILE* file = std::fopen(Path(), "r")) {
-        char line[512];
-        while (std::fgets(line, sizeof(line), file)) {
-            had_lines = true;
-            std::string text{line};
-            text.erase(text.find_last_not_of("\r\n") + 1);
-            const auto eq = text.find('=');
-            if (!text.empty() && text[0] != '#' && eq != std::string::npos) {
-                std::string key = text.substr(0, eq);
-                key.erase(key.find_last_not_of(" \t") + 1);
-                key.erase(0, key.find_first_not_of(" \t"));
-                const auto it = std::find_if(keys.begin(), keys.end(),
-                                             [&](const auto& k) { return k.first == key; });
-                if (it != keys.end()) {
-                    out += it->first + "=" + it->second + "\n";
-                    written[size_t(it - keys.begin())] = true;
-                    continue;
-                }
-            }
-            out += text + "\n";
-        }
-        std::fclose(file);
+    return keys;
+}
+
+} // namespace
+
+void Save() {
+    KeyList keys = CurrentKeys();
+    auto& queue = g_save_queue;
+    std::call_once(queue.started, [] { std::thread(SaveWorker).detach(); });
+    {
+        const std::scoped_lock lock{queue.mutex};
+        queue.keys = std::move(keys);
+        queue.pending = true;
+        queue.fresh = true;
     }
-    if (!had_lines) {
-        out = "# Lantern Engine settings (in-game menu: Insert / L3+R3)\n";
-    }
-    for (size_t k = 0; k < keys.size(); ++k) {
-        if (!written[k]) {
-            out += keys[k].first + "=" + keys[k].second + "\n";
-        }
-    }
-    const std::string temporary = std::string(Path()) + ".tmp";
-    FILE* file = std::fopen(temporary.c_str(), "w");
-    bool ok = file && std::fwrite(out.data(), 1, out.size(), file) == out.size();
-    ok = file && std::fclose(file) == 0 && ok;
-#ifdef _WIN32
-    const bool replaced = ok && MoveFileExA(temporary.c_str(), Path(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    queue.wake.notify_one();
+}
+
+SaveResult SaveNow() {
+    return SaveKeys(CurrentKeys());
+}
+
+bool FlushSaves(std::chrono::milliseconds bound) {
+    auto& queue = g_save_queue;
+    std::unique_lock lock{queue.mutex};
+    return queue.idle.wait_for(lock, bound, [&] { return !queue.pending && !queue.busy; });
+}
+
+bool FlushForExit() {
+#ifdef LANTERN_MUTANT_NO_EXIT_FLUSH
+    (void)ExitSaveBound;
+    return true;
 #else
-    const bool replaced = ok && std::rename(temporary.c_str(), Path()) == 0;
-#endif
-    if (!replaced) {
-        std::printf("Settings: cannot write %s\n", Path());
+    if (FlushSaves(ExitSaveBound)) {
+        return true;
     }
+    std::printf("Settings: lantern.ini save still pending after %lld ms at exit\n",
+                static_cast<long long>(ExitSaveBound.count()));
+    std::fflush(stdout);
+    return false;
+#endif
+}
+
+bool LastSaveFailed() {
+    return g_settings_write_failed.load(std::memory_order_relaxed);
+}
+
+SaveFailures SaveFailureCounts() {
+    return {g_settings_read_failures.load(std::memory_order_relaxed),
+            g_settings_replace_failures.load(std::memory_order_relaxed),
+            g_settings_lock_failures.load(std::memory_order_relaxed),
+            g_settings_load_failures.load(std::memory_order_relaxed),
+            g_settings_dropped.load(std::memory_order_relaxed)};
 }
 
 float PresetScale(int preset) {
@@ -852,7 +1339,7 @@ int ModelPreset(int preset) {
 }
 
 bool DlssPresetValid(int preset) {
-    return preset == DlssPresetDefault || preset == 5 || preset == 6 || (preset >= 10 && preset <= 13);
+    return BbDlss::Offered(preset);
 }
 
 int DlssPresetFromText(const char* text) {
@@ -864,12 +1351,16 @@ int DlssPresetFromText(const char* text) {
     }
     const char letter = char(std::tolower(static_cast<unsigned char>(text[0])));
     if (letter >= 'a' && letter <= 'z' && text[1] == '\0') {
-        if (!DlssPresetValid(letter - 'a' + 1)) {
-            std::printf("Settings: DLSS preset '%s' is not in NVIDIA's DLSS 310.9 (E, F, J, K, L, M); k\n",
-                        text);
+        const int preset = letter - 'a' + 1;
+        if (BbDlss::Deprecated(preset)) {
+            std::printf("Settings: DLSS preset '%s' is deprecated by NVIDIA; auto\n", text);
+            return BbDlss::FromSaved(preset);
+        }
+        if (!DlssPresetValid(preset)) {
+            std::printf("Settings: DLSS preset '%s' is not in NVIDIA's DLSS 310.9 (J, K, L, M); k\n", text);
             return DlssPresetK;
         }
-        return letter - 'a' + 1;
+        return preset;
     }
     std::printf("Settings: unknown dlss_preset '%s' (expected default or a letter); k\n", text);
     return DlssPresetK;
@@ -891,4 +1382,8 @@ const char* UpscalerName(int upscaler) {
     return names[std::clamp(upscaler, 0, UpscalerCount - 1)];
 }
 
+}
+
+extern "C" void bbport_settings_flush_for_exit(void) {
+    BbSettings::FlushForExit();
 }

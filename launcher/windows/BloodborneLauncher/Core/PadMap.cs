@@ -52,6 +52,12 @@ namespace BloodborneLauncher.Core
             ["touchpad"] = "back, touchpad", ["touchpad_right"] = "misc2",
             ["up"] = "dpup", ["down"] = "dpdown", ["left"] = "dpleft", ["right"] = "dpright",
             ["menu_confirm"] = "", ["menu_back"] = "",
+            ["dodge"] = "", ["backstep"] = "", ["sprint"] = "",
+        };
+
+        private static readonly Dictionary<string, string> InputOfName = new()
+        {
+            ["dodge"] = "dodge", ["backstep"] = "backstep", ["sprint"] = "sprint",
         };
 
         public static IEnumerable<string> Inputs => Defaults.Keys;
@@ -64,7 +70,17 @@ namespace BloodborneLauncher.Core
         public static bool IsMenu(string input) => input.StartsWith("menu_", StringComparison.Ordinal);
 
         public static string? InputFor(ControlDef control) =>
-            control.Pad != null && InputOfLabel.TryGetValue(control.Pad, out var input) ? input : null;
+            InputOfName.TryGetValue(control.Name, out var own) ? own
+            : control.Pad != null && InputOfLabel.TryGetValue(control.Pad, out var input) ? input : null;
+
+        public static bool IsSplit(string input) => InputOfName.ContainsValue(input);
+
+        public static string SplitTip(string input) => input switch
+        {
+            "dodge" => L.T("A controller button of its own for Dodge, like the keyboard key: it taps Circle for one game frame, also out of a sprint. Not set: Circle (Dodge / sprint) does it. Needs PC controls on. Click, then press a button on the pad."),
+            "backstep" => L.T("A controller button of its own for Backstep, like the keyboard key: it taps Circle with the left stick let go, so the hunter steps back at once. Not set: Circle (Dodge / sprint) does it. Needs PC controls on. Click, then press a button on the pad."),
+            _ => L.T("A controller button of its own for Sprint, like the keyboard key: it sprints at once without the game's 0.4 s wait and never dodges, while held. Not set: Circle (Dodge / sprint) does it. Needs PC controls on. Click, then press a button on the pad."),
+        };
 
         private static string Key(string input) => "pad." + input;
 

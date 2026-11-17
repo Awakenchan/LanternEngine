@@ -12,6 +12,8 @@
 #include <cstring>
 #include <magic_enum/magic_enum.hpp>
 #include "engine/gx_objects.h"
+#include "engine/gx_sealed.h"
+#include "engine/vram_evict.h"
 #include "bbport_copy.h"
 #include "bbport_platform.h"
 #include "bbport_toggles.h"
@@ -32,6 +34,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_submit_result.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <mutex>
@@ -47,6 +50,9 @@ extern "C" int runtime_memory_direct_phys(uintptr_t address, uint64_t* phys, uin
 namespace VideoCore {
 
 namespace {
+
+constexpr u32 kFullAfterFailureSeconds = 30;
+
 // bbport: the tick of the newest GPU write per 64 KiB of guest memory, per 1 MiB for writes over
 // 16 MiB (ObtainBuffer with is_written: the only place ranges become GPU-modified). A readback
 // waits for that submission only and copies on the readback queue, not behind the queued
@@ -290,6 +296,13 @@ u64 TwinsMaxBytes() {
         return env ? std::strtoull(env, nullptr, 10) : 1024ull;
     }();
     return max_bytes;
+}
+bool TwinEvict() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("LANTERN_TWIN_EVICT");
+        return env && env[0] == '1';
+    }();
+    return enabled;
 }
 std::mutex twins_mutex;
 std::map<VAddr, std::vector<u8>> twins; ///< start -> guest bytes when the twin was made
@@ -595,6 +608,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                         "(BB_EVACUATE_IN_USE=1)\n");
         }
     }
+    if (TwinsEnabled()) {
+        std::printf("Guest memory: idle VRAM cleanup with GPU write twins on: %s (LANTERN_TWIN_EVICT=%d)\n",
+                    TwinEvict() ? "blocks without twins are evicted" : "count only, nothing is evicted",
+                    TwinEvict() ? 1 : 0);
+    }
     // bbport BB_DEFER_PROTECT: an upload's write protection may wait for its copy only where every
     // upload is a CPU copy of whole pages (not the GPU reading guest chunks, not twins keeping
     // parts) and no read watchers exist (precise readbacks).
@@ -793,7 +811,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                             });
                         });
                 }
-                MarkCpuModified(device_addr, size);
+                MarkCpuModified(device_addr, size, CpuModifiedBy::Fault);
                 twin_faults.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -815,7 +833,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         }
         DownloadMemory(arena, download_start, download_end - download_start);
         if (is_write) {
-            MarkCpuModified(device_addr, size);
+            MarkCpuModified(device_addr, size, CpuModifiedBy::Fault);
         }
     };
     if (assume_locks) {
@@ -1045,8 +1063,11 @@ bool BufferCache::TryCompare() {
     return on;
 }
 
-void BufferCache::MarkCpuModified(VAddr address, u64 size) {
-    BbEngine::GxObjects::NoteCpuWrite(address, size);
+void BufferCache::MarkCpuModified(VAddr address, u64 size, CpuModifiedBy by) {
+    namespace Sealed = BbEngine::GxSealed;
+    static constexpr Sealed::Retired kRetiredBy[] = {Sealed::ByCpuWrite, Sealed::ByFault,    Sealed::ByAsset,    Sealed::ByImageStore,
+                                                     Sealed::ByEviction, Sealed::ByDemotion, Sealed::ByCopyBack, Sealed::ByPromotion};
+    BbEngine::GxObjects::NoteCpuWrite(address, size, kRetiredBy[static_cast<u8>(by)]);
     memory_tracker->MarkRegionAsCpuModified(address, size);
 }
 
@@ -1055,11 +1076,27 @@ bool BufferCache::StillClean(VAddr address, u64 size, bool in_place) noexcept {
 }
 
 bool BufferCache::MemoAllowed() const noexcept {
+    return MemoRefusal() == MemoGate::Open;
+}
+
+BufferCache::MemoGate BufferCache::MemoRefusal() const noexcept {
     static const bool shadows = [] {
         const char* env = std::getenv("BB_SHADOWS");
         return env && env[0] == '1';
     }();
-    return !shadows && !hle_obtain && !ChunkBuffers() && !BufferStatsEnabled();
+    if (shadows) {
+        return MemoGate::Shadows;
+    }
+    if (hle_obtain) {
+        return MemoGate::HleObtain;
+    }
+    if (ChunkBuffers()) {
+        return MemoGate::ChunkBuffers;
+    }
+    if (BufferStatsEnabled()) {
+        return MemoGate::BufferStats;
+    }
+    return MemoGate::Open;
 }
 
 BufferCache::TryRead BufferCache::TryObtainRead(VAddr device_addr, u32 size, StreamSlice* slice,
@@ -1470,6 +1507,10 @@ bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionCpuModified(addr, size);
 }
 
+bool BufferCache::IsRegionGpuWrittenTracked(VAddr addr, size_t size) {
+    return memory_tracker->IsRegionGpuModified(addr, size);
+}
+
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     if (memory_tracker->IsRegionGpuModified(addr, size)) {
         return true;
@@ -1551,6 +1592,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 total_size = first_size + last_size;
     const u64 end_block = (first_addr + total_size) >> block_shift;
     auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
+    BbEngine::GxObjects::NoteCpuWrite(first_addr, total_size, BbEngine::GxSealed::ByEviction);
     std::printf("Guest memory: arena migrated to [%#llx, %#llx) at GPU address %#llx\n",
                 static_cast<unsigned long long>(first_addr),
                 static_cast<unsigned long long>(first_addr + total_size),
@@ -1793,7 +1835,7 @@ std::pair<vk::DeviceMemory, u64> BufferCache::AllocateResidency(u64 bytes) {
             if (const auto memory = try_allocate(size, arena_memory_type_index)) {
                 return memory;
             }
-            vram_full_until = now + 30;
+            vram_full_until = now + kFullAfterFailureSeconds;
             vram_level.store(2, std::memory_order_relaxed);
             std::printf("Guest memory: out of VRAM for %llu MiB of the game's data\n",
                         (unsigned long long)(size >> 20));
@@ -1892,6 +1934,18 @@ void BufferCache::UpdateVramLevel(u32 now) {
         budget = instance.GetDeviceMemoryBudgetNow();
         if (budget != 0) {
             level = used * 100 >= budget * (percent + 5) ? 2 : used * 100 >= budget * percent ? 1 : 0;
+        }
+    }
+    const u32 relief = Vulkan::SubmitResult::EngineRetries().relief_requests.load(
+        std::memory_order_relaxed);
+    if (relief != oom_relief_seen) {
+        oom_relief_seen = relief;
+        vram_full_until = now + kFullAfterFailureSeconds;
+        if (oom_relief_reports < Vulkan::SubmitResult::kMaxReliefLines) {
+            ++oom_relief_reports;
+            std::printf("Guest memory: a GPU submission ran out of memory: VRAM counts as full "
+                        "for %u s\n",
+                        kFullAfterFailureSeconds);
         }
     }
     if (now < vram_full_until) {
@@ -2026,7 +2080,7 @@ void BufferCache::EvictVramBlock(u64 block) {
     resident_ranges.Subtract(block, block + 1);
     memory_tracker->UnmarkRegionAsGpuModified(address, block_size);
     gpu_modified_ranges.Subtract(address, block_size);
-    MarkCpuModified(address, block_size);
+    MarkCpuModified(address, block_size, CpuModifiedBy::Eviction);
     ReleaseResidencySlot(memory, offset);
     // After the work submitted so far: it may still read the block.
     bind_wait_tick = std::max(bind_wait_tick, scheduler.CurrentTick() - 1);
@@ -2119,14 +2173,27 @@ void BufferCache::ProcessIdleBlocks() {
     FreeEmptyChunks(now);
 }
 
+namespace {
+constexpr u32 kTwinKeptReportSeconds = 60;
+std::atomic<u64> idle_evicted_blocks{0}, idle_kept_twin_scans{0}, idle_would_evict_scans{0};
+std::atomic<u32> twin_kept_reports{0}, twin_kept_second{0}, twin_count_scan_second{0};
+}
+
 void BufferCache::EvictIdleCopies(u32 now) {
     // bbport: without the PC memory model (it needs an AMD GPU) every block of the game's memory
     // the GPU used kept its VRAM copy, and a 4 GB card ran out (exit 23). While VRAM is tight the
     // copies unused for a while go. Kept: blocks with data the GPU wrote (only VRAM has it), and
     // all of them while shaders read the game's memory through the page table (dma_second).
     const int level = vram_level.load(std::memory_order_relaxed);
-    if (TwinsEnabled()) {
+    const bool twins_on = TwinsEnabled();
+    const auto scan = BbEngine::VramEvict::PlanScan(
+        twins_on, twins_on && TwinEvict(), now, twin_count_scan_second.load(std::memory_order_relaxed),
+        twin_kept_reports.load(std::memory_order_relaxed));
+    if (scan == BbEngine::VramEvict::Scan::Skip) {
         return;
+    }
+    if (scan == BbEngine::VramEvict::Scan::CountOnly) {
+        twin_count_scan_second.store(now, std::memory_order_relaxed);
     }
     // Longer than the PC memory model's 15 s and 3 s: an evicted block costs an upload and can show
     // as late geometry when it comes back.
@@ -2157,7 +2224,16 @@ void BufferCache::EvictIdleCopies(u32 now) {
         }
         return;
     }
+    std::vector<u64> twin_blocks;
+    if (twins_on) {
+        std::scoped_lock lk{twins_mutex};
+        for (const auto& [start, bytes] : twins) {
+            BbEngine::VramEvict::AddTwinBlocks(twin_blocks, start, bytes.size(), block_shift);
+        }
+    }
+    BbEngine::VramEvict::SortTwinBlocks(twin_blocks);
     std::vector<u64> blocks;
+    u64 kept_for_twins = 0;
     for (const auto& range : resident_ranges) {
         if (!residency_chunks.contains(static_cast<VkDeviceMemory>(range.memory))) {
             continue;
@@ -2165,12 +2241,48 @@ void BufferCache::EvictIdleCopies(u32 now) {
         for (u64 block = range.start; block < range.end; ++block) {
             const VAddr address = block << block_shift;
             const u64 group = std::min<u64>(address >> USE_GROUP_BITS, group_use.size() - 1);
-            if (now - group_use[group] < idle || gpu_modified_ranges.Intersects(address, block_size) ||
-                memory_tracker->IsRegionGpuModified(address, block_size)) {
-                continue;
+            const auto verdict = BbEngine::VramEvict::Decide(
+                now, group_use[group], idle,
+                [&] { return BbEngine::VramEvict::HasTwin(twin_blocks, block); },
+                [&] {
+                    return gpu_modified_ranges.Intersects(address, block_size) ||
+                           memory_tracker->IsRegionGpuModified(address, block_size);
+                });
+            if (verdict == BbEngine::VramEvict::Verdict::KeepTwin) {
+                ++kept_for_twins;
+            } else if (verdict == BbEngine::VramEvict::Verdict::Evict) {
+                blocks.push_back(block);
             }
-            blocks.push_back(block);
         }
+    }
+    idle_kept_twin_scans.fetch_add(kept_for_twins, std::memory_order_relaxed);
+    if (!BbEngine::VramEvict::MayEvict(scan)) {
+        idle_would_evict_scans.fetch_add(blocks.size(), std::memory_order_relaxed);
+        if ((kept_for_twins != 0 || !blocks.empty()) &&
+            twin_kept_reports.load(std::memory_order_relaxed) < BbEngine::VramEvict::kTwinReportCap &&
+            now - twin_kept_second.load(std::memory_order_relaxed) >= kTwinKeptReportSeconds) {
+            twin_kept_reports.fetch_add(1, std::memory_order_relaxed);
+            twin_kept_second.store(now, std::memory_order_relaxed);
+            std::printf("Guest memory: count only (LANTERN_TWIN_EVICT=0): %llu blocks unused for %u s "
+                        "would leave VRAM, %llu stay for GPU write twins (block-scans so far: %llu "
+                        "would leave, %llu kept for twins)\n",
+                        (unsigned long long)blocks.size(), idle, (unsigned long long)kept_for_twins,
+                        (unsigned long long)idle_would_evict_scans.load(std::memory_order_relaxed),
+                        (unsigned long long)idle_kept_twin_scans.load(std::memory_order_relaxed));
+        }
+        return;
+    }
+    idle_evicted_blocks.fetch_add(blocks.size(), std::memory_order_relaxed);
+    if (kept_for_twins != 0 &&
+        twin_kept_reports.load(std::memory_order_relaxed) < BbEngine::VramEvict::kTwinReportCap &&
+        now - twin_kept_second.load(std::memory_order_relaxed) >= kTwinKeptReportSeconds) {
+        twin_kept_reports.fetch_add(1, std::memory_order_relaxed);
+        twin_kept_second.store(now, std::memory_order_relaxed);
+        std::printf("Guest memory: %llu blocks unused for %u s stay in VRAM for GPU write twins "
+                    "(so far: block-scans kept for twins %llu, blocks evicted %llu)\n",
+                    (unsigned long long)kept_for_twins, idle,
+                    (unsigned long long)idle_kept_twin_scans.load(std::memory_order_relaxed),
+                    (unsigned long long)idle_evicted_blocks.load(std::memory_order_relaxed));
     }
     if (blocks.empty()) {
         return;
@@ -2196,9 +2308,11 @@ void BufferCache::EvictIdleCopies(u32 now) {
         (evicted_bytes == bytes || (evicted_bytes >> 28) != ((evicted_bytes - bytes) >> 28))) {
         ++evict_reports;
         std::printf("Guest memory: %s%llu MiB of the game's data unused for %u s left VRAM "
-                    "so far (uploaded again when used)\n",
+                    "so far (uploaded again when used; blocks evicted %llu, block-scans kept for twins %llu)\n",
                     level == 0 ? "cleanup, " : "VRAM tight, ",
-                    (unsigned long long)(evicted_bytes >> 20), idle);
+                    (unsigned long long)(evicted_bytes >> 20), idle,
+                    (unsigned long long)idle_evicted_blocks.load(std::memory_order_relaxed),
+                    (unsigned long long)idle_kept_twin_scans.load(std::memory_order_relaxed));
     }
 }
 
@@ -2428,7 +2542,7 @@ void BufferCache::ProcessDemotions() {
         // Its uploads up to `tick` land in the VRAM copy first; the rebind waits for them.
         bind_wait_tick = std::max(bind_wait_tick, tick);
         // Never uploaded or protected again: writes go to the memory the GPU reads.
-        MarkCpuModified(address, block_size);
+        MarkCpuModified(address, block_size, CpuModifiedBy::Demotion);
         if (idle) {
             BbStats::vram_idle_bytes.fetch_add(block_size, std::memory_order_relaxed);
             idle_demoted.Add({block, block + 1});
@@ -2827,7 +2941,7 @@ void BufferCache::ProcessPendingAssets() {
                     }
                     demotions_waiting.push_back({block, scheduler.CurrentTick(), false});
                 }
-                MarkCpuModified(from, to - from);
+                MarkCpuModified(from, to - from, CpuModifiedBy::Asset);
             }
             continue;
         }
@@ -3144,7 +3258,7 @@ void BufferCache::QueueCopyBacks(u64 submitted) {
         }
         memory_tracker->UnmarkRegionAsGpuModified(address, block_size);
         gpu_modified_ranges.Subtract(address, block_size);
-        MarkCpuModified(address, block_size);
+        MarkCpuModified(address, block_size, CpuModifiedBy::CopyBack);
         BbStats::copied_back_blocks.fetch_add(1, std::memory_order_relaxed);
         demoted_by[DemoteCopiedBack] += block_size;
         moved = true;
@@ -3204,7 +3318,11 @@ void BufferCache::QueuePromotions(u64 submitted) {
                 });
             }
         }
-        MarkCpuModified(address, block_size);
+        MarkCpuModified(address, block_size, CpuModifiedBy::Promotion);
+        if (block_shift <= USE_GROUP_BITS) {
+            const VAddr group = VAddr(1) << USE_GROUP_BITS;
+            BbEngine::GxObjects::NoteCpuWrite(address & ~(group - 1), group, BbEngine::GxSealed::ByPromotion);
+        }
         moved += block_size;
     }
     promote_source.clear();
@@ -3283,6 +3401,7 @@ void BufferCache::ProcessPendingUnmaps() {
         });
         for (const auto& range : unbind) {
             const VAddr from = range.start << block_shift, to = range.end << block_shift;
+            BbEngine::GxObjects::NoteCpuWrite(from, to - from, BbEngine::GxSealed::ByEviction);
             for (const auto& arena : arenas) {
                 const VAddr a = std::max<VAddr>(from, arena.cpu_addr);
                 const VAddr b = std::min<VAddr>(to, arena.cpu_addr + arena.size_bytes);
@@ -3866,10 +3985,17 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
             .pSignalSemaphores = &signal_sema,
         };
         const auto bind_start = std::chrono::steady_clock::now();
-        auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
+        const auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
         const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                            std::chrono::steady_clock::now() - bind_start)
                            .count();
+        Vulkan::SubmitResult::EngineSink sink;
+        if (Vulkan::SubmitResult::Handle(Vulkan::SubmitResult::Site::SparseBind,
+                                         static_cast<std::int32_t>(submit_result),
+                                         Vulkan::SubmitResult::EngineReports(),
+                                         sink) != Vulkan::SubmitResult::Outcome::Submitted) {
+            return;
+        }
         u64 ranges = 0;
         for (const auto& arena_binds : *binds) {
             ranges += arena_binds.binds.size();
@@ -3881,10 +4007,6 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
         for (u64 longest = bind_max_ns.load(std::memory_order_relaxed);
              ns > longest && !bind_max_ns.compare_exchange_weak(longest, ns);) {
         }
-        if (submit_result == vk::Result::eErrorDeviceLost) {
-            Vulkan::Breadcrumbs::ReportDeviceLost("submit");
-        }
-        ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
     });
     QueueCopyBacks(submitted); // bound with the next submission
     QueuePromotions(submitted);

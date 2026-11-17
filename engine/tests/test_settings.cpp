@@ -9,6 +9,14 @@
 #include <string>
 #include "gpu/shim/bbport_settings.h"
 
+static void SaveAndWait() {
+    BbSettings::Save();
+    if (!BbSettings::FlushSaves(std::chrono::seconds(10))) {
+        std::fprintf(stderr, "settings-test: the save worker did not finish\n");
+        std::abort();
+    }
+}
+
 static std::string Read(const char* path) {
     std::ifstream file(path);
     std::stringstream text;
@@ -41,7 +49,7 @@ int main() {
     s.menu_x = 0.625f;
     s.menu_y = 0.125f;
     s.fullscreen = true;
-    BbSettings::Save();
+    SaveAndWait();
 
     const std::string saved = Read(path);
     assert(saved.find("# launcher\nupscaler=fsr411\nkey.cross=X, Space\npad.circle=a\nshow_fps=1\n"
@@ -60,7 +68,7 @@ int main() {
     assert(s.startup_ao_quality == 1);
     s.graphics_ao_quality = 1;
     s.upscaler = BbSettings::UpscalerDlss;
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("upscaler=dlss\n") != std::string::npos);
     assert(Read(path).find("key.cross=X, Space\n") != std::string::npos);
     BbSettings::ConfigureUpscalerSupport(false, false, false);
@@ -69,7 +77,7 @@ int main() {
     BbSettings::ConfigureUpscalerSupport(false, false, true);
     assert(s.upscaler == BbSettings::UpscalerDlss && s.dlss_supported);
     s.upscaler = BbSettings::UpscalerXess;
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("upscaler=xess\n") != std::string::npos);
     s.upscaler = BbSettings::UpscalerOff;
     BbSettings::Load();
@@ -89,7 +97,7 @@ int main() {
     s.camera_fov_scale = 1.25f;
     s.camera_distance_scale = 0.80f;
     s.camera_height_scale = 1.10f;
-    BbSettings::Save();
+    SaveAndWait();
     s.camera_controls = false;
     s.camera_fov_scale = s.camera_distance_scale = s.camera_height_scale = 1.0f;
     BbSettings::Load();
@@ -97,30 +105,73 @@ int main() {
     assert(s.camera_distance_scale == 0.80f && s.camera_height_scale == 1.10f);
     s.change_appearance=true;s.rebirth=true;s.graphics_controls=true;
     s.graphics_bloom=0.7f;s.graphics_shadow_scale=1.4f;
-    BbSettings::Save();
-    s.rebirth=false;s.graphics_bloom=1.0f;
+    assert(s.graphics_point_fog_glow_size == 0.08f);
+    s.graphics_point_fog_glow_size = 0.15f;
+    SaveAndWait();
+    assert(Read(path).find("graphics_point_fog_glow_size=0.150\n") != std::string::npos);
+    s.rebirth=false;s.graphics_bloom=1.0f;s.graphics_point_fog_glow_size=0.08f;
     BbSettings::Load();
     assert(s.change_appearance && s.rebirth && s.graphics_controls && s.graphics_bloom==0.7f && s.graphics_shadow_scale==1.4f);
+    assert(s.graphics_point_fog_glow_size == 0.15f);
     for (const auto& [input, expected] :
          {std::pair{"0", 0}, {"1", 1}, {"-1", 0}, {"2", 0}, {"nan", 0}, {"1bad", 0}}) {
         { std::ofstream file(path); file << "graphics_ao_quality=" << input << "\n"; }
         BbSettings::Load();
         assert(s.graphics_ao_quality == expected && s.startup_ao_quality == expected);
-        BbSettings::Save();
+        SaveAndWait();
         assert(Read(path).find("graphics_ao_quality=" + std::to_string(expected) + "\n") !=
                std::string::npos);
     }
     for (int e = BbSettings::EffectFirstLighting; e < BbSettings::EffectCount; ++e) {
         assert(!BbSettings::Effects[e].default_on);
     }
-    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\ngraphics_volumetric_intensity=nan\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
+    { std::ofstream file(path); file << "effect_gi=1\ngraphics_gi_strength=99\ngraphics_ssr_intensity=-1\ngraphics_volumetric_intensity=nan\ngraphics_point_fog_glow_size=9\ngraphics_shadow_resolution=9\ngraphics_motion_blur_quality=1\n"; }
     BbSettings::Load();
     assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_ssr_intensity == 0.0f);
     assert(s.graphics_volumetric_intensity == 1.0f && s.graphics_shadow_resolution == 2);
+    assert(s.graphics_point_fog_glow_size == 0.20f);
     assert(s.startup_motion_blur_quality == 1 && s.startup_effects[BbSettings::EffectGi]);
-    BbSettings::Save();
+    SaveAndWait();
     BbSettings::Load();
     assert(s.effects[BbSettings::EffectGi] && s.graphics_gi_strength == 12.0f && s.graphics_shadow_resolution == 2);
+    s.graphics_point_fog_falloff = BbSettings::PointFogFalloffClassic;
+    s.graphics_point_fog_glow_size = BbSettings::PointFogGlowSizeDefault;
+    { std::ofstream file(path); file << "graphics_bloom=1.00\n"; }
+    BbSettings::Load();
+    assert(s.graphics_point_fog_falloff == BbSettings::PointFogFalloffClassic);
+    SaveAndWait();
+    assert(Read(path).find("graphics_point_fog_falloff=0\n") != std::string::npos);
+    assert(Read(path).find("graphics_point_fog_glow_size=0.080\n") != std::string::npos);
+    s.graphics_point_fog_falloff = BbSettings::PointFogFalloffInverseSquare;
+    s.graphics_point_fog_glow_size = 0.12f;
+    SaveAndWait();
+    assert(Read(path).find("graphics_point_fog_falloff=1\n") != std::string::npos);
+    assert(Read(path).find("graphics_point_fog_glow_size=0.120\n") != std::string::npos);
+    s.graphics_point_fog_falloff = BbSettings::PointFogFalloffClassic;
+    s.graphics_point_fog_glow_size = BbSettings::PointFogGlowSizeDefault;
+    BbSettings::Load();
+    assert(s.graphics_point_fog_falloff == BbSettings::PointFogFalloffInverseSquare);
+    assert(s.graphics_point_fog_glow_size == 0.12f);
+    s.graphics_point_fog_falloff = BbSettings::PointFogFalloffClassic;
+    SaveAndWait();
+    s.graphics_point_fog_falloff = BbSettings::PointFogFalloffInverseSquare;
+    BbSettings::Load();
+    assert(s.graphics_point_fog_falloff == BbSettings::PointFogFalloffClassic);
+    for (const char* input : {"2", "-1", "nan", "1bad", ""}) {
+        s.graphics_point_fog_falloff = BbSettings::PointFogFalloffInverseSquare;
+        { std::ofstream file(path); file << "graphics_point_fog_falloff=" << input << "\n"; }
+        BbSettings::Load();
+        assert(s.graphics_point_fog_falloff == BbSettings::PointFogFalloffClassic);
+    }
+    for (const auto& [input, expected] :
+         {std::pair{"nan", 0.08f}, {"inf", 0.20f}, {"-inf", 0.03f}, {"-5", 0.03f}, {"0.1", 0.1f}}) {
+        { std::ofstream file(path); file << "graphics_point_fog_glow_size=" << input << "\n"; }
+        BbSettings::Load();
+        assert(s.graphics_point_fog_glow_size == expected);
+    }
+    static_assert(BbSettings::PointFogGlowSize(1e30f) == BbSettings::PointFogGlowSizeMax);
+    static_assert(BbSettings::PointFogGlowSize(-1e30f) == BbSettings::PointFogGlowSizeMin);
+    static_assert(BbSettings::PointFogGlowSize(0.05f) == 0.05f);
     { std::ofstream file(path); file << "camera_fov_scale=nan\ncamera_distance_scale=-10\ncamera_height_scale=inf\n"; }
     BbSettings::Load();
     assert(s.camera_fov_scale == 1.0f && s.camera_distance_scale == 0.5f && s.camera_height_scale == 1.0f);
@@ -129,7 +180,7 @@ int main() {
     assert(s.menu_language == BbSettings::MenuLanguage::PortugueseBrazil);
     assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Fechar");
     assert(std::string(BbSettings::MenuText("Not in the tables", "x")) == "Not in the tables");
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("menu_language=pt_BR\n") != std::string::npos);
     s.menu_language = BbSettings::MenuLanguage::Turkish;
     assert(std::string(BbSettings::MenuText("Close", "Закрыть")) == "Kapat");
@@ -138,13 +189,13 @@ int main() {
     { std::ofstream file(path); file << "cheat_vials=infinite\ncheat_bullets=50\n"; }
     BbSettings::Load();
     assert(s.cheat_vials == BbSettings::CheatInfinite && s.cheat_bullets == 50);
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("cheat_vials=infinite\n") != std::string::npos);
     assert(Read(path).find("cheat_bullets=50\n") != std::string::npos);
     { std::ofstream file(path); file << "cheat_vials=100\ncheat_bullets=lots\n"; }
     BbSettings::Load();
     assert(s.cheat_vials == BbSettings::CheatOff && s.cheat_bullets == BbSettings::CheatOff);
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("cheat_vials=off\n") != std::string::npos);
     assert(Read(path).find("cheat_gun_range=off\n") != std::string::npos);
     assert(Read(path).find("cheat_echo_multiplier=1\n") != std::string::npos);
@@ -157,7 +208,7 @@ int main() {
     BbSettings::Load();
     assert(s.cheat_stamina && s.cheat_stealth && s.cheat_keep_echoes && s.cheat_no_durability && s.cheat_consumables);
     assert(s.cheat_gun_range == 200 && s.cheat_echo_multiplier == 5);
-    BbSettings::Save();
+    SaveAndWait();
     for (const char* line : {"cheat_stamina=1\n", "cheat_stealth=1\n", "cheat_gun_range=200\n", "cheat_keep_echoes=1\n",
                              "cheat_echo_multiplier=5\n", "cheat_no_durability=1\n", "cheat_consumables=1\n"}) {
         assert(Read(path).find(line) != std::string::npos);
@@ -176,7 +227,7 @@ int main() {
     { std::ofstream file(path); file << "cheat_gun_range=off\ncheat_echo_multiplier=x2\n"; }
     BbSettings::Load();
     assert(s.cheat_gun_range == 0 && s.cheat_echo_multiplier == 1);
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("cheat_gun_range=off\n") != std::string::npos);
     assert(Read(path).find("cheat_echo_multiplier=1\n") != std::string::npos);
     assert(Read(path).find("hdr=0\n") != std::string::npos);
@@ -190,7 +241,7 @@ int main() {
     BbSettings::Load();
     assert(s.hdr && s.startup_hdr && s.hdr_paper_white == 250.0f && s.hdr_peak == 4000.0f &&
            s.hdr_boost == 0.75f && s.hdr_mode == BbSettings::HdrModeExpand);
-    BbSettings::Save();
+    SaveAndWait();
     for (const char* line : {"hdr=1\n", "hdr_paper_white=250\n", "hdr_peak=4000\n", "hdr_boost=0.75\n",
                              "hdr_mode=expand\n"}) {
         assert(Read(path).find(line) != std::string::npos);
@@ -243,15 +294,15 @@ int main() {
     s.hdr_peak_auto = false;
     s.hdr_display_peak = 450.0f;
     assert(BbSettings::HdrPeakNits(s) == 800.0f);
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("hdr_peak_auto=0\n") != std::string::npos);
     { std::ofstream file(path); file << "hdr_peak_auto=1\n"; }
     BbSettings::Load();
     assert(s.hdr_peak_auto);
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("hdr_peak_auto=1\n") != std::string::npos);
     s.hdr_compare = true;
-    BbSettings::Save();
+    SaveAndWait();
     assert(Read(path).find("hdr_compare") == std::string::npos);
     s.hdr_compare = false;
     s.hdr_display_peak = 0.0f;
@@ -260,13 +311,13 @@ int main() {
         file << "dlss_preset=e\ndlss_mip_bias=0\noptiscaler_compat=0\noptiscaler_sync_submit=1\n";
     }
     BbSettings::Load();
-    assert(s.dlss_preset == 5 && !s.dlss_mip_bias && !s.optiscaler_compat &&
+    assert(s.dlss_preset == BbSettings::DlssPresetAuto && !s.dlss_mip_bias && !s.optiscaler_compat &&
            s.optiscaler_sync_submit == BbSettings::OptiSubmitOn);
     assert(!s.startup_optiscaler.compat && s.startup_optiscaler.sync_submit == BbSettings::OptiSubmitOn);
     s.dlss_preset = BbSettings::DlssPresetDefault;
     s.optiscaler_compat = true;
     s.optiscaler_sync_submit = BbSettings::OptiSubmitAuto;
-    BbSettings::Save();
+    SaveAndWait();
     {
         const std::string text = Read(path);
         assert(text.find("dlss_preset=default\n") != std::string::npos);
@@ -291,7 +342,9 @@ int main() {
     assert(std::string(BbSettings::DlssPresetText(BbSettings::DlssPresetDefault)) == "default");
     assert(BbSettings::DlssPresetFromText("a") == BbSettings::DlssPresetK);
     assert(BbSettings::DlssPresetFromText("h") == BbSettings::DlssPresetK);
-    assert(BbSettings::DlssPresetFromText("j") == 10 && BbSettings::DlssPresetFromText("f") == 6);
+    assert(BbSettings::DlssPresetFromText("j") == 10 && BbSettings::DlssPresetFromText("f") == BbSettings::DlssPresetAuto);
+    assert(BbSettings::DlssPresetFromText("E") == BbSettings::DlssPresetAuto);
+    assert(BbSettings::DlssPresetFromText("l") == BbSettings::DlssPresetL);
     {
         std::ofstream file(path);
         file << "frame_gen=dlss\nframe_gen_frames=9\nreflex=boost\npreset=5\nrender_scale=1.3\n"
@@ -307,7 +360,7 @@ int main() {
     assert(BbSettings::ModelPreset(BbSettings::Performance) == BbSettings::Performance);
     s.render_scale = 1.1f;
     assert(BbSettings::ModelPreset(BbSettings::PresetCustom) == BbSettings::NativeAA);
-    BbSettings::Save();
+    SaveAndWait();
     {
         const std::string text = Read(path);
         assert(text.find("frame_gen=dlss\n") != std::string::npos);
@@ -321,6 +374,33 @@ int main() {
     BbSettings::Load();
     assert(s.frame_gen == BbSettings::FrameGenFsr3 && s.reflex == BbSettings::ReflexOn &&
            s.render_scale == BbSettings::RenderScaleMax);
+    { std::ofstream file(path); file << "frame_gen=fsr\n"; }
+    BbSettings::Load();
+    assert(s.frame_gen == BbSettings::FrameGenFsr && s.startup_frame_gen == BbSettings::FrameGenFsr);
+    SaveAndWait();
+    assert(Read(path).find("frame_gen=fsr\n") != std::string::npos);
+    s.fsr_fg_running = false;
+    s.fsr_fg_problem = "amd_fidelityfx_framegeneration_vk.dll or the FSR SDK loader is missing from fsr_sdk";
+    s.frame_gen_active = false;
+    s.sharpen = !s.sharpen.load();
+    SaveAndWait();
+    assert(Read(path).find("frame_gen=fsr\n") != std::string::npos);
+    BbSettings::Load();
+    assert(s.frame_gen == BbSettings::FrameGenFsr && s.startup_frame_gen == BbSettings::FrameGenFsr);
+    s.fsr_fg_problem = nullptr;
+    assert(!BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr, BbSettings::FrameGenFsr, false));
+    assert(!BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr3, BbSettings::FrameGenFsr, false));
+    assert(BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr, BbSettings::FrameGenOff, false));
+    assert(BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr, BbSettings::FrameGenFsr3, false));
+    assert(BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenDlss, BbSettings::FrameGenOff, false));
+    assert(!BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenOff, BbSettings::FrameGenDlss, false));
+    assert(!BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr3, BbSettings::FrameGenOff, false));
+    assert(!BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr, BbSettings::FrameGenFsr, true));
+    assert(BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenOff, BbSettings::FrameGenFsr, true));
+    assert(BbSettings::FrameGenNeedsRestart(BbSettings::FrameGenFsr3, BbSettings::FrameGenFsr, true));
+    { std::ofstream file(path); file << "frame_gen=fsr4\n"; }
+    BbSettings::Load();
+    assert(s.frame_gen == BbSettings::FrameGenOff);
     std::filesystem::remove(temporary);
     std::puts("PASS: settings save keeps other keys, menu position");
 }

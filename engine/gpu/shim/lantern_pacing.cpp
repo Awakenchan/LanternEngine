@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "lantern_pacing.h"
+#include "lantern_vblank_watch.h"
 
 #include <algorithm>
 #include <array>
@@ -150,14 +151,9 @@ void WatchVblanks() {
     std::wstring device;
     unsigned generation = ~0u;
     KmtWaitForVblank target{};
-    bool opened = false, variable = false, was_steady = false;
-    double period = 0, predicted = 0, base = 0, refreshes = 0;
-    int off_score = 0, failures = 0;
-    const auto restart = [&](double now) {
-        period = refreshes = 0;
-        predicted = base = now;
-        off_score = 0;
-    };
+    bool opened = false;
+    LanternVblankWatch::Learner learner;
+    int failures = 0, refresh_reports = 0;
     const auto close_adapter = [&] {
         if (opened) {
             const KmtCloseAdapter c{target.adapter};
@@ -172,12 +168,12 @@ void WatchVblanks() {
                 generation = w.generation;
                 device = w.device;
                 close_adapter();
-                variable = was_steady = false;
+                learner.Reset();
             }
         }
         if (!opened) {
             w.steady.store(false, std::memory_order_relaxed);
-            restart(0);
+            learner.Restart(0);
             HDC dc = CreateDCW(nullptr, device.c_str(), nullptr, nullptr);
             if (!dc) {
                 dc = CreateDCW(device.c_str(), nullptr, nullptr, nullptr);
@@ -203,45 +199,24 @@ void WatchVblanks() {
         }
         failures = 0;
         const double now = double(Clock::now().time_since_epoch().count());
-        if (predicted == 0) {
-            restart(now);
-            continue;
-        }
-        const double interval = now - predicted;
-        if (period == 0) {
-            period = interval;
-            refreshes = 1;
-            predicted = now;
-            continue;
-        }
-        const double whole = std::round(interval / period);
-        if (whole < 1 || std::abs(interval - whole * period) > period * 0.1) {
-            if (whole >= 1) {
-                predicted += whole * period;
-                refreshes += whole;
-            } else {
-                predicted = now;
-            }
-            if ((off_score += 2) >= 16) {
-                if (was_steady && !variable) {
-                    std::printf("VideoOut: the display's refresh varies (G-Sync, FreeSync or a mode "
-                                "change): flips are not locked to its vblanks\n");
-                }
-                variable = variable || was_steady;
-                restart(now);
-            }
+        auto event = learner.Wake(now);
+        if (event != LanternVblankWatch::Event::None && refresh_reports < 8) {
+            ++refresh_reports;
         } else {
-            off_score = std::max(0, off_score - 1);
-            refreshes += whole;
-            period = (now - base) / refreshes;
-            predicted += whole * period;
-            predicted += (now - predicted) * 0.1;
+            event = LanternVblankWatch::Event::None;
         }
-        const bool steady = period > 0 && refreshes >= 120 && off_score <= 2;
-        was_steady = was_steady || steady;
-        w.period_ns.store(std::int64_t(period), std::memory_order_relaxed);
-        w.last_ns.store(std::int64_t(predicted), std::memory_order_relaxed);
-        w.steady.store(steady && !variable, std::memory_order_relaxed);
+        if (event == LanternVblankWatch::Event::Varies) {
+            std::printf("VideoOut: the display's refresh varies (G-Sync, FreeSync or a mode "
+                        "change): flips are not locked to its vblanks\n");
+        } else if (event == LanternVblankWatch::Event::SteadyAgain) {
+            std::printf("VideoOut: the display's refresh is steady again (%.3f Hz)\n", 1e9 / learner.period);
+        }
+        if (!learner.measured) {
+            continue;
+        }
+        w.period_ns.store(std::int64_t(learner.period), std::memory_order_relaxed);
+        w.last_ns.store(std::int64_t(learner.predicted), std::memory_order_relaxed);
+        w.steady.store(learner.published, std::memory_order_relaxed);
     }
 }
 #endif

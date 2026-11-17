@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gpu/shim/engine/gx_bindings.h"
+#include "gpu/shim/engine/gx_record_hash.h"
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -8,14 +10,17 @@
 #include <vector>
 
 namespace G = BbEngine::GxBindings;
+namespace H = BbEngine::GxRecordHash;
 using u32 = std::uint32_t;
+using u64 = std::uint64_t;
 
 namespace {
 int g_failed = 0;
+bool g_quiet = false;
 
 void Check(bool ok, const char* what) {
     if (!ok) {
-        std::printf("FAILED: %s\n", what);
+        if (!g_quiet) std::printf("FAILED: %s\n", what);
         ++g_failed;
     }
 }
@@ -280,7 +285,151 @@ void Keys() {
     Check(G::BufferKey(0, 5) == 0 && (G::BufferKey(0x1000, 0) & 1), "no object has no key, an object always has one");
 }
 
-int main() {
+G::Render Sample(u32 seed) {
+    G::Render render;
+    std::memset(&render, 0, sizeof render);
+    auto* bytes = reinterpret_cast<unsigned char*>(&render);
+    for (std::size_t i = 0; i < sizeof render; ++i) bytes[i] = static_cast<unsigned char>(i * 31 + seed);
+    return render;
+}
+
+void Memo() {
+    G::RenderMemo memo;
+    const G::Render render = Sample(7);
+    Check(!G::Unchanged(memo, render), "an empty memo never reports the render state unchanged");
+    G::Keep(memo, render, true);
+    Check(G::Unchanged(memo, render), "a kept clean render state is unchanged on the next draw");
+    G::Keep(memo, render, false);
+    Check(!G::Unchanged(memo, render), "a render state kept with differing registers is never skipped");
+    G::Keep(memo, render, true);
+    bool every = true;
+    for (std::size_t i = 0; i < sizeof render; ++i) {
+        G::Render other = render;
+        reinterpret_cast<unsigned char*>(&other)[i] ^= 0x10;
+        every = every && !G::Unchanged(memo, other);
+    }
+    Check(every, "a change in any byte of the render state is seen");
+    G::Render tail = render;
+    tail.index_base ^= 1;
+    Check(!G::Unchanged(memo, tail), "a changed index base is seen");
+    tail = render;
+    tail.depth_target[11] ^= 1;
+    Check(!G::Unchanged(memo, tail), "a changed depth target word is seen");
+    G::Render zero = render, negative = render;
+    zero.blend_factor[0] = 0.0f;
+    negative.blend_factor[0] = -0.0f;
+    G::Keep(memo, zero, true);
+    Check(!G::Unchanged(memo, negative), "a negative zero blend factor counts as a change");
+    G::Keep(memo, Sample(9), true);
+    Check(!G::Unchanged(memo, render) && G::Unchanged(memo, Sample(9)), "the memo holds only the last render state");
+}
+
+constexpr std::size_t kBlockWords = 0x4f0 / 8;
+
+u64 Next(u64& state) {
+    u64 z = state += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+u64 Serial(u64 hash, const u64* words, std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) hash = H::Mix(hash, words[i]);
+    return hash;
+}
+
+void Hash() {
+    u64 seed = 1;
+    std::vector<u64> block(kBlockWords);
+    for (u64& word : block) word = Next(seed);
+    const u64 base = H::Block(0x1234, block.data(), kBlockWords);
+    Check(base == H::Block(0x1234, block.data(), kBlockWords), "the block hash is the same for the same words");
+    Check(base != H::Block(0x1235, block.data(), kBlockWords), "the incoming hash changes the block hash");
+    Check(base != H::Block(0x1234, block.data(), kBlockWords - 1), "the block length changes the block hash");
+    bool every_low = true, every_high = true, every_swap = true;
+    for (std::size_t i = 0; i < kBlockWords; ++i) {
+        std::vector<u64> other = block;
+        other[i] ^= 1;
+        every_low = every_low && H::Block(0x1234, other.data(), kBlockWords) != base;
+        other = block;
+        other[i] ^= u64(1) << 63;
+        every_high = every_high && H::Block(0x1234, other.data(), kBlockWords) != base;
+        if (i + 1 < kBlockWords) {
+            other = block;
+            std::swap(other[i], other[i + 1]);
+            every_swap = every_swap && H::Block(0x1234, other.data(), kBlockWords) != base;
+        }
+    }
+    Check(every_low, "the lowest bit of every word changes the block hash");
+    Check(every_high, "the highest bit of every word changes the block hash");
+    Check(every_swap, "swapping two neighbouring words changes the block hash");
+    std::vector<u64> same(kBlockWords, 0);
+    const u64 empty = H::Block(0x1234, same.data(), kBlockWords);
+    bool zeros = true;
+    for (std::size_t i = 0; i < kBlockWords; ++i) {
+        same[i] = 1;
+        zeros = zeros && H::Block(0x1234, same.data(), kBlockWords) != empty;
+        same[i] = 0;
+    }
+    Check(zeros, "one set word in an empty block changes the block hash");
+}
+
+void Strength() {
+    u64 seed = 77;
+    std::vector<u64> block(kBlockWords);
+    double lane_sum = 0, serial_sum = 0, lane_min = 64, serial_min = 64;
+    std::size_t flips = 0;
+    constexpr int kBlocks = 8;
+    std::vector<double> lane_bits(kBlockWords * 64, 0), serial_bits(kBlockWords * 64, 0);
+    for (int b = 0; b < kBlocks; ++b) {
+        for (u64& word : block) word = Next(seed);
+        const u64 start = Next(seed);
+        const u64 lane = H::Block(start, block.data(), kBlockWords), serial = Serial(start, block.data(), kBlockWords);
+        for (std::size_t i = 0; i < kBlockWords; ++i) {
+            for (u32 bit = 0; bit < 64; ++bit) {
+                block[i] ^= u64(1) << bit;
+                const int l = std::popcount(lane ^ H::Block(start, block.data(), kBlockWords));
+                const int s = std::popcount(serial ^ Serial(start, block.data(), kBlockWords));
+                block[i] ^= u64(1) << bit;
+                lane_bits[i * 64 + bit] += l;
+                serial_bits[i * 64 + bit] += s;
+                lane_sum += l;
+                serial_sum += s;
+                ++flips;
+            }
+        }
+    }
+    for (std::size_t k = 0; k < lane_bits.size(); ++k) {
+        lane_min = std::min(lane_min, lane_bits[k] / kBlocks);
+        serial_min = std::min(serial_min, serial_bits[k] / kBlocks);
+    }
+    const double lane_mean = lane_sum / double(flips), serial_mean = serial_sum / double(flips);
+    if (!g_quiet) {
+        std::printf("gx-records-test: one flipped input bit flips %.2f output bits on average (serial %.2f), %.2f at least (serial %.2f)\n",
+                    lane_mean, serial_mean, lane_min, serial_min);
+    }
+    Check(lane_mean >= serial_mean - 0.25 && lane_mean > 30.0 && lane_mean < 34.0, "the block hash flips about half its bits for one input bit");
+    Check(lane_min >= serial_min, "no input bit reaches fewer output bits than in the serial hash");
+    std::vector<u64> hashes;
+    std::vector<u64> pairs(kBlockWords, 0);
+    for (std::size_t first : {std::size_t(0), std::size_t(3), std::size_t(150)}) {
+        for (std::size_t gap : {std::size_t(1), std::size_t(4)}) {
+            for (u64 x = 0; x < 256; ++x) {
+                for (u64 y = 0; y < 256; ++y) {
+                    pairs[first] = x;
+                    pairs[first + gap] = y;
+                    hashes.push_back(H::Block(first * 8 + gap, pairs.data(), kBlockWords));
+                }
+            }
+            pairs[first] = pairs[first + gap] = 0;
+        }
+    }
+    std::sort(hashes.begin(), hashes.end());
+    Check(std::adjacent_find(hashes.begin(), hashes.end()) == hashes.end(), "no two of 393216 nearby blocks share a hash");
+}
+
+int RunSuite() {
+    g_failed = 0;
     Direct();
     Tables();
     Spilled();
@@ -289,10 +438,45 @@ int main() {
     Vertex();
     Constants();
     Keys();
-    if (g_failed) {
+    Memo();
+    Hash();
+    Strength();
+    return g_failed;
+}
+
+#if defined(LANTERN_GX_RECORDS_MUTANTS) && defined(LANTERN_GX_RECORD_HASH_MUTANTS)
+template <typename M> bool Survivors(M& selected, int count, const char* name) {
+    bool any = false;
+    for (int m = 1; m < count; ++m) {
+        selected = static_cast<M>(m);
+        if (!RunSuite()) {
+            std::printf("gx-records-test: %s mutant %d survived\n", name, m);
+            any = true;
+        }
+    }
+    selected = static_cast<M>(0);
+    return any;
+}
+#endif
+
+int main() {
+#if defined(LANTERN_GX_RECORDS_MUTANTS) && defined(LANTERN_GX_RECORD_HASH_MUTANTS)
+    g_quiet = true;
+    if (RunSuite()) {
+        std::printf("gx-records-test mutants: the unmutated run failed %d checks\n", g_failed);
+        return 1;
+    }
+    const bool memo = Survivors(G::selected_mutant, static_cast<int>(G::Mutant::kCount), "memo");
+    const bool hash = Survivors(H::selected_mutant, static_cast<int>(H::Mutant::kCount), "hash");
+    if (memo || hash) return 1;
+    std::printf("gx-records-test mutants: all %d killed\n", static_cast<int>(G::Mutant::kCount) + static_cast<int>(H::Mutant::kCount) - 2);
+    return 0;
+#else
+    if (RunSuite()) {
         std::printf("gx-records-test: %d failed\n", g_failed);
         return 1;
     }
     std::printf("gx-records-test: ok\n");
     return 0;
+#endif
 }

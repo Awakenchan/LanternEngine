@@ -14,6 +14,7 @@
 
 #include "bbport_settings.h"
 #include "common/thread.h"
+#include "lantern_frame_clock.h"
 #include "lantern_pacing.h"
 #include "core/emulator_settings.h"
 #include "ffx_vk_fsr3_3_1_5_bridge.h"
@@ -23,6 +24,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_streamline.h"
+#include "lantern_switches.h"
 
 namespace Vulkan {
 
@@ -36,11 +38,7 @@ constexpr float FarPlane = 3000.0f;
 constexpr float UiThreshold = 1.5f / 255.0f;
 
 bool FrameStats() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("BB_FRAME_STATS");
-        return env && env[0] == '1';
-    }();
-    return enabled;
+    return Lantern::Switches::Get().frame_stats;
 }
 
 
@@ -76,8 +74,7 @@ FrameGenerator::~FrameGenerator() {
 }
 
 bool FrameGenerator::Enabled() const {
-    if (failed || BbSettings::Get().frame_gen.load(std::memory_order_relaxed) !=
-                      BbSettings::FrameGenFsr3) {
+    if (failed || !BuiltInWanted()) {
         return false;
     }
     const s64 until = paused_until_ns.load(std::memory_order_relaxed);
@@ -86,9 +83,25 @@ bool FrameGenerator::Enabled() const {
                    .count() >= until;
 }
 
+int FrameGenerator::SessionSetting() {
+    const auto& s = BbSettings::Get();
+    return s.fsr_fg_running.load(std::memory_order_relaxed) ? int(BbSettings::FrameGenFsr)
+                                                             : s.frame_gen.load(std::memory_order_relaxed);
+}
+
+bool FrameGenerator::BuiltInWanted() {
+    const int setting = SessionSetting();
+    return !FsrSdkWanted() &&
+           (setting == BbSettings::FrameGenFsr3 || setting == BbSettings::FrameGenFsr);
+}
+
+bool FrameGenerator::FsrSdkWanted() {
+    return BbSettings::Get().fsr_fg_running.load(std::memory_order_relaxed);
+}
+
 bool FrameGenerator::DlssWanted() {
     const auto& s = BbSettings::Get();
-    return s.frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenDlss &&
+    return SessionSetting() == BbSettings::FrameGenDlss &&
            s.dlss_fg_supported.load(std::memory_order_relaxed);
 }
 
@@ -189,16 +202,27 @@ void FrameGenerator::Idle(const char* reason) {
 std::optional<FrameGenerator::Job> FrameGenerator::Prepare(vk::Extent2D display,
                                                            vk::Format view_format, bool hdr,
                                                            bool other_scaler, u64 tick) {
-    const int setting = BbSettings::Get().frame_gen.load(std::memory_order_relaxed);
-    const bool dlss = setting == BbSettings::FrameGenDlss;
-    if (setting != last_setting) {
+    const int setting = SessionSetting();
+    const bool sdk = FsrSdkWanted();
+    const bool dlss = setting == BbSettings::FrameGenDlss || sdk;
+    const bool builtin = BuiltInWanted();
+    const int shown_setting = setting == BbSettings::FrameGenFsr && !sdk ? -2 : setting;
+    if (shown_setting != last_setting) {
         if (last_setting >= 0 || setting != BbSettings::FrameGenOff) {
-            std::printf("Frame generation: %s\n",
-                        setting == BbSettings::FrameGenFsr3 ? "FSR 3.1 selected"
-                        : dlss                              ? "DLSS selected"
-                                                            : "off");
+            const char* problem = BbSettings::Get().fsr_fg_problem.load(std::memory_order_relaxed);
+            if (setting == BbSettings::FrameGenFsr) {
+                std::printf("Frame generation: %s%s\n",
+                            sdk ? "AMD FSR Frame Generation (FSR SDK) selected"
+                                : "AMD FSR Frame Generation unavailable, built-in FSR 3.1 instead: ",
+                            sdk ? "" : problem ? problem : "restart the game with it selected");
+            } else {
+                std::printf("Frame generation: %s\n",
+                            setting == BbSettings::FrameGenFsr3 ? "FSR 3.1 selected"
+                            : dlss                              ? "DLSS selected"
+                                                                : "off");
+            }
         }
-        last_setting = setting;
+        last_setting = shown_setting;
         need_reset = true;
         if (setting == BbSettings::FrameGenOff) {
             running = false;
@@ -217,17 +241,19 @@ std::optional<FrameGenerator::Job> FrameGenerator::Prepare(vk::Extent2D display,
     last_prepare = now;
     const bool inputs = inputs_ready, hudless = hudless_ready;
     inputs_ready = hudless_ready = false;
-    if ((setting != BbSettings::FrameGenFsr3 && !dlss) || (!dlss && failed)) {
+    if ((!builtin && !dlss) || (!dlss && failed)) {
         need_reset = true;
         return std::nullopt;
     }
     const char* why = nullptr;
-    if (dlss && !DlssWanted()) {
+    if (dlss && !sdk && !DlssWanted()) {
         // bbport: Streamline not loaded at start, or DLSS-G not supported here (the menu says why).
         const char* problem = BbSettings::Get().dlss_fg_problem.load(std::memory_order_relaxed);
         why = problem ? problem : "DLSS Frame Generation is not loaded (restart with it selected)";
     } else if (!dlss && !Enabled()) {
         why = "paused (presenting could not keep up)";
+    } else if (hdr && sdk) {
+        why = "HDR output is on";
     } else if (hdr && dlss && !DlssFrameGenHdr()) {
         // FSR 3.1 interpolates the 8-bit frame before the HDR encode, which then encodes the
         // generated frame with the real one's gain map (Presenter::PresentHdr); a 10-bit frame
@@ -285,6 +311,7 @@ std::optional<FrameGenerator::Job> FrameGenerator::Prepare(vk::Extent2D display,
     job.frame_ms = frame_ms;
     job.view_format = view_format;
     job.dlss = dlss;
+    job.sdk = sdk;
     job.camera = input_camera;
     if (dlss) {
         job.present = false; // DLSS-G presents its own frames: no generated presentation frame
@@ -294,10 +321,15 @@ std::optional<FrameGenerator::Job> FrameGenerator::Prepare(vk::Extent2D display,
         idle_reason = nullptr;
         if (!started_logged) {
             started_logged = true;
+            const std::string requested{EmulatorSettings.GetPresentMode()};
+            const int mode = swapchain_mode.load(std::memory_order_relaxed);
+            const std::string present_mode =
+                dlss || mode < 0 ? requested
+                                 : vk::to_string(vk::PresentModeKHR(mode)) + " (requested " + requested + ")";
             std::printf("Frame generation: %s, %ux%u interpolated from %ux%u motion and "
                         "depth, UI from the real frame (HUD-less copy), present mode %s\n",
-                        dlss ? "DLSS (Streamline)" : "FSR 3.1, 2x", width, height, render_width,
-                        render_height, std::string(EmulatorSettings.GetPresentMode()).c_str());
+                        sdk ? "AMD FSR SDK" : dlss ? "DLSS (Streamline)" : "FSR 3.1, 2x", width, height, render_width,
+                        render_height, present_mode.c_str());
         } else {
             std::printf("Frame generation: running again\n");
         }
@@ -654,7 +686,51 @@ bool FrameGenerator::ShouldPresentGenerated() {
     return true;
 }
 
+bool FrameGenerator::Recording() const {
+    return Enabled() && FrameStats();
+}
+
+void FrameGenerator::RecordPresent(bool generated, Clock::time_point done, u32 acquire_wait_us,
+                                   bool ok) {
+    present_log.Add({u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             done.time_since_epoch())
+                             .count()),
+                     acquire_wait_us,
+                     generated ? LanternFrameGenPacing::KindGenerated
+                               : LanternFrameGenPacing::KindReal,
+                     u8(ok ? 1 : 0)});
+}
+
 void FrameGenerator::WaitForRealSlot(Clock::time_point shown) {
+    std::int64_t slot = 0;
+    LanternFrameClock::Grid grid;
+    if (LanternFrameClock::Current(grid) && grid.vblank > 0) {
+        if (const auto vblank = LanternPacing::Vblank()) {
+            const auto ns = [](Clock::time_point t) {
+                return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch())
+                    .count();
+            };
+            slot = LanternFrameGenPacing::RealSlotNs(ns(Clock::now()), ns(vblank->last),
+                                                     vblank->period.count(), grid.period);
+        }
+    }
+    const int by_vblank = slot != 0 ? 1 : 0;
+    if (by_vblank != slot_by_vblank && slot_reports < 8) {
+        ++slot_reports;
+        std::printf("Frame generation: %s\n",
+                    by_vblank ? "the real frame goes just after the vblank that follows the "
+                                "generated one (flips locked to the display's vblanks)"
+                              : "the real frame goes half the game's frame interval after the "
+                                "generated one (no vblank lock to place it by)");
+        std::fflush(stdout);
+    }
+    slot_by_vblank = by_vblank;
+    if (slot != 0) {
+        ++stats_vblank_slots;
+        LanternPacing::WaitUntil(Clock::time_point(std::chrono::nanoseconds(slot)), true);
+        return;
+    }
+    ++stats_timer_slots;
     if (interval_ms <= 0.0) {
         return;
     }
@@ -665,7 +741,7 @@ void FrameGenerator::WaitForRealSlot(Clock::time_point shown) {
 }
 
 void FrameGenerator::OnRealPresented(Clock::time_point start, bool generated_shown,
-                                     bool generated_made) {
+                                     bool generated_made, bool generated_reached) {
     const auto now = Clock::now();
     if (last_real != Clock::time_point{}) {
         const double dt = std::chrono::duration<double, std::milli>(start - last_real).count();
@@ -676,7 +752,16 @@ void FrameGenerator::OnRealPresented(Clock::time_point start, bool generated_sho
     }
     last_real = start;
     static double shown_per_real = 1.0;
-    shown_per_real = shown_per_real * 0.95 + (generated_shown ? 2.0 : 1.0) * 0.05;
+    shown_per_real =
+        shown_per_real * 0.95 +
+        (LanternFrameGenPacing::CapInputShown(generated_shown, generated_reached) ? 2.0 : 1.0) * 0.05;
+    if (generated_made) {
+        reached_pct = LanternFrameGenPacing::ShownPercent(reached_pct, generated_reached);
+        BbSettings::Get().frame_gen_reached_pct.store(reached_pct, std::memory_order_relaxed);
+    }
+    if (generated_reached) {
+        ++stats_reached;
+    }
     if (interval_ms > 0.0) {
         BbSettings::Get().frame_gen_game_fps.store(float(1000.0 / interval_ms),
                                                    std::memory_order_relaxed);
@@ -719,18 +804,37 @@ void FrameGenerator::OnRealPresented(Clock::time_point start, bool generated_sho
     const double window = std::chrono::duration<double>(now - stats_start).count();
     if (window >= 5.0) {
         std::printf("Frame generation: %.1f s: game %.1f FPS, shown %.1f FPS, %u generated shown, "
-                    "dropped %u (next frame queued), %u real frames without one; present cycle "
+                    "%u reached the swapchain, dropped %u (next frame queued), %u real frames "
+                    "without one; real frames placed by vblank %u, by timer %u; present cycle "
                     "%.2f ms of %.2f ms, load %.2f; VRAM %llu MiB in use\n",
                     window, stats_real / window, (stats_real + stats_shown) / window,
-                    stats_shown, stats_dropped_backlog, stats_not_made,
+                    stats_shown, stats_reached, stats_dropped_backlog, stats_not_made,
+                    stats_vblank_slots, stats_timer_slots,
                     stats_shown ? stats_cycle_ms / stats_shown : 0.0, interval_ms, load_avg,
                     // VK_EXT_memory_budget: every allocation, the interpolation's own included.
                     static_cast<unsigned long long>(
                         instance.CanReportMemoryUsage() ? instance.GetDeviceMemoryUsage() >> 20
                                                         : 0));
+        if (const std::size_t n = present_log.Ordered(present_ordered.data()); n != 0) {
+            const auto vblank = LanternPacing::Vblank();
+            const std::int64_t vblank_ns = vblank ? vblank->period.count() : 0;
+            const auto summary = LanternFrameGenPacing::Summarize(present_ordered.data(), n,
+                                                                  vblank_ns, present_scratch);
+            const int mode = swapchain_mode.load(std::memory_order_relaxed);
+            const std::string mode_name =
+                mode < 0 ? std::string("unknown") : vk::to_string(vk::PresentModeKHR(mode));
+            char line[1024];
+            LanternFrameGenPacing::FormatSummary(
+                line, sizeof(line), summary, window, vblank_ns > 0, mode_name.c_str(),
+                swapchain_images.load(std::memory_order_relaxed),
+                vblank_ns > 0 ? 1e9 / double(vblank_ns) : 0.0);
+            std::printf("%s\n", line);
+            present_log.Clear();
+        }
         std::fflush(stdout);
         stats_start = now;
         stats_real = stats_shown = stats_dropped_backlog = stats_not_made = 0;
+        stats_reached = stats_vblank_slots = stats_timer_slots = 0;
         stats_cycle_ms = 0.0;
     }
 }

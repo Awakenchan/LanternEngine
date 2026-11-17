@@ -156,7 +156,6 @@ namespace BloodborneLauncher.Core
                 env[key] = value;
 
             // Off: the engine's earlier behaviour; on: its default (left unset).
-            if (!s.Bool("exp_vram_budget")) { env["BB_GC_PRESSURE_PERCENT"] = "0"; env["BB_GC_PRESSURE_SECONDS"] = "0"; }
             if (!s.Bool("exp_thread_priority")) env["BB_GPU_THREAD_PRIORITY"] = "0";
             if (!s.Bool("exp_sleep_spin")) env["BB_SLEEP_SPIN_US"] = "600";
             if (!s.Bool("exp_async_pipelines")) env["BB_ASYNC_PIPELINES"] = "0";
@@ -212,8 +211,6 @@ namespace BloodborneLauncher.Core
                 env.Remove("BB_CAMERA_FIX");
                 env["BB_PRECISE_PACING"] = "0";
                 env["BB_IMAGE_WRITEBACK_GC"] = "0";
-                env["BB_GC_PRESSURE_PERCENT"] = "0";
-                env["BB_GC_PRESSURE_SECONDS"] = "0";
                 env["BB_GPU_THREAD_PRIORITY"] = "0";
                 env["BB_NATIVE_SHADERS"] = "0";
                 foreach (var native in EngineSwitches.NativeSwitches)
@@ -231,13 +228,11 @@ namespace BloodborneLauncher.Core
                 env["BB_PIPELINE_TAKE"] = "0";
                 env["BB_MODS_ENABLED"] = "0";
             }
+            var (vram, integrated) = GpuMemory();
+            ApplyGcMarks(env, s.Bool("exp_vram_budget") && !s.Bool("safe_mode_next"), vram, integrated);
             // The Hunter's Dream account (scripts/online.py uses it in that pool only).
-            if (s.HuntersDreamToken is { Length: > 0 } token && s.Str("hd_name") is { Length: > 0 } name)
-            {
-                env["BB_THD_TOKEN"] = token;
-                env["BB_THD_ONLINE_ID"] = name;
-            }
-            if (s.OnlinePassword is { Length: > 0 } shadnetPassword) env["BB_SHADNET_PASSWORD"] = shadnetPassword;
+            foreach (var (variable, value) in ThdStart.Account(s.HuntersDreamToken, s.Str("hd_name"), s.HuntersDreamRefused))
+                env[variable] = value;
             env["BB_ROOM_PASSWORD"] = s.SeamlessPassword;
             env["BB_ROOM_HOST_PASSWORD"] = s.SeamlessHostPassword;
             // The client version the online backend reports to the server.
@@ -248,12 +243,27 @@ namespace BloodborneLauncher.Core
             if (!s.Bool("safe_mode_next"))
                 foreach (var (variable, value) in EngineSwitches.Changed(s))
                     env[variable] = value;
+            else
+                ApplySafeMode(env);
 
             // Extra variables last: they win over everything above.
             foreach (var (variable, value) in ExtraVariables(s))
                 env[variable] = value;
+            env["LANTERN_EXTRA_VARIABLES"] = string.Join(",", ExtraVariables(s).Select(e => e.Name).Distinct(StringComparer.Ordinal));
             WindowsMonitors.ApplyEnvironment(s.Str("display_device"), WindowsMonitors.All(), env);
             return env;
+        }
+
+        public static readonly string[] SafeModeOff =
+            { "LANTERN_RING_CONSTANTS", "LANTERN_JOB_LOCK", "LANTERN_JOB_NODE_CACHE", "LANTERN_MAIN_JOBS_BARRIER",
+              "LANTERN_RT_CAMERA_MAP", "LANTERN_RT_KEEP_PREVIOUS", "LANTERN_RT_NEW_BUDGET", "LANTERN_RT_POOL",
+              "LANTERN_RT_EVICT_HOLD", "LANTERN_RT_RIGID", "LANTERN_RT_CUTOUT", "LANTERN_RT_CUTOUT_LAMPS",
+              "LANTERN_RT_BOUNCE_MOTION", "LANTERN_RT_SETUP_WORKER", "LANTERN_RT_PERSISTENT_SCENE", "LANTERN_RT_GAME_LIGHTS" };
+
+        public static void ApplySafeMode(IDictionary<string, string> env)
+        {
+            foreach (var name in SafeModeOff)
+                env[name] = "0";
         }
 
         /// <summary>Settings › Diagnostics › Extra variables: NAME=value pairs separated by spaces.</summary>
@@ -262,10 +272,37 @@ namespace BloodborneLauncher.Core
             foreach (var item in s.Str("extra_env").Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
                 var at = item.IndexOf('=');
-                if (at > 0)
+                if (at > 0 && !IsTestSandbox(item[..at]))
                     yield return (item[..at], item[(at + 1)..]);
             }
         }
+
+        public static bool SmallDiscreteGpu(long vramBytes, bool integrated) =>
+            !integrated && vramBytes > 0 && vramBytes <= 8L << 30;
+
+        public static void ApplyGcMarks(Dictionary<string, string> env, bool budgetOn, long vramBytes, bool integrated)
+        {
+            if (budgetOn) return;
+            if (SmallDiscreteGpu(vramBytes, integrated)) env.Remove("BB_GC_PRESSURE_PERCENT");
+            else env["BB_GC_PRESSURE_PERCENT"] = "0";
+            env["BB_GC_PRESSURE_SECONDS"] = "0";
+        }
+
+        private static (long Vram, bool Integrated) GpuMemory()
+        {
+            try
+            {
+                var hw = Hardware.Detect();
+                return (hw.VramBytes, hw.Integrated);
+            }
+            catch (Exception)
+            {
+                return (0, false);
+            }
+        }
+
+        public static bool IsTestSandbox(string name) =>
+            name.StartsWith("LANTERN_TEST_SANDBOX", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>SDL3 hints for controllers, given to the game and used by the launcher's own SDL (SdlPad).</summary>
         public static IEnumerable<(string Key, string Value)> SdlHints()

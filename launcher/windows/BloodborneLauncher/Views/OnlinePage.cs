@@ -17,7 +17,7 @@ namespace BloodborneLauncher.Views
             L.T("3. In the game, choose online at the title screen: The Hunter's Dream's welcome message means you are online. ") +
             L.T("Everyone needs game version 1.09."))
         {
-            SuperMedo.Apply(Ini, S);
+            OnlineSettings.ChoosePool(Ini, S);
 
             if (HuntersDream.OnlinePaused)
                 Body.Children.Add(Text(L.T("Online play is paused in this version. The game starts offline whatever is set here; ") +
@@ -74,19 +74,13 @@ namespace BloodborneLauncher.Views
             _openRoom = RowOf(IniToggle(SymbolRegular.PeopleCommunity24, L.T("Open my room to visitors"),
                 L.T("While on, your game gives your room's invite code to Lantern's co-op server, and the Lantern event team can see it in Discord and join for surprise events, so your room is not private from them. Everyone in the room sees a line when a visitor joins, and you can Kick them. Nobody is moved: guests keep control of their own summons. Off or leaving takes the room off the list at once; New room retires a code they already saw"),
                 "coop_open_room"));
+            foreach (var item in EngineSwitches.InGroup(EngineSwitches.Seamless))
+                ToggleRow(SymbolRegular.Eye24, item.Title, EngineSwitches.Describe(item), () => EngineSwitches.Get(S, item) == item.On,
+                    v => EngineSwitches.Set(S, item, v ? item.On : item.Off));
             EnsureHostRoom();
             ShowRoom();
 
             Group(L.T("Server"));
-            ComboRow(SymbolRegular.Server24, L.T("Server"), L.T("Messages, bloodstains, ghosts, co-op and invasions"),
-                Choices.OnlineServers, () => SuperMedo.Selected(Ini) ? SuperMedo.Id : "huntersdream", v =>
-                {
-                    Ini.Set("online_server", v == SuperMedo.Id ? SuperMedo.Id : "");
-                    SuperMedo.Apply(Ini, S);
-                    Ws.SaveNow();
-                    ShowServer();
-                });
-            var hdFrom = Body.Children.Count;
             Add(Card(SymbolRegular.Globe24, L.T("The Hunter's Dream"), L.T("Players online, the map and your hunter's profile"),
                 SmallButton(L.T("Open website"), SymbolRegular.Open24, (_, _) =>
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(LauncherSettings.OnlineCommunity) { UseShellExecute = true })),
@@ -98,25 +92,6 @@ namespace BloodborneLauncher.Views
             _signInRetry = SmallButton(L.T("Retry"), SymbolRegular.ArrowClockwise24, async (_, _) => await CheckSignInAsync());
             _signInRow = Add(Card(SymbolRegular.ShieldCheckmark24, L.T("Sign-in"), null, _signInRetry, out _signInHint));
             ShowLink();
-            for (var i = hdFrom; i < Body.Children.Count; i++) _hdOnly.Add(Body.Children[i]);
-
-            var smFrom = Body.Children.Count;
-            Group(L.T("SuperMedo account"));
-            Body.Children.Add(Text(L.T("The name you registered on SuperMedo (up to 16 characters), not an email address. ") +
-                                   L.T("The password is kept encrypted for your Windows user, not in bbport.ini."), "Faint"));
-            Add(Card(SymbolRegular.PersonAdd24, L.T("No SuperMedo account yet?"), L.T("Make a free one on its website, then enter it below"),
-                SmallButton(L.T("Create account"), SymbolRegular.Open24, (_, _) =>
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(SuperMedo.Register) { UseShellExecute = true })),
-                out _));
-            IniText(SymbolRegular.Person24, L.T("Account name"), null, "", "online_username", 220);
-            var password = new Wpf.Ui.Controls.PasswordBox { Width = 220, Password = S.OnlinePassword };
-            password.PasswordChanged += (_, _) =>
-            {
-                S.OnlinePassword = password.Password;
-                Ws.SaveSoon();
-            };
-            Add(Card(SymbolRegular.Password24, L.T("Password"), null, password, out _));
-            for (var i = smFrom; i < Body.Children.Count; i++) _smOnly.Add(Body.Children[i]);
 
             Group(L.T("Connection"));
             IniText(SymbolRegular.Router24, L.T("Local P2P port"), L.T("Empty: 3658, the PS4's"), "3658", "online_p2p_port", 120);
@@ -129,15 +104,9 @@ namespace BloodborneLauncher.Views
             Loaded += (_, _) => ShowServer();
         }
 
-        private readonly List<UIElement> _hdOnly = new();
-        private readonly List<UIElement> _smOnly = new();
-
         private void ShowServer()
         {
-            var medo = SuperMedo.Selected(Ini);
-            foreach (var element in _hdOnly) element.Visibility = medo ? Visibility.Collapsed : Visibility.Visible;
-            foreach (var element in _smOnly) element.Visibility = medo ? Visibility.Visible : Visibility.Collapsed;
-            _signInRow.Visibility = !medo && Linked ? Visibility.Visible : Visibility.Collapsed;
+            _signInRow.Visibility = Linked ? Visibility.Visible : Visibility.Collapsed;
             foreach (var frame in Body.Children.OfType<Border>())
             {
                 if (frame.Child is Panel box && box.Children.Count > 0)
@@ -158,13 +127,6 @@ namespace BloodborneLauncher.Views
         private readonly SettingRow _directHost;
         private const string InvitePrefix = "LANTERN-ROOM:";
         private const string VisitorPrefix = "LANTERN-VISIT:";
-
-        private static string RandomText(int length)
-        {
-            const string letters = "abcdefghjkmnpqrstuvwxyz23456789";
-            var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(length);
-            return new string(bytes.Select(b => letters[b % letters.Length]).ToArray());
-        }
 
         private const string DirectPort = "38765";
 
@@ -200,8 +162,8 @@ namespace BloodborneLauncher.Views
 
         private void NewRoom(bool quiet = false)
         {
-            Ini.Set("seamless_host_room", RandomText(20));
-            S.SeamlessHostPassword = RandomText(24);
+            Ini.Set("seamless_host_room", SeamlessPlay.RandomText(SeamlessPlay.RoomLength));
+            S.SeamlessHostPassword = SeamlessPlay.RandomText(SeamlessPlay.PasswordLength);
             Ws.SaveNow();
             ShowRoom();
             if (!quiet) Ws.Log(L.T("New room made: copy the new invite code for your friends"), LogLevel.Good);
@@ -319,7 +281,7 @@ namespace BloodborneLauncher.Views
             var check = ++_signInCheck;
             ShowSignIn(null);
             var token = S.HuntersDreamToken;
-            if (!Linked || SuperMedo.Selected(Ini))
+            if (!Linked)
             {
                 _signInRetry.IsEnabled = true;
                 return;
@@ -342,7 +304,7 @@ namespace BloodborneLauncher.Views
         {
             var name = S.Str("hd_name");
             var linked = name.Length > 0 && S.HuntersDreamToken.Length > 0;
-            _signInRow.Visibility = linked && !SuperMedo.Selected(Ini) ? Visibility.Visible : Visibility.Collapsed;
+            _signInRow.Visibility = linked ? Visibility.Visible : Visibility.Collapsed;
             var refused = linked ? S.HuntersDreamRefused : "";
             SetHint(_hdHint, !linked ? L.T("Not connected. Connect with Discord, or create an account here without it")
                 : refused.Length > 0 ? L.F($"The Hunter's Dream refused the sign-in as {name} ({refused}). Sign in again: until then nobody can summon or invite you")
@@ -467,7 +429,7 @@ namespace BloodborneLauncher.Views
             _test.Content = L.T("Testing…");
             try
             {
-                var results = SuperMedo.Selected(Ini) ? await SuperMedo.CheckAsync() : await Online.CheckAsync(Online.GameServer(Ini.Get("online_game_api")));
+                var results = await Online.CheckAsync(Online.GameServer(Ini.Get("online_game_api")));
                 foreach (var r in results)
                 {
                     var said = r.Ok ? (r.Detail.Length > 0 ? L.F($"Reachable: {r.Detail}") : L.T("Reachable")) : L.F($"Not reachable ({r.Detail})");

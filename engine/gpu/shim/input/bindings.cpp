@@ -503,8 +503,14 @@ bool host_bindings_dodge(std::uint64_t now_ms, bool menu, PadState& pad) {
     }
     if (step == 1) pad.buttons |= kCircle;
     else pad.buttons &= ~std::uint32_t(kCircle);
-    if (still) pad.lx = pad.ly = kStickRest;
+    if (still && LANTERN_PAD_ACTIONS_PICK(4, false, true)) pad.lx = pad.ly = kStickRest;
     return at_once && step == 0;
+}
+
+void host_bindings_pad_actions(std::uint8_t actions) {
+    if (actions & LANTERN_PAD_ACTIONS_PICK(1, 4, 1)) g_dodge_down.store(true, std::memory_order_relaxed);
+    if (actions & LANTERN_PAD_ACTIONS_PICK(2, 1, 2)) g_backstep_down.store(true, std::memory_order_relaxed);
+    if (actions & LANTERN_PAD_ACTIONS_PICK(3, 0, 4)) g_sprint_down.store(true, std::memory_order_relaxed);
 }
 
 void host_bindings_apply(const bool held[kBindCount], bool strong, PadState& pad) {

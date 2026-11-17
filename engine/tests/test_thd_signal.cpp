@@ -354,7 +354,27 @@ bool server_signaling_resolve(const std::string&, std::uint32_t*, std::uint16_t*
 std::string online_id() { return "playerA"; }
 }
 
+void MaskLan() {
+    const std::string lan = BbThd::MaskLanAddress("192.168.1.17");
+    Expect(lan.rfind("192.168.x.x#", 0) == 0, "a private LAN address keeps its first two octets and a tag");
+    Expect(lan == BbNet::MaskIpv4Host(0xC0A80111u), "the LAN address uses the house masker");
+    Expect(lan.substr(0, lan.find('#')) == "192.168.x.x", "the last octets never show");
+    Expect(BbThd::MaskLanAddress("192.168.1.17") == lan, "the same address gets the same tag all run");
+    Expect(BbThd::MaskLanAddress("192.168.1.18") != lan, "a neighbour gets another tag");
+    const std::string pub = BbThd::MaskLanAddress("203.0.113.77");
+    Expect(pub.rfind("203.x.x.x#", 0) == 0, "a public address keeps its first octet and a tag");
+    Expect(pub.substr(0, pub.find('#')) == "203.x.x.x", "no other octet shows");
+    Expect(BbThd::MaskLanAddress("10.8.0.2").rfind("10.x.x.x#", 0) == 0, "a VPN address keeps its first octet only");
+    Expect(BbThd::MaskLanAddress("127.0.0.1") == "127.0.0.1", "the loopback fallback shows as such");
+    Expect(BbThd::MaskLanAddress("192.168.1.17:3658") == "not IPv4", "an address with more after it is refused");
+    Expect(BbThd::MaskLanAddress("192.168.1.300") == "not IPv4", "an octet over 255 is refused");
+    Expect(BbThd::MaskLanAddress("lan.example") == "not IPv4", "a host name never shows");
+    Expect(BbThd::MaskLanAddress("fe80::1") == "not IPv4", "an IPv6 address never shows");
+    Expect(BbThd::MaskLanAddress("") == "none", "no address says so");
+}
+
 int main() {
+    MaskLan();
     Signaling();
     Timing();
     Compare();

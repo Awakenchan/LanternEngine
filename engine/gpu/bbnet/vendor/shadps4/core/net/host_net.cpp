@@ -5,8 +5,10 @@
 #include <array>
 #include <climits>
 #include <cstdint>
+#include <cstring>
 
 #include "core/net/host_net.h"
+#include "test_sandbox_net.h"
 
 #ifdef _WIN32
 #include <mstcpip.h>
@@ -248,6 +250,10 @@ bool ConfigureSocket(NativeSocket s, int type) {
 }
 
 NativeSocket CreateSocket(int family, int type, int protocol, Error* error) {
+    if (!LanternSandbox::AllowLocalSocket("guest network socket")) {
+        *error = Error::Acces;
+        return InvalidSocket;
+    }
 #ifdef _WIN32
     NativeSocket s = WSASocketW(family, type, protocol, nullptr, 0,
                                 WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
@@ -260,6 +266,7 @@ NativeSocket CreateSocket(int family, int type, int protocol, Error* error) {
         *error = LastError();
         return InvalidSocket;
     }
+    LanternSandbox::NoteSocket();
     if (!ConfigureSocket(s, type)) {
         *error = LastError();
         CloseSocket(s);
@@ -407,10 +414,21 @@ void PrepareClose(NativeSocket s, bool guest_blocking) {
 }
 
 Error Bind(NativeSocket s, const sockaddr* addr, socklen_t len) {
+    sockaddr_storage local{};
+    if (addr && len > 0 && static_cast<std::size_t>(len) <= sizeof local) {
+        std::memcpy(&local, addr, static_cast<std::size_t>(len));
+        if (!LanternSandbox::LocalBind(reinterpret_cast<sockaddr*>(&local), static_cast<std::size_t>(len), "guest network bind")) {
+            return Error::Acces;
+        }
+        addr = reinterpret_cast<const sockaddr*>(&local);
+    }
     return bind(s, addr, len) == 0 ? Error::Ok : LastError();
 }
 
 Error Listen(NativeSocket s, int backlog) {
+    if (!LanternSandbox::BindIfUnbound(s, "guest network listen")) {
+        return Error::Acces;
+    }
     return listen(s, backlog) == 0 ? Error::Ok : LastError();
 }
 
@@ -419,6 +437,9 @@ Error ShutdownSocket(NativeSocket s, int how) {
 }
 
 Error Connect(NativeSocket s, const sockaddr* addr, socklen_t len) {
+    if (!LanternSandbox::AllowAddress(addr, len, "guest network connect")) {
+        return Error::Acces;
+    }
     if (connect(s, addr, len) == 0) {
         return Error::Ok;
     }
@@ -484,6 +505,10 @@ NativeSocket Accept(NativeSocket s, sockaddr* addr, socklen_t* len, Error* error
 
 IoResult SendTo(NativeSocket s, const void* buf, size_t len, int flags, const sockaddr* addr,
                 socklen_t addr_len) {
+    if (addr && (!LanternSandbox::AllowAddress(addr, addr_len, "guest network send") ||
+                 !LanternSandbox::BindIfUnbound(s, "guest network send"))) {
+        return {-1, Error::Acces};
+    }
 #ifdef MSG_NOSIGNAL
     flags |= MSG_NOSIGNAL;
 #endif
@@ -533,8 +558,13 @@ WakeHandle::WakeHandle() {
     read_ = write_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 #elif defined(_WIN32)
     // WSAPoll and wepoll only take sockets, so use a loopback UDP pair.
+    if (!LanternSandbox::AllowLocalSocket("guest network wake pair")) {
+        return;
+    }
     read_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     write_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (read_ != InvalidSocket) LanternSandbox::NoteSocket();
+    if (write_ != InvalidSocket) LanternSandbox::NoteSocket();
     if (read_ == InvalidSocket || write_ == InvalidSocket) {
         Reset();
         return;

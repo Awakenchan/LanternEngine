@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "room_host.h"
 #include "room_ws.h"
+#include "../../shim/test_sandbox_net.h"
 
 #include <algorithm>
 #include <atomic>
@@ -632,11 +633,16 @@ bool LocalRoom::Start(int port, const std::string& room_id, std::string& error, 
     auto impl = std::make_unique<Impl>();
     impl->room_id = room_id;
     impl->most = std::clamp(most, 1, 127);
+    if (!LanternSandbox::AllowLocalSocket("room host listener")) {
+        error = "refused by the test sandbox";
+        return false;
+    }
     impl->listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (impl->listener == kBad) {
         error = "no socket";
         return false;
     }
+    LanternSandbox::NoteSocket();
 #ifndef _WIN32
     const int reuse = 1;
     ::setsockopt(impl->listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
@@ -645,6 +651,11 @@ bool LocalRoom::Start(int port, const std::string& room_id, std::string& error, 
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(static_cast<std::uint16_t>(port));
+    if (!LanternSandbox::LocalBind(reinterpret_cast<sockaddr*>(&address), sizeof address, "room host listener")) {
+        error = "refused by the test sandbox";
+        CloseSock(impl->listener);
+        return false;
+    }
     if (::bind(impl->listener, reinterpret_cast<sockaddr*>(&address), sizeof address) != 0 || ::listen(impl->listener, 16) != 0) {
         error = "port " + std::to_string(port) + " cannot be opened: another program may be using it";
         CloseSock(impl->listener);

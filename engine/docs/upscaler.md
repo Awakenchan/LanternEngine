@@ -33,16 +33,17 @@ the launcher's "FSR 4 from the AMD driver" card are gone).
 `amd_fidelityfx_upscaler_vk.dll` (4.1.2.4555), unchanged from the SDK's `Kits/FidelityFX/signedbin`
 at tag v2.4.0, signed by AMD; `SOURCE.txt` records the commit and hashes. `BB_FSR_SDK_DIR`
 overrides the folder (`bb-start` sets it to `enginesr_sdk`); `BB_FSR_SDK=0` hides the files. The
-frame generation DLL of the SDK is not shipped (frame generation stays the built-in FSR 3.1 one and
-DLSS FG).
+SDK's frame generation DLL `amd_fidelityfx_framegeneration_vk.dll` (4.0.2.4555, same tag, signed
+by AMD) ships beside them for `frame_gen=fsr` (`vk_fsr_framegen.cpp`, `notes/fsr-sdk-framegen-design.md`);
+the other frame generation choices stay the built-in FSR 3.1 one and DLSS FG.
 
 **License.** The DLLs come under AMD's binary redistribution license
 (`fsr_sdk/LICENSE-AMD-FSR-SDK.md`): binary redistribution is allowed, its copyright notice,
 permission notice and disclaimers must ship with them, and reverse engineering, decompilation and
 disassembly are not permitted. The engine loads them at run time as separate programs, as it does
 NVIDIA's DLSS and Streamline, and contains none of their code. The ABI structures in
-`vk_fsr_sdk.cpp` follow the SDK's public MIT headers (`ffx_api.h`, `ffx_api_vk.h`,
-`ffx_upscale.h`).
+`vk_fsr_sdk.cpp` and `vk_fsr_framegen.cpp` follow the SDK's public MIT headers (`ffx_api.h`,
+`ffx_api_vk.h`, `ffx_upscale.h`, `ffx_framegeneration.h`, `ffx_api_framegeneration_vk.h`).
 
 **Integration.** The same inputs as the other frame upscalers (`Fsr4Upscaler::Frame`): HDR scene
 colour RGBA16F, depth D32S8 read through its depth aspect (standard depth, near = 0), motion vectors

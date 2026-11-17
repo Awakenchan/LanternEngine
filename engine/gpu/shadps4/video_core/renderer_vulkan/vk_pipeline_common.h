@@ -40,6 +40,7 @@ void SubmitPipelineJob(const void* owner, std::function<void()> job);
 std::function<void()> TakePipelineJob(const void* owner);
 /// The number of compile threads.
 u32 PipelineCompileThreads();
+std::uint64_t PipelineJobsUnfinished();
 
 /// bbport: the start's cached pipelines are created on several threads (PipelineCache::WarmUp,
 /// BB_WARMUP_THREADS). While this is set on the thread that rebuilds them, a pipeline that would

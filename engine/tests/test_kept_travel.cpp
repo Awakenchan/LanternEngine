@@ -2,12 +2,14 @@
 #include "gpu/shim/engine/kept_travel.h"
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace {
 int failures = 0;
+bool quiet = false;
 void Check(bool ok, const char* what) {
-    if (!ok) { std::printf("FAIL: %s\n", what); ++failures; }
+    if (!ok) { if (!quiet) std::printf("FAIL: %s\n", what); ++failures; }
 }
 
 struct FakeClock {
@@ -35,7 +37,133 @@ std::vector<std::uint8_t> Snapshot() {
 }
 }
 
-int main() {
+namespace {
+using BbEngine::KeptTravel::WarpChoice;
+using ChoiceFn = WarpChoice (*)(bool, std::int32_t, std::uint32_t, bool, std::int64_t, std::int64_t, bool);
+
+struct ChoiceRow {
+    bool client;
+    std::int32_t script;
+    std::uint32_t lamp;
+    bool following;
+    std::int64_t held_since, now;
+    bool keep;
+    WarpChoice want;
+    const char* what;
+};
+
+constexpr std::int64_t kFresh = BbEngine::KeptTravel::kNotHeld;
+constexpr std::int32_t kSnatcher = BbEngine::KeptTravel::kSnatcherEvent;
+const ChoiceRow kChoiceTable[] = {
+    {true, 13200310, 2602959, false, kFresh, 1000, true, WarpChoice::Hold, "the guest's own Mensis door warp waits for the host"},
+    {true, 13200311, 3302959, false, 0, 14999, true, WarpChoice::Hold, "still waiting just under 15 s"},
+    {true, 13200311, 3302959, true, kFresh, 1000, true, WarpChoice::Drop, "the guest's own Frontier door warp while following is dropped"},
+    {true, 13200310, 2602959, true, 0, 20000, true, WarpChoice::Drop, "a held warp is dropped once the guest follows"},
+    {true, 13200310, 2602959, false, 0, 15000, true, WarpChoice::Ask, "no host travel in 15 s: the host is asked"},
+    {true, 13200310, 2602959, false, 0, 15000, false, WarpChoice::Solo, "no host travel in 15 s, keeping off: the guest goes alone"},
+    {true, 3503, 2102961, false, 0, 15000, true, WarpChoice::Solo, "a held story warp to the Dream goes alone"},
+    {true, kSnatcher, 2802958, false, kFresh, 0, true, WarpChoice::Stay, "the snatcher stays as it is"},
+    {true, kSnatcher, 2802958, true, 0, 20000, false, WarpChoice::Stay, "the snatcher stays as it is while following"},
+    {true, 7200, 2412951, false, kFresh, 0, true, WarpChoice::Ask, "a guest's lamp is an ask"},
+    {true, 7200, 2412951, true, kFresh, 0, true, WarpChoice::Ask, "a guest's lamp is an ask while following too"},
+    {true, 7200, 2412951, false, kFresh, 0, false, WarpChoice::Solo, "a guest's lamp with keeping off goes alone"},
+    {true, 0, 2412951, false, kFresh, 0, true, WarpChoice::Ask, "no event: an ask as before"},
+    {false, 13200310, 2602959, false, kFresh, 0, true, WarpChoice::Pass, "the host's door warp passes"},
+    {false, 7200, 2412951, false, kFresh, 0, true, WarpChoice::Pass, "the host's lamp passes"},
+    {false, kSnatcher, 2802958, false, kFresh, 0, true, WarpChoice::Pass, "the host's snatcher passes"},
+};
+
+int TableMisses(ChoiceFn fn, bool report) {
+    int misses = 0;
+    for (const ChoiceRow& row : kChoiceTable) {
+        if (fn(row.client, row.script, row.lamp, row.following, row.held_since, row.now, row.keep) == row.want) continue;
+        ++misses;
+        if (report) Check(false, row.what);
+    }
+    return misses;
+}
+
+WarpChoice Real(bool c, std::int32_t s, std::uint32_t l, bool f, std::int64_t h, std::int64_t n, bool k) {
+    return BbEngine::KeptTravel::GuestWarpChoice(c, s, l, f, h, n, k);
+}
+WarpChoice SwapHoldAsk(bool c, std::int32_t s, std::uint32_t l, bool f, std::int64_t h, std::int64_t n, bool k) {
+    const WarpChoice real = Real(c, s, l, f, h, n, k);
+    return real == WarpChoice::Hold ? WarpChoice::Ask : real == WarpChoice::Ask ? WarpChoice::Hold : real;
+}
+WarpChoice NoLimit(bool c, std::int32_t s, std::uint32_t l, bool f, std::int64_t, std::int64_t n, bool k) {
+    return Real(c, s, l, f, kFresh, n, k);
+}
+WarpChoice NoDrop(bool c, std::int32_t s, std::uint32_t l, bool, std::int64_t h, std::int64_t n, bool k) {
+    return Real(c, s, l, false, h, n, k);
+}
+WarpChoice HostHolds(bool, std::int32_t s, std::uint32_t l, bool f, std::int64_t h, std::int64_t n, bool k) {
+    return Real(true, s, l, f, h, n, k);
+}
+WarpChoice SnatcherHeld(bool c, std::int32_t s, std::uint32_t l, bool f, std::int64_t h, std::int64_t n, bool k) {
+    return Real(c, s == kSnatcher ? 13200310 : s, l, f, h, n, k);
+}
+WarpChoice KeepIgnored(bool c, std::int32_t s, std::uint32_t l, bool f, std::int64_t h, std::int64_t n, bool) {
+    return Real(c, s, l, f, h, n, true);
+}
+
+struct DoorRun {
+    int follows = 0, asks = 0, solos = 0, drops = 0;
+    bool held_at_end = false;
+};
+
+DoorRun RunDoor(std::int64_t frame7_at, const std::vector<std::int64_t>& own_warps, bool keep) {
+    BbEngine::KeptTravel::StoryHold hold;
+    DoorRun run;
+    bool following = false;
+    for (std::int64_t now = 0; now <= 40000; now += 100) {
+        for (std::int64_t at : own_warps) {
+            if (at != now) continue;
+            const WarpChoice choice = hold.Warp(true, 13200310, 2602959, following, now, keep);
+            if (choice == WarpChoice::Drop) ++run.drops;
+            else if (choice == WarpChoice::Ask) ++run.asks;
+            else if (choice == WarpChoice::Solo) ++run.solos;
+        }
+        std::uint32_t lamp = 0;
+        const WarpChoice choice = hold.Tick(true, following, now, keep, lamp);
+        if (lamp && choice == WarpChoice::Ask) ++run.asks;
+        else if (lamp && choice == WarpChoice::Solo) ++run.solos;
+        else if (lamp && choice == WarpChoice::Drop) ++run.drops;
+        if (now == frame7_at) {
+            hold.Followed();
+            following = true;
+            ++run.follows;
+        }
+    }
+    run.held_at_end = hold.Held();
+    return run;
+}
+
+bool HeldThrough(bool give_up) {
+    using namespace BbEngine::KeptTravel;
+    Load<FakeClock> load;
+    FakeClock::time_point now{};
+    const std::int64_t rejoin_until = now.time_since_epoch().count() + 60000;
+    load.Begin(now);
+    bool held_always = true, old_rule_lapsed = false;
+    Step step = Step::Wait;
+    while (now.time_since_epoch() <= std::chrono::seconds(400)) {
+        now += std::chrono::milliseconds(100);
+        const auto since = now.time_since_epoch();
+        const bool loading = give_up || since < std::chrono::seconds(90);
+        const bool host_here = !give_up && since >= std::chrono::seconds(130);
+        step = load.Tick(now, loading, !loading, true, host_here, 0);
+        if (step == Step::Done || step == Step::GiveUp) break;
+        const std::int64_t t = since.count();
+        held_always = held_always && LeaveChecksHeld(rejoin_until, load.Active(), t);
+        old_rule_lapsed = old_rule_lapsed || !LeaveChecksHeld(rejoin_until, false, t);
+    }
+    const std::int64_t end = now.time_since_epoch().count();
+    return held_always && old_rule_lapsed && step == (give_up ? Step::GiveUp : Step::Done) && !LeaveChecksHeld(rejoin_until, load.Active(), end);
+}
+}
+
+int RunAll() {
+    failures = 0;
     using namespace BbEngine::KeptTravel;
     using std::chrono::seconds;
     Check(SceneSeenFlag(12410000) == 12410000, "a run-once scene is seen when its own event flag is set");
@@ -73,6 +201,35 @@ int main() {
         t += std::chrono::milliseconds(100);
         return load.Tick(t, loading, placed, session, here, missing);
     };
+
+    auto Members = [&](KeptLoad& load, bool loading, bool placed, bool here, int missing, bool members_in) {
+        t += std::chrono::milliseconds(100);
+        return load.Tick(t, loading, placed, true, here, missing, members_in);
+    };
+
+    KeptLoad left;
+    left.Begin(t);
+    Check(Members(left, true, false, false, 0, false) == Step::Wait, "a member out of the game's session while loading is waited for");
+    Members(left, false, true, false, 1, true);
+    t += seconds(3);
+    Check(Members(left, false, true, true, 1, true) == Step::Rebuild, "the bodies are rebuilt while everyone is in the session");
+    Check(Members(left, false, true, true, 0, false) == Step::GiveUp, "a member whose game left the session ends the travel as lost, never Done");
+    Check(left.MembersLeft() && !left.Active(), "and says that a member left");
+
+    KeptLoad quick;
+    quick.Begin(t);
+    Members(quick, true, false, false, 0, true);
+    Members(quick, false, true, false, 1, true);
+    Check(Members(quick, false, true, true, 0, false) == Step::GiveUp && quick.MembersLeft(), "a member gone right after the load is lost at once");
+
+    KeptLoad stayed;
+    stayed.Begin(t);
+    Members(stayed, true, false, false, 0, true);
+    Members(stayed, false, true, false, 0, true);
+    t += seconds(3);
+    Check(Members(stayed, false, true, true, 0, true) == Step::Done && !stayed.MembersLeft(), "everyone in the session and here: Done as before");
+    stayed.Begin(t);
+    Check(!stayed.MembersLeft(), "a new travel starts with nobody gone");
 
     KeptLoad idle;
     Check(!idle.Active() && Tick(idle, true, true, true, true, 0) == Step::Wait, "nothing happens before Begin");
@@ -165,7 +322,60 @@ int main() {
     Check(!HoldForHost(true, true, false), "the host is here");
     Check(!HoldForHost(true, false, true) && !HoldForHost(false, false, false), "the wait ends at its limit or with the link");
 
-    if (failures) return 1;
+    Check(TableMisses(Real, true) == 0, "the guest warp table holds");
+    Check(TableMisses(SwapHoldAsk, false) > 0, "mutant: hold and ask swapped is caught");
+    Check(TableMisses(NoLimit, false) > 0, "mutant: no 15 s limit is caught");
+    Check(TableMisses(NoDrop, false) > 0, "mutant: following ignored is caught");
+    Check(TableMisses(HostHolds, false) > 0, "mutant: the host held too is caught");
+    Check(TableMisses(SnatcherHeld, false) > 0, "mutant: the snatcher held is caught");
+    Check(TableMisses(KeepIgnored, false) > 0, "mutant: keeping off ignored is caught");
+
+    const DoorRun door = RunDoor(6100, {5900, 6800}, true);
+    Check(door.follows == 1 && door.asks == 0 && door.solos == 0, "door: one follow, no ask, no solo leave");
+    Check(door.drops == 1 && !door.held_at_end, "door: the late copy is dropped and nothing stays held");
+    const DoorRun door_off = RunDoor(6100, {5900, 6800}, false);
+    Check(door_off.follows == 1 && door_off.asks == 0 && door_off.solos == 0, "door with keeping off: still no solo leave");
+    const DoorRun alone_door = RunDoor(-1, {5900, 6000}, true);
+    Check(alone_door.asks == 1 && alone_door.solos == 0 && !alone_door.held_at_end, "the guest opened the door alone: one ask after 15 s");
+    const DoorRun alone_off = RunDoor(-1, {5900}, false);
+    Check(alone_off.solos == 1 && alone_off.asks == 0, "the guest opened the door alone, keeping off: one solo leave");
+    const DoorRun late_host = RunDoor(25000, {5900}, true);
+    Check(late_host.asks == 1 && late_host.follows == 1, "a host travel after the 15 s fallback still follows");
+
+    Check(HeldThrough(false), "leave checks held through 90 s of loading and 40 s of waiting, until Done");
+    Check(HeldThrough(true), "leave checks held through a stuck load until GiveUp");
+    Check(LeaveChecksHeld(60000, false, 59999) && !LeaveChecksHeld(60000, false, 60000), "the old 60 s hold alone ends at 60 s");
+
+    return failures;
+}
+
+int main(int argc, char** argv) {
+#ifdef LANTERN_KEPT_TRAVEL_MUTANTS
+    if (argc > 1 && !std::strcmp(argv[1], "--mutants")) {
+        quiet = true;
+        if (RunAll()) {
+            std::printf("kept-travel mutants: the unmutated run failed\n");
+            return 1;
+        }
+        int survivors = 0;
+        for (int m = 1; m < int(BbEngine::KeptTravel::Mutant::kCount); ++m) {
+            BbEngine::KeptTravel::g_mutant = m;
+            const int found = RunAll();
+            std::printf("kept-travel mutants: mutant %d %s (%d checks)\n", m, found ? "caught" : "survived", found);
+            survivors += found ? 0 : 1;
+        }
+        BbEngine::KeptTravel::g_mutant = 0;
+        if (survivors) return 1;
+        std::printf("kept-travel mutants: every mutant caught (%d)\n", int(BbEngine::KeptTravel::Mutant::kCount) - 1);
+        return 0;
+    }
+    std::printf("kept-travel-test: the mutant build runs with --mutants\n");
+    return 1;
+#else
+    (void)argc;
+    (void)argv;
+    if (RunAll()) return 1;
     std::printf("kept-travel-test: ok\n");
     return 0;
+#endif
 }

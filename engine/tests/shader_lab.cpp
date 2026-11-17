@@ -40,7 +40,10 @@
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/opcodes.h"
 #include "shader_recompiler/ir/passes/srt.h"
+#include "core/emulator_settings.h"
 #include "core/signals.h"
+#include "engine/cache_settings.h"
+#include "engine/catalog_keys.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
@@ -52,6 +55,7 @@
 #include "common/serdes.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/vk_effect_shaders.h"
 
 namespace fs = std::filesystem;
 using namespace Shader;
@@ -751,6 +755,38 @@ u32 RemoveOrphanKeys(const fs::path& dir) {
     return removed;
 }
 
+std::span<const u8> ByteView(const std::vector<char>& bytes) {
+    return {reinterpret_cast<const u8*>(bytes.data()), bytes.size()};
+}
+
+std::optional<BbEngine::CacheSettings::LabRecord> CacheProfile(const std::vector<char>& bytes, Profile& profile) {
+    const auto mode = Lifter::GetMode();
+    const auto lab = BbEngine::CacheSettings::OpenForLab(
+        ByteView(bytes), sizeof(Profile), EmulatorSettings.IsDirectMemoryAccessEnabled(),
+        BbEngine::CacheSettings::LifterValue(mode == Lifter::Mode::On, mode == Lifter::Mode::Compare));
+    if (lab) std::memcpy(&profile, lab->profile.data(), sizeof(Profile));
+    return lab;
+}
+
+bool ProfileOf(const std::vector<char>& bytes, Profile& profile) {
+    const auto slice = BbEngine::CacheSettings::ProfileOf(ByteView(bytes), sizeof(Profile));
+    if (slice) std::memcpy(&profile, slice->data(), sizeof(Profile));
+    return slice.has_value();
+}
+
+std::vector<u32> StoredSpirv(std::vector<u32> spv, const BbEngine::CacheSettings::LabRecord& lab, const Info& info,
+                             const RuntimeInfo& runtime_before, const Profile& profile, const Backend::Bindings& start,
+                             std::span<const u32> code) {
+    namespace C = BbEngine::CacheSettings;
+    if (!C::Lifts(lab.compile) ||
+        Vulkan::EffectShaders::KeepRecompiled(info, lab.compile.field[C::ModernSsr], lab.compile.field[C::PomCavity])) {
+        return spv;
+    }
+    auto lifted = Lifter::Lift(Lifter::MakeInput(info, runtime_before, profile, start, code));
+    if (lifted.ok() && lifted.uses_tone_curve == info.uses_tone_curve) return std::move(lifted.spirv);
+    return spv;
+}
+
 void Leave(const fs::path& dir, const std::string& name, u64 pgm, size_t perm) {
     std::error_code error;
     fs::remove(dir / (name + ".spv"), error);
@@ -761,11 +797,11 @@ void Leave(const fs::path& dir, const std::string& name, u64 pgm, size_t perm) {
 int RecompileBatch(const fs::path& dir, size_t start, size_t end, const fs::path& only) {
     const auto profile_bytes = ReadAll(dir / "profile.bin");
     Profile profile{};
-    if (profile_bytes.size() != sizeof(Profile)) {
+    const auto lab = CacheProfile(profile_bytes, profile);
+    if (!lab) {
         std::printf("\n@PROFILE\n");
         return 3;
     }
-    std::memcpy(&profile, profile_bytes.data(), sizeof(Profile));
     const auto names = BatchNames(dir, only);
     Pools pools;
     end = std::min(end, names.size());
@@ -804,9 +840,11 @@ int RecompileBatch(const fs::path& dir, size_t start, size_t end, const fs::path
         ShaderParams params = cap.Params();
         Info info(HwStage(cap.header.hw_stage), SwStage(cap.header.sw_stage), params);
         RuntimeInfo runtime_info = cap.Runtime();
+        const RuntimeInfo runtime_before = runtime_info;
         const auto program = TranslateProgram(cap.code, pools, info, runtime_info, profile);
         Backend::Bindings bindings = old_spec.start;
-        auto spv = Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+        const auto spv = StoredSpirv(Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings), *lab, info,
+                                     runtime_before, profile, old_spec.start, cap.code);
         const StageSpecialization new_spec(info, runtime_info, profile, old_spec.start);
         old_spec.info = &info;
         if (!(new_spec == old_spec)) {
@@ -849,11 +887,11 @@ struct StageRecord {
 int FixKeys(const fs::path& dir) {
     const auto profile_bytes = ReadAll(dir / "profile.bin");
     Profile profile{};
-    if (profile_bytes.size() != sizeof(Profile)) {
+    const auto lab = CacheProfile(profile_bytes, profile);
+    if (!lab) {
         std::printf("\n@FIXED 0 0 0\n");
         return 3;
     }
-    std::memcpy(&profile, profile_bytes.data(), sizeof(Profile));
     std::error_code error;
     std::map<u64, std::unique_ptr<StageRecord>> records;
     const auto record = [&](u64 hash) -> StageRecord* {
@@ -904,9 +942,11 @@ int FixKeys(const fs::path& dir) {
         ShaderParams params = cap.Params();
         Info info(HwStage(cap.header.hw_stage), SwStage(cap.header.sw_stage), params);
         RuntimeInfo runtime_info = cap.Runtime();
+        const RuntimeInfo runtime_before = runtime_info;
         const auto program = TranslateProgram(cap.code, pools, info, runtime_info, profile);
         Backend::Bindings bindings = start;
-        const auto spv = Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+        const auto spv = StoredSpirv(Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings), *lab, info,
+                                     runtime_before, profile, start, cap.code);
         StageSpecialization spec(info, runtime_info, profile, start);
         if (!(spec == wanted)) return made[made_key] = 0;
         size_t perm = used.empty() ? 0 : *used.rbegin() + 1;
@@ -1131,6 +1171,13 @@ int RecompileCache(const fs::path& self, const fs::path& dir, const fs::path& on
         Leave(dir, names[index], pgm, perm);
     }
     const u32 orphan_keys = RemoveOrphanKeys(dir);
+    if (const auto profile_bytes = ReadAll(dir / "profile.bin"); profile_bytes.size() == sizeof(Profile)) {
+        Profile ignored{};
+        if (const auto lab = CacheProfile(profile_bytes, ignored); lab && !lab->recorded) {
+            const auto stamped = BbEngine::CacheSettings::LabStamped(lab->profile, lab->compile);
+            WriteAtomically(dir / "profile.bin", stamped.data(), stamped.size());
+        }
+    }
     if (verbose) {
         for (const auto& [why, n] : reasons) {
             std::printf("  %u: %s\n", n, why.c_str());
@@ -1430,11 +1477,10 @@ int CheckCache(const fs::path& dir) {
 int Bench(const fs::path& dir, int rounds, const fs::path& report) {
     const auto profile_bytes = ReadAll(dir / "profile.bin");
     Profile profile{};
-    if (profile_bytes.size() != sizeof(Profile)) {
+    if (!ProfileOf(profile_bytes, profile)) {
         std::fprintf(stderr, "%s: profile of another engine\n", (dir / "profile.bin").string().c_str());
         return 3;
     }
-    std::memcpy(&profile, profile_bytes.data(), sizeof(Profile));
     if (!ApplyLabProfile(profile)) {
         return 2;
     }
@@ -1571,6 +1617,26 @@ std::vector<u8> ReadBytes(const fs::path& path) {
     return {v.begin(), v.end()};
 }
 
+BbEngine::CatalogKeys::StageMotion MetaMotion(const fs::path& dir, u64 hash) {
+    char name[40];
+    std::snprintf(name, sizeof(name), "0x%016llx.meta", (unsigned long long)hash);
+    auto blob = ReadBytes(dir / name);
+    StageSpecialization spec;
+    size_t perm = 0;
+    if (blob.empty() || !Vulkan::ReadShaderMetaSpec(std::move(blob), spec, perm)) return {};
+    const auto& runtime = spec.runtime_info;
+    if (runtime.hw_stage == HwStage::Vertex) return {true, true, runtime.hw.vs.motion_vectors != 0};
+    if (runtime.hw_stage == HwStage::Fragment) return {true, false, runtime.hw.fs.motion_vectors};
+    return {true, false, false};
+}
+
+bool StaleMotionKey(const fs::path& dir, const std::vector<u8>& key) {
+    static_assert(BbEngine::CatalogKeys::kVertexStage == size_t(SwStage::Vertex));
+    static_assert(BbEngine::CatalogKeys::kFragmentStage == size_t(SwStage::Fragment));
+    return BbEngine::CatalogKeys::StaleKey(key.data(), key.size(), offsetof(Vulkan::GraphicsPipelineKey, motion_vectors),
+                                           [&](u64 hash) { return MetaMotion(dir, hash); });
+}
+
 bool WriteBytes(const fs::path& path, const std::vector<u8>& bytes) {
     return WriteAtomically(path, bytes.data(), bytes.size());
 }
@@ -1592,7 +1658,7 @@ struct StateLayout {
 int ExportCatalog(const fs::path& cache, const fs::path& out) {
     std::error_code error;
     fs::create_directories(out, error);
-    u32 states = 0, metas = 0, keys = 0, dead_keys = 0;
+    u32 states = 0, metas = 0, keys = 0, dead_keys = 0, stale_keys = 0;
     std::string listed;
     const auto has_meta = [&](u64 hash) {
         char name[40];
@@ -1606,6 +1672,10 @@ int ExportCatalog(const fs::path& cache, const fs::path& out) {
             const auto hashes = KeyStageHashes(ReadAll(path));
             if (hashes.empty() || std::ranges::any_of(hashes, [&](u64 h) { return h && !has_meta(h); })) {
                 ++dead_keys;
+                continue;
+            }
+            if (StaleMotionKey(cache, ReadBytes(path))) {
+                ++stale_keys;
                 continue;
             }
         }
@@ -1649,8 +1719,8 @@ int ExportCatalog(const fs::path& cache, const fs::path& out) {
     }
     WriteAtomically(out / "files.txt", listed.data(), listed.size());
     std::printf("Shader catalog: %u states, %u specializations, %u pipeline keys in %s (%u keys without "
-                "their shaders left out)\n",
-                states, metas, keys, out.string().c_str(), dead_keys);
+                "their shaders left out, %u whose vertex shader variant does not match their motion)\n",
+                states, metas, keys, out.string().c_str(), dead_keys, stale_keys);
     return 0;
 }
 
@@ -1760,7 +1830,8 @@ int SeedCache(const fs::path& self, const fs::path& catalog, const fs::path& cac
         std::printf("Shader catalog: made on another GPU of this vendor (%04X); each shader compiled for this one\n",
                     catalog_vendor);
     }
-    const bool other_switches = catalog_profile != cache_profile;
+    const bool other_switches = catalog_profile.size() < sizeof(Profile) || cache_profile.size() < sizeof(Profile) ||
+                                std::memcmp(catalog_profile.data(), cache_profile.data(), sizeof(Profile)) != 0;
     std::set<std::string> own;
     if (std::ifstream list{catalog / "files.txt"}) {
         for (std::string line; std::getline(list, line);) {
@@ -1868,7 +1939,7 @@ int SeedCache(const fs::path& self, const fs::path& catalog, const fs::path& cac
             added_names.push_back(target_name);
         }
     }
-    u32 keys = 0;
+    u32 keys = 0, stale_keys = 0;
     for (const auto& entry : fs::directory_iterator(catalog, error)) {
         if (entry.path().extension() != ".key" || !in_catalog(entry.path()) ||
             fs::exists(cache / entry.path().filename(), error)) {
@@ -1883,11 +1954,16 @@ int SeedCache(const fs::path& self, const fs::path& catalog, const fs::path& cac
                 if (v == from) std::memcpy(key.data() + at, &to, 8);
             }
         }
+        if (StaleMotionKey(cache, key)) {
+            ++stale_keys;
+            continue;
+        }
         if (WriteBytes(cache / entry.path().filename(), key)) ++keys;
     }
     std::printf("Shader catalog: %u permutations added (%u renumbered), %u here already, %u not in this "
-                "game's files, %u records of another engine, %u pipeline keys; compiling them%s\n",
-                added, renumbered, present, missing, unreadable, keys,
+                "game's files, %u records of another engine, %u pipeline keys (%u left out whose vertex shader variant "
+                "does not match their motion); compiling them%s\n",
+                added, renumbered, present, missing, unreadable, keys, stale_keys,
                 other_switches ? " (made with other compile switches: each one checked)" : "");
     if (added_names.empty()) {
         return 0;
@@ -2796,11 +2872,10 @@ int RunCurves(const fs::path& self, const fs::path& dir, const fs::path& report)
 int LiftCache(const fs::path& dir, const fs::path& report, const fs::path& spv_dir, int rounds) {
     const auto profile_bytes = ReadAll(dir / "profile.bin");
     Profile profile{};
-    if (profile_bytes.size() != sizeof(Profile)) {
+    if (!ProfileOf(profile_bytes, profile)) {
         std::fprintf(stderr, "%s: profile of another engine\n", (dir / "profile.bin").string().c_str());
         return 3;
     }
-    std::memcpy(&profile, profile_bytes.data(), sizeof(Profile));
     if (!ApplyLabProfile(profile)) {
         return 2;
     }

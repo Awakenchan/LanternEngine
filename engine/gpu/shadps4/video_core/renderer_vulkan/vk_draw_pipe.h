@@ -15,6 +15,7 @@
 #include "bbport_platform.h"
 #include "bbport_threads.h"
 #include "bbport_sections.h"
+#include "lantern_meter.h"
 
 #include <array>
 #include <atomic>
@@ -27,6 +28,7 @@
 #include "common/assert.h"
 #include "common/thread.h"
 #include "common/types.h"
+#include "engine/pipe_census.h"
 
 namespace Vulkan {
 
@@ -84,6 +86,8 @@ public:
         head += pending_size;
         published.store(head, std::memory_order_seq_cst);
         ++packets;
+        committed_packets.store(packets, std::memory_order_relaxed);
+        Lantern::Meter::NotePlace();
         if (sleeping.load(std::memory_order_seq_cst)) {
             wake.fetch_add(1, std::memory_order_seq_cst);
             wake.notify_one();
@@ -121,6 +125,7 @@ public:
                   [this] { return packets; });
         const u64 waited = __rdtsc() - start;
         drain_cycles += waited;
+        waited_cycles.store(drain_cycles, std::memory_order_relaxed);
         cycles_by_reason[slot] += waited;
     }
 
@@ -154,6 +159,7 @@ public:
         WaitUntil([this, number] { return ReachedPacket(number); }, [number] { return number; });
         const u64 waited = __rdtsc() - start;
         drain_cycles += waited;
+        waited_cycles.store(drain_cycles, std::memory_order_relaxed);
         cycles_by_reason[slot] += waited;
     }
 
@@ -242,6 +248,7 @@ public:
     /// spent running packets, waits that went to sleep.
     u64 packets = 0, drains = 0, drain_cycles = 0, sleeps = 0;
     std::atomic<u64> busy_cycles{0};
+    std::atomic<u64> waited_cycles{0};
 
 private:
     struct Header {
@@ -322,6 +329,7 @@ private:
         on_stage_b = true;
         BbSections::recording_thread = true;
         stage_b_tid.store(BbPlatform::CurrentThreadId(), std::memory_order_release);
+        const bool census = BbEngine::PipeCensus::On();
         u64 at = 0;
         while (true) {
             // Packets follow each other within microseconds while a frame is decoded: spin,
@@ -360,10 +368,18 @@ private:
                 consumed.store(at, std::memory_order_release);
                 continue;
             }
+            const u64 queued = census ? committed_packets.load(std::memory_order_relaxed) -
+                                            consumed_packets.load(std::memory_order_relaxed)
+                                      : 0;
+            Lantern::Meter::NotePlace();
             const u64 start = __rdtsc();
             running_end = at + header->size;
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
-            busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            const u64 spent = __rdtsc() - start;
+            busy_cycles.fetch_add(spent, std::memory_order_relaxed);
+            if (census) {
+                BbEngine::PipeCensus::NoteStageB(queued > 0 && queued < (u64{1} << 63) ? queued - 1 : 0, spent);
+            }
             at += header->size;
             // bbport: the position first, then the count stage A's sleeping waits look at (it
             // finds the position past the packet once the count says so), then whether one of
@@ -383,6 +399,7 @@ private:
     u64 head = 0; ///< stage A's write position
     u32 pending_size = 0;
     alignas(64) std::atomic<u64> published{0};
+    std::atomic<u64> committed_packets{0};
     alignas(64) std::atomic<u64> consumed{0};
     std::atomic<u64> consumed_packets{0}; ///< packets stage B has run (NextPacket numbers)
     u64 running_end = 0; ///< stage B: the end of the packet it runs (PeekNext; its cache line)

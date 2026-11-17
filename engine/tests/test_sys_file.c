@@ -85,7 +85,7 @@ int main(void) {
         fclose(f);
     }
     setenv("BB_MOD_FILES", list, 1);
-    sys_file_configure(game, user);
+    EXPECT(!sys_file_configure(game, user));
 
     EXPECT(sys_file.count + sys_posix_file.count == 24);
     open_ = fn("sceKernelOpen");

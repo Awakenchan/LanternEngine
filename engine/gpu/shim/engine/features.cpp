@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_objects.h"
+#include "hook_entries.h"
 #include "gx_records.h"
+#include "gx_owed_check.h"
+#include "gx_whole_route.h"
 #include "gx_draws.h"
 #include "gx_trace.h"
+#include "gx_whole_hooks.h"
 #include "engine_hooks.h"
 #include "camera.h"
 #include "change_appearance.h"
@@ -12,20 +16,27 @@
 #include "engine_state.h"
 #include "camera_timing.h"
 #include "frame_rate.h"
+#include "../lantern_ab_flip.h"
+#include "../lantern_meter.h"
 #include "game_status.h"
 #include "job_slots.h"
+#include "main_jobs.h"
+#include "main_jobs_barrier_hook.h"
 #include "graphics.h"
 #include "loading.h"
+#include "light_list.h"
 #include "menu_memory.h"
 #include "online_fixes.h"
 #include "option_menu.h"
 #include "rebirth.h"
 #include "render_guard.h"
+#include "trophy_rules.h"
 #include "trophy_sync.h"
 #include "widescreen.h"
 #include "../input/input.h"
 #include "../face_shot.h"
 #include "bbport_settings.h"
+#include "../test_sandbox.h"
 #include <array>
 #include <cstdlib>
 #include <cstring>
@@ -34,17 +45,28 @@
 extern "C" int sys_file_translate(const char*, char*, std::size_t);
 extern "C" int sys_file_mount(const char*, const char*);
 extern "C" void sys_file_unmount(const char*);
+extern "C" void sys_trophy_role(const char*);
 
 namespace BbEngine {
 namespace {
+void FlipOne(const char* name, std::atomic<int>* value) {
+    if (!value || value->load(std::memory_order_relaxed) != 1) return;
+    const Lantern::AbFlip::Registered r = Lantern::AbFlip::Register(name, value, 0);
+    if (r == Lantern::AbFlip::Registered::Added) host_log("A/B flip: %s starts on and turns off at the flip", name);
+    else if (r != Lantern::AbFlip::Registered::Off) host_log("A/B flip: %s could not be added, it stays on", name);
+}
+
+void FlipJobs(bool jobs_barrier) {
+    FlipOne("job-lock", MainJobs::LockSwitch());
+    FlipOne("job-node-cache", MainJobs::CacheSwitch());
+    if (jobs_barrier) FlipOne("main-jobs-barrier", &MainJobsBarrier::Switch());
+}
 constexpr char kVerifiedImage[] = "071df19c8880086d97182dbc057bc8cb37badaca57d9112683836b24a0444c0a";
 
 constexpr std::size_t kStepConstructor = 0x1c1cce0;
-constexpr std::uint8_t kStepEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
-                                       0x53, 0x50, 0x4d, 0x89, 0xce, 0x48, 0x89, 0xfb};
+constexpr const auto& kStepEntry = HookEntries::kFeaturesStepEntry;
 constexpr std::size_t kPacerUpdate = 0x2034770;
-constexpr std::uint8_t kPacerEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                        0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x38};
+constexpr const auto& kPacerEntry = HookEntries::kFeaturesPacerEntry;
 
 constexpr char kDreamLayout[] = "/app0/dvdroot_ps4/map/mapstudio/m21_00_00_00.msb.dcx";
 constexpr char kDreamLayoutFile[] = "dvdroot_ps4/map/mapstudio/m21_00_00_00.msb.dcx";
@@ -57,14 +79,15 @@ bool Seamless() {
     return on;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnStep(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnStep(std::uint64_t, std::uint64_t* saved) noexcept {
     menu_steps_notify(saved);
     return 0;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnFrame(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnFrame(std::uint64_t, std::uint64_t* saved) noexcept {
     FrameRate::Tick();
     Loading::Tick(saved[5]);
+    LightList::Tick();
     ChangeAppearance::Tick();
     BbFaceShot::Tick(ChangeAppearance::PreviewShown() && Seamless());
     Rebirth::Tick();
@@ -74,8 +97,11 @@ std::int64_t __attribute__((sysv_abi)) OnFrame(std::uint64_t, const std::uint64_
     Widescreen::Tick();
     Cheats::Tick();
     TrophySync::Tick();
+    sys_trophy_role(TrophyRules::RoleName(OnlineFixes::PartyRole()));
     GameStatus::Tick();
     OnlineFixes::Tick();
+    MainJobs::Tick();
+    MainJobsBarrier::Tick();
     return 0;
 }
 
@@ -94,6 +120,10 @@ bool DreamLayoutIsTheGames() {
 }
 
 void Install(std::uint8_t* image, std::size_t size) {
+    LanternSandbox::TheSwitches();
+    struct InstallEnd {
+        ~InstallEnd() { EndInstall(); }
+    } install_end;
     const auto& s = BbSettings::Get();
     const char* mirror_asset = std::getenv("BB_DREAM_MIRROR_ASSET");
     const char* identity = std::getenv("BB_ENGINE_IMAGE_SHA256");
@@ -113,13 +143,18 @@ void Install(std::uint8_t* image, std::size_t size) {
         mirror_asset = nullptr;
     }
     std::array<Hook, 2> hooks;
-    if (!Prepare(hooks[0], image, size, kStepConstructor, kStepEntry, OnStep) ||
-        !Prepare(hooks[1], image, size, kPacerUpdate, kPacerEntry, OnFrame)) {
+    if (!Prepare(hooks[0], image, size, kStepConstructor, SiteKind::Entry, kStepEntry, OnStep) ||
+        !Prepare(hooks[1], image, size, kPacerUpdate, SiteKind::Entry, kPacerEntry, OnFrame)) {
         for (auto& h : hooks) Discard(h);
         host_log("engine features off: the game's code is not 1.09's (or no memory for the hooks)");
         return;
     }
+    if (const WriteResult result = Commit(hooks); result != WriteResult::Applied) {
+        host_log("engine features off: the game's frame and step hooks %s", Describe(result));
+        return;
+    }
     Loading::Install(image);
+    LightList::Install(image);
     StateInitialize(reinterpret_cast<std::uint64_t>(image));
 
     std::error_code error;
@@ -152,20 +187,24 @@ void Install(std::uint8_t* image, std::size_t size) {
     const bool timing = EffectTiming::Install(image, size);
     const bool ground_trace = GroundTrace::Install(image, size);
     const bool frame_rate = FrameRate::Install(image, size);
+    (void)Lantern::Meter::NoteGuestImage(image, size);
     CameraTiming::Install(image, size);
     const bool slots = JobSlots::Install(image, size);
+    MainJobs::Install(image, size);
+    const bool jobs_barrier = MainJobsBarrier::Install(image, size) == MainJobsBarrier::Installed::Yes;
+    FlipJobs(jobs_barrier);
     const bool status = GameStatus::Install(image, size);
     GxObjects::Install(image, size);
     GxTrace::Install(image, size);
     GxDraws::Install(image, size);
     GxRecords::Install(image, size);
+    GxWhole::OwedCheck::Start(GxRecords::WholeMode());
+    GxWhole::Hooks::Install(image, size, GxRecords::WholeRequested(), GxRecords::WholeMode());
+    GxWholeRoute::Start(GxRecords::WholeMode(), GxRecords::WholeCounting());
     if (!(editor || input || camera || wide || graphics || local_shadows || spot_shadows ||
           directional_shadows || directional_resolution || menus || rebirth || cheats || online || guard || timing || ground_trace ||
-          frame_rate || slots || status)) {
-        for (auto& h : hooks) Discard(h);
+          frame_rate || slots || jobs_barrier || status)) {
         host_log("engine features off: none could be prepared");
-        return;
     }
-    Commit(hooks);
 }
 }

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "menu_memory.h"
+#include "engine_hooks.h"
 #include <cstdio>
 #include <cstring>
+#include <span>
 
 namespace BbEngine::MenuMemory {
 namespace {
@@ -31,9 +33,14 @@ bool Install(std::uint8_t* image, std::size_t size) {
     if (!Compatible(image, size)) return false;
     const std::uint32_t heap = kGameHeap + kMoreHeap, pages = kGamePages + kMorePages;
     const std::uint64_t budget = kGameBudget + kMoreBudget;
-    std::memcpy(image + kScaleformHeap + 1, &heap, sizeof heap);
-    std::memcpy(image + kScaleformPages + 1, &pages, sizeof pages);
-    std::memcpy(image + kMenuBudget, &budget, sizeof budget);
+    const CodePatch patches[] = {
+        {image, kScaleformHeap + 1, AsCode(std::span(&kGameHeap, 1)), AsCode(std::span(&heap, 1))},
+        {image, kScaleformPages + 1, AsCode(std::span(&kGamePages, 1)), AsCode(std::span(&pages, 1))},
+        {image, kMenuBudget, AsCode(std::span(&kGameBudget, 1)), AsCode(std::span(&budget, 1))}};
+    if (const WriteResult result = WriteCode(patches); result != WriteResult::Applied) {
+        std::printf("Engine: Scaleform menu heaps left as the game has them: their code %s\n", Describe(result));
+        return false;
+    }
     std::printf("Engine: Scaleform menu heaps %u/%u MiB, MENU %llu MiB (native option pages)\n", heap >> 20,
                 pages >> 20, static_cast<unsigned long long>(budget >> 20));
     return true;

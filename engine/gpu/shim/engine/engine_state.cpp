@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "engine_state.h"
+#include "trophy_rules.h"
 #include <array>
 #include <atomic>
 #include <cstdarg>
@@ -38,9 +39,9 @@ std::atomic<std::uint64_t> g_said_player{0};
 
 constexpr std::size_t kPlayerChr = 0x60, kPlayerBlock = 0x3f8;
 
-constexpr std::size_t kFlagsPerBlock = 0x1c, kPoolStride = 0x20, kPool = 0x28, kBlocks = 0x38;
+constexpr std::size_t kFlagsPerBlock = 0x1c, kPoolStride = 0x20, kPool = 0x28, kBlocks = 0x38, kFlagMode = 0x80;
 
-std::uint64_t FlagBlock(std::uint64_t man, std::uint32_t block) {
+std::uint64_t FlagBlock(std::uint64_t man, std::uint32_t block, std::uint32_t* kind_out = nullptr) {
     const std::uint64_t head = Follow(man + kBlocks);
     std::uint64_t node = head ? Follow(head + 8) : 0, best = head;
     for (int depth = 0; node && depth < 64; ++depth) {
@@ -56,6 +57,7 @@ std::uint64_t FlagBlock(std::uint64_t man, std::uint32_t block) {
     }
     std::uint32_t key = 0, kind = 0;
     if (!head || best == head || !Peek(best + 0x20, &key) || key != block || !Peek(best + 0x28, &kind)) return 0;
+    if (kind_out) *kind_out = kind;
     if (kind == 2) return Follow(best + 0x30);
     if (kind != 1) return 0;
     std::uint32_t stride = 0, index = 0;
@@ -63,6 +65,13 @@ std::uint64_t FlagBlock(std::uint64_t man, std::uint32_t block) {
     if (!pool || !Peek(man + kPoolStride, &stride) || !Peek(best + 0x30, &index)) return 0;
     return pool + std::uint32_t(stride * index);
 }
+struct LiveFlags {
+    std::uint64_t man;
+    bool Per(std::uint32_t* per) const { return Peek(man + kFlagsPerBlock, per); }
+    bool Mode(std::int32_t* mode) const { return Peek(man + kFlagMode, mode); }
+    std::uint64_t Block(std::uint32_t block, std::uint32_t* kind) const { return FlagBlock(man, block, kind); }
+    bool Byte(std::uint64_t data, std::uint32_t at, std::uint8_t* out) const { return Peek(data + at, out); }
+};
 bool FlagByte(std::uint32_t id, std::uint64_t* byte, std::uint8_t* mask) {
     const std::uint64_t man = Singleton(kEventFlagMan);
     std::uint32_t per = 0;
@@ -203,6 +212,16 @@ bool event_flag_get(std::uint32_t id, bool* value) {
     if (!FlagByte(id, &byte, &mask) || !Peek(byte, &v)) return false;
     if (value) *value = (v & mask) != 0;
     return true;
+}
+
+bool event_flag_get_own(std::uint32_t id, bool* value) {
+    const std::uint64_t man = Singleton(kEventFlagMan);
+    return man && TrophyRules::OwnFlag(LiveFlags{man}, id, value);
+}
+
+bool event_flag_mode(std::int32_t* mode) {
+    const std::uint64_t man = Singleton(kEventFlagMan);
+    return man && Peek(man + kFlagMode, mode);
 }
 
 bool event_flag_set(std::uint32_t id, bool value) {

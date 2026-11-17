@@ -12,7 +12,6 @@ namespace BloodborneLauncher.Core
     {
         public const string OnlineCommunity = "https://thehuntersdream.com";
         public const string Discord = "https://discord.gg/d3Uv3Cfr5x";
-        public const string ShadnetServer = "srv.shadps4.net:31313";
 
         private JsonObject _data = new();
         private JsonObject _base = new();
@@ -42,7 +41,6 @@ namespace BloodborneLauncher.Core
             ["vk_validation"] = false,
             ["extra_env"] = "",
             ["dlc_enabled"] = true,
-            ["online_password"] = "",
             // This launcher.
             ["port_dir"] = "",
             ["launch_method"] = "windows",
@@ -114,14 +112,17 @@ namespace BloodborneLauncher.Core
             ["trophy_position"] = "top-right",
         };
 
+        public static JsonNode? Default(string key) => Defaults().GetValueOrDefault(key)?.DeepClone();
+
         public void Load()
         {
             (_data, _base) = SettingsFile.Layer(Defaults(), null);
 
+            var (saved, stamp, state) = SettingsFile.ReadWithState(Paths.ConfigFile);
+            _stamp = stamp;
+            LoadState = state;
             try
             {
-                var (saved, stamp) = SettingsFile.Read(Paths.ConfigFile);
-                _stamp = stamp;
                 if (saved != null)
                 {
                     (_data, _base) = SettingsFile.Layer(Defaults(), saved);
@@ -160,19 +161,15 @@ namespace BloodborneLauncher.Core
                     if (!saved.ContainsKey(PerfDefaultsMarker))
                         foreach (var (key, value) in PerfDefaults)
                             _data[key] = value;
-                    // Older launchers kept the shadNet password in plain text: encrypted now, and
-                    // the file rewritten without it.
-                    if (Str("online_password") is { Length: > 0 } plain && !Secret.IsProtected(plain))
-                    {
-                        OnlinePassword = plain;
+                    if (OnlineSettings.RetireSettings(_data))
                         Save();
-                    }
                 }
             }
-            catch
+            catch (Exception e) when (e is InvalidOperationException or FormatException or IOException or UnauthorizedAccessException)
             {
-                // A broken file falls back to the defaults; it is rewritten on the next save.
+                System.Diagnostics.Trace.TraceWarning($"settings.json: a value was not taken in ({e.Message})");
             }
+            if (state == TextState.Unreadable) return;
             // Saved with the next change: from then on the player's own choice stays.
             if (Updater.CurrentBeta > 0)
             {
@@ -183,6 +180,8 @@ namespace BloodborneLauncher.Core
             _data["occlusion_off_99"] = true;
             _data[PerfDefaultsMarker] = true;
         }
+
+        public TextState LoadState { get; private set; } = TextState.Absent;
 
         private const string PerfDefaultsMarker = "perf_defaults_b4";
 
@@ -216,14 +215,6 @@ namespace BloodborneLauncher.Core
             return !JsonNode.DeepEquals(before, current);
         }
 
-        /// <summary>The shadNet password, kept encrypted for this Windows user (Core/Secret.cs).</summary>
-        public string OnlinePassword
-        {
-            get => Secret.Unprotect(Str("online_password"));
-            // Should Windows refuse to encrypt it, it stays as typed rather than being lost.
-            set => Set("online_password", Secret.Protect(value) is { Length: > 0 } encrypted ? encrypted : value);
-        }
-
         public string SeamlessHostPassword
         {
             get => Secret.Unprotect(Str("seamless_host_password"));
@@ -236,7 +227,7 @@ namespace BloodborneLauncher.Core
             set => Set("seamless_password", value.Length == 0 ? "" : Secret.Protect(value) is { Length: > 0 } encrypted ? encrypted : value);
         }
 
-        /// <summary>The Hunter's Dream account token (its device link), encrypted like the password.</summary>
+        /// <summary>The Hunter's Dream account token (its device link), encrypted for this Windows user.</summary>
         public string HuntersDreamToken
         {
             get => Secret.Unprotect(Str("hd_token"));

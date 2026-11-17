@@ -132,7 +132,7 @@ guest flip ─► GPU command thread ──────────────�
 | OptiScaler | Engine before | Now |
 |---|---|---|
 | Upscaler choice | FSR 3.1, FSR 4, FSR 4.1.1, DLSS, TAA, off | same |
-| DLSS presets (render preset override) | `dlss_preset` K/J/M/L/E/F/default | same; letters NVIDIA's 310.9 SDK removed (A-D) or ignores (G-I, N, O) are refused at load |
+| DLSS presets (render preset override) | `dlss_preset` auto/K/J/M/L/default | same; letters NVIDIA's 310.9 SDK removed (A-D) or ignores (G-I, N, O) are refused at load, deprecated E and F run auto |
 | Quality presets / DLAA | Native AA (DLAA) .. Ultra Performance | + Custom: `render_scale` 1.0-3.0 (render = output / scale) |
 | Ratio overrides per quality mode | fixed 1.5 / 1.7 / 2.0 / 3.0 | Custom covers it |
 | Sharpening (RCAS) and strength | `sharpen`, `sharpness` 0-2 | same |

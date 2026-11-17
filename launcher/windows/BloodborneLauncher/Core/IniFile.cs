@@ -41,8 +41,18 @@ namespace BloodborneLauncher.Core
         /// <summary>Keys the launcher changed since the file was read: only these are written over it.
         /// The game edits the same file (in-game menu) while the launcher holds an older copy.</summary>
         private readonly HashSet<string> _changed = new(StringComparer.Ordinal);
+        private readonly string? _path;
+        private string? _text;
 
-        public void Load()
+        public IniFile(string? path = null) => _path = path;
+
+        public string FilePath => _path ?? Paths.IniPath;
+
+        public TextState LastRead { get; private set; } = TextState.Absent;
+
+        public void Load() => Fill(SettingsText.Read(FilePath));
+
+        private void Fill(TextRead read)
         {
             _changed.Clear();
             _values.Clear();
@@ -51,17 +61,9 @@ namespace BloodborneLauncher.Core
             foreach (var effect in Choices.Effects)
                 _values[effect.Key] = effect.Default ? "1" : "0";
 
-            _lines = new List<string>();
-            try
-            {
-                if (File.Exists(Paths.IniPath))
-                    _lines = File.ReadAllLines(Paths.IniPath).ToList();
-            }
-            catch
-            {
-                // Unreadable: start from the defaults.
-            }
-
+            LastRead = read.State;
+            _text = read.State == TextState.Read ? read.Text : null;
+            _lines = read.State == TextState.Read ? SplitLines(read.Text) : new List<string>();
             foreach (var line in _lines)
             {
                 if (!line.Contains('=') || line.TrimStart().StartsWith('#'))
@@ -71,14 +73,71 @@ namespace BloodborneLauncher.Core
             }
         }
 
-        public void Save()
+        public bool ReloadIfChanged()
         {
-            // What the game wrote meanwhile stays: the file is read again and only the launcher's own
-            // changes go over it (PC Enhancements set in the game came back off after it exited).
+            var read = SettingsText.Read(FilePath);
+            if (read.State != TextState.Read || read.Text == _text) return false;
+            var before = new Dictionary<string, string?>(_values, StringComparer.Ordinal);
             var mine = _changed.ToDictionary(k => k, k => _values.TryGetValue(k, out var v) ? v : null, StringComparer.Ordinal);
-            Load();
+            Fill(read);
             foreach (var (key, value) in mine)
+            {
                 _values[key] = value;
+                _changed.Add(key);
+            }
+            return _values.Count != before.Count ||
+                   _values.Any(kv => !before.TryGetValue(kv.Key, out var old) || old != kv.Value);
+        }
+
+        private static List<string> SplitLines(string text)
+        {
+            var lines = text.Replace("\r\n", "\n").Split('\n').ToList();
+            if (lines.Count > 0 && lines[^1].Length == 0)
+                lines.RemoveAt(lines.Count - 1);
+            return lines;
+        }
+
+        public SaveOutcome Save()
+        {
+            var mine = _changed.ToDictionary(k => k, k => _values.TryGetValue(k, out var v) ? v : null, StringComparer.Ordinal);
+            List<string>? output = null;
+            var written = false;
+            SaveOutcome outcome;
+            try
+            {
+                outcome = SettingsText.Update(FilePath, before =>
+                {
+                    Fill(before);
+                    foreach (var (key, value) in mine)
+                        _values[key] = value;
+                    output = Compose();
+                    return string.Join(NewLine, output) + NewLine;
+                });
+                written = true;
+            }
+            finally
+            {
+                if (written)
+                {
+                    _lines = output!;
+                    _text = string.Join(NewLine, _lines) + NewLine;
+                }
+                else
+                {
+                    foreach (var (key, value) in mine)
+                    {
+                        _values[key] = value;
+                        _changed.Add(key);
+                    }
+                }
+            }
+            return outcome;
+        }
+
+        private const string NewLine = "\n";
+
+        private List<string> Compose()
+        {
             var written = new HashSet<string>(StringComparer.Ordinal);
             var output = new List<string>();
             foreach (var line in _lines)
@@ -102,10 +161,7 @@ namespace BloodborneLauncher.Core
             foreach (var (key, value) in _values)
                 if (!written.Contains(key) && value != null)
                     output.Add($"{key}={value}");
-
-            Directory.CreateDirectory(Path.GetDirectoryName(Paths.IniPath)!);
-            File.WriteAllText(Paths.IniPath, string.Join("\n", output) + "\n");
-            _lines = output;
+            return output;
         }
 
         /// <summary>The value, or null when the key is absent (e.g. a binding left at its default).</summary>

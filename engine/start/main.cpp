@@ -5,6 +5,7 @@
 #include "elf.h"
 #include "mods.h"
 #include "online.h"
+#include "package_switches.h"
 #include "patches.h"
 #include "prepare.h"
 
@@ -323,6 +324,27 @@ void WaitForPreviousStart() {
     CloseHandle(process);
 }
 
+void ApplyPackageSwitches(const fs::path& package) {
+    UnsetEnv("LANTERN_PACKAGE_SWITCHES");
+    const fs::path file = package / Path(kPackageSwitchesFile);
+    std::error_code error;
+    if (!fs::is_regular_file(file, error)) return;
+    PackageSwitches result;
+    try {
+        result = ReadPackageSwitches(ReadText(file), Env("LANTERN_EXTRA_VARIABLES", ""));
+    } catch (const std::exception& e) {
+        Log("Package switches (%s): not read (%s)", std::string(kPackageSwitchesFile).c_str(), e.what());
+        return;
+    }
+    std::string names;
+    for (const auto& [name, value] : result.applied) {
+        SetEnv(name.c_str(), value);
+        names += (names.empty() ? "" : ",") + name;
+    }
+    if (!names.empty()) SetEnv("LANTERN_PACKAGE_SWITCHES", names);
+    Log("%s", DescribePackageSwitches(result).c_str());
+}
+
 int Main(std::vector<std::wstring> arguments) {
     WaitForPreviousStart();
     const Folders folders = Locate();
@@ -333,7 +355,9 @@ int Main(std::vector<std::wstring> arguments) {
     }
     const fs::path data = Path(Env("BB_DATA_DIR", Utf8(folders.package)));
     const fs::path& out = folders.out;
+    ApplyPackageSwitches(folders.package);
     if (Env("BB_GPU_USER_DIR", "").empty()) SetEnv("BB_GPU_USER_DIR", Utf8(folders.package / "user"));
+    if (Env("BB_LOG_DIR", "").empty()) SetEnv("BB_LOG_DIR", Utf8(folders.package / "logs"));
     {
         std::error_code error;
         fs::create_directories(Path(Env("BB_GPU_USER_DIR", "")), error);
@@ -649,7 +673,7 @@ int Main(std::vector<std::wstring> arguments) {
     }
     const auto size_text = [](Size s) { return std::to_string(s.w) + "x" + std::to_string(s.h); };
     if (live == "1") {
-        Log("Output %s: live resolution changes (live_resolution=0: startup patch)", size_text(scaled->second).c_str());
+        Log("Output %s: live resolution changes (live_resolution=1: live changes; 0 would patch the scene size at startup)", size_text(scaled->second).c_str());
     } else if (scaled) {
         std::string early = Env("BB_UPSCALE_EARLY", "");
         if (early.empty()) early = SettingValue(config, "upscale_before_post").value_or("0");
@@ -669,7 +693,7 @@ int Main(std::vector<std::wstring> arguments) {
             else
                 SetEnv("BB_DMEM_MB", "9152");
         }
-        Log("Output %s: scene %s, direct memory %s MiB (live_resolution=1: live changes)", size_text(scaled->second).c_str(),
+        Log("Output %s: scene %s, direct memory %s MiB (live_resolution=0: startup patch; 1 would allow live changes)", size_text(scaled->second).c_str(),
             size_text(scaled->first).c_str(), Env("BB_DMEM_MB", "5056").c_str());
     }
     PatchResult patches;
@@ -773,6 +797,19 @@ int wmain(int argc, wchar_t** argv) {
         if (arguments.size() == 4 && arguments[0] == L"--test-prepare") {
             start::PrepareImage(arguments[1], arguments[2], arguments[3]);
             return 0;
+        }
+        if (arguments.size() == 2 && arguments[0] == L"--check-switches") {
+            const fs::path file = fs::path(arguments[1]) / start::Path(start::kPackageSwitchesFile);
+            std::error_code error;
+            if (!fs::exists(file, error)) {
+                std::printf("Package switches check: %s not found\n", start::Utf8(file).c_str());
+                return 4;
+            }
+            const auto result = start::ReadPackageSwitches(start::ReadText(file), "");
+            std::printf("%s\n", start::DescribePackageSwitches(result).c_str());
+            std::printf("Package switches check: %zu applied, %zu refused\n", result.applied.size(),
+                        result.refused.size());
+            return result.refused.empty() ? 0 : 3;
         }
         if (arguments.size() == 5 && arguments[0] == L"--test-mods") {
             const fs::path overlay = start::BuildModsOverlay(arguments[1], arguments[2], arguments[3], arguments[4], true);

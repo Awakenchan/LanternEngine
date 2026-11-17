@@ -1,0 +1,1 @@
+LICENSE: https://github.com/googlefonts/roboto/blob/main/LICENSE (Roboto-Medium.ttf names Apache License 2.0 in its name table; imgui's docs/FONTS.md lists it as Apache License 2.0)

@@ -212,21 +212,19 @@ internal sealed class LanternApp : Application
     /// so they were swapped. Fixed once, and only while both are still those shipped values.</summary>
     private static void FixShippedMouseBinds(string package)
     {
+        var ini = new Core.IniFile(Path.Combine(package, "lantern.ini"));
+        ini.Load();
+        if (ini.LastRead != Core.TextState.Read) return;
+        if (ini.Raw("bind.lock_on") != "Mouse3" || ini.Raw("bind.strong_attack") != "Mouse2") return;
+        ini.Set("bind.lock_on", "Mouse2");
+        ini.Set("bind.strong_attack", "Mouse3");
         try
         {
-            var ini = Path.Combine(package, "lantern.ini");
-            if (!File.Exists(ini)) return;
-            var lines = File.ReadAllLines(ini);
-            var lockOn = Array.FindIndex(lines, l => l.Trim() == "bind.lock_on=Mouse3");
-            var strong = Array.FindIndex(lines, l => l.Trim() == "bind.strong_attack=Mouse2");
-            if (lockOn < 0 || strong < 0) return;
-            lines[lockOn] = "bind.lock_on=Mouse2";
-            lines[strong] = "bind.strong_attack=Mouse3";
-            File.WriteAllLines(ini, lines);
+            ini.Save();
         }
-        catch (Exception)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            // The binds stay as they were; the launcher's Controls page can change them.
+            System.Diagnostics.Trace.TraceWarning($"lantern.ini: the shipped mouse binds were not swapped ({e.Message}); the next start tries again");
         }
     }
 

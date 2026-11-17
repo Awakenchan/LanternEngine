@@ -4,6 +4,9 @@
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "video_core/renderer_vulkan/upscaler_skips.h"
+#include "engine/loading.h"
+#include "lantern_switches.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +20,7 @@
 
 #include "bbport_sections.h"
 #include "bbport_settings.h"
+#include "dlss_rules.h"
 #include "bbport_toggles.h"
 #include "ffx_vk_portable.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
@@ -504,7 +508,9 @@ bool TemporalUpscaler::OnFrameStart() {
     }();
     BbSettings::Get().motion_blur_held.store(no_blur != 0 && active && (Scaled() || no_blur == 2),
                                              std::memory_order_relaxed);
-    if (changed || !dispatched_last_frame) reset = true;
+    const u32 history_cuts = settings.history_cuts.load(std::memory_order_relaxed);
+    if (BbDlss::ResetHistory(changed, dispatched_last_frame, history_cuts_seen, history_cuts)) reset = true;
+    history_cuts_seen = history_cuts;
     if (changed) jitter_index = 0;
     reset_frames += reset && dispatched_last_frame ? 1 : 0;
     ++reset_window_frames;
@@ -521,6 +527,7 @@ bool TemporalUpscaler::OnFrameStart() {
     applied_upscaler = upscaler;
     last_active = active;
     last_jitter = jitter_on;
+    NoteResolvedFrame(active);
     dispatched_last_frame = false;
 
     // The display pass of an upscaled frame reads the upscaled UI image.
@@ -534,7 +541,7 @@ bool TemporalUpscaler::OnFrameStart() {
     opaque_valid = false;
     mask_ready = false;
     // Halton(2, 3); the menu or toggle 1 << 25 disables it.
-    if (!jitter_on) {
+    if (!jitter_on || !UpscalerSkips::TemporalInputs(unresolved_frames)) {
         jitter = {};
         return changed;
     }
@@ -546,6 +553,35 @@ bool TemporalUpscaler::OnFrameStart() {
     const float amount = JitterAmount();
     jitter = {(Halton(jitter_index, 2) - 0.5f) * amount, (Halton(jitter_index, 3) - 0.5f) * amount};
     return changed;
+}
+
+void TemporalUpscaler::NoteResolvedFrame(bool active) {
+    const bool resolved = dispatched_last_frame;
+    const auto path = resolved ? UpscalerSkips::Path::Upscaled : frame_path;
+    const auto reason = resolved ? UpscalerSkips::Reason::Upscaled : frame_reason;
+    frame_path = UpscalerSkips::Path::None;
+    frame_reason = UpscalerSkips::Reason::NoUiDraw;
+    unresolved_frames = UpscalerSkips::NextUnresolved(unresolved_frames, resolved);
+    if (!active) {
+        return;
+    }
+    const bool loading = BbEngine::Loading::ScreenUp();
+    if (after_load.Frame(loading, resolved)) {
+        std::printf("Upscaler: %s has not run for %u frames since the load ended (%s, %s); scene LOD "
+                    "bias 0 and no jitter until it runs\n",
+                    BbSettings::UpscalerName(applied_upscaler), UpscalerSkips::kUnresolvedFramesBeforeNative,
+                    path == UpscalerSkips::Path::Copy ? "copy" : "none", UpscalerSkips::ReasonName(reason));
+    }
+    if (!Lantern::Switches::Get().frame_stats) {
+        return;
+    }
+    path_window.Add(path, reason);
+    if (const auto now = std::chrono::steady_clock::now(); now - path_window_start >= std::chrono::seconds(5)) {
+        std::printf("Upscaler frames: %s\n",
+                    UpscalerSkips::Describe(BbSettings::UpscalerName(applied_upscaler), path_window).c_str());
+        path_window = {};
+        path_window_start = now;
+    }
 }
 
 float TemporalUpscaler::CameraSpeed() const {
@@ -1416,10 +1452,12 @@ void TemporalUpscaler::Run() {
     runtime.FlushBarriers();
     vk::Image input_color = color.GetImage(), input_depth = depth.GetImage();
     vk::ImageView input_color_view = color_view, input_depth_view = depth_view;
+    bool color_storage = true;
     if (reduced) {
         VideoCore::ImageViewInfo ci;
         ci.format = color.info.pixel_format;
         const auto c = scene_targets.Read(scene_color, ci);
+        color_storage = bool(c.usage & vk::ImageUsageFlagBits::eStorage);
         ci.format = depth.info.pixel_format;
         const auto d = scene_targets.Read(camera_motion.Depth(), ci);
         input_color = c.image;
@@ -1458,7 +1496,8 @@ void TemporalUpscaler::Run() {
     own_barrier(vk::Image(output_image), vk::ImageLayout::eUndefined, all,
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral, all, rw);
 
-    camera_motion.RecordMotion(input_depth_view, *motion_view, w, h);
+    camera_motion.RecordMotion(input_depth_view, *motion_view, w, h,
+                               BbDlss::ColorNeedsCleaning(true, color_storage) ? input_color_view : vk::ImageView{});
     own_barrier(vk::Image(motion_image), vk::ImageLayout::eGeneral,
                 vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
@@ -1692,10 +1731,10 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 }
 
 float TemporalUpscaler::SceneMipBias() const {
-    if (!Active() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa) return 0.0f;
+    const bool active = Active();
+    if (!active) return 0.0f;
     const float render = float(BbSettings::Get().active_render_width.load());
     const float output = float(Scaled() ? target_width : 1920u);
-    const float scale_bias = render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
     // DLSS (DLAA too) wants one more mip level of texture detail than the render/output ratio
     // (NVIDIA's DLSS programming guide). From AwesomeObserver/bloodborne_pc b3164c1
     // (Evgeniy Doronin). dlss_mip_bias=0 (menu, BB_DLSS_MIP_BIAS=0): the ratio only, as before.
@@ -1704,7 +1743,8 @@ float TemporalUpscaler::SceneMipBias() const {
     // bbport: mip_bias (menu, launcher), the player's own offset on top, as OptiScaler's override.
     const float offset = std::clamp(BbSettings::Get().mip_bias.load(std::memory_order_relaxed),
                                     BbSettings::MipBiasMin, BbSettings::MipBiasMax);
-    return scale_bias - (dlss_extra && dlss_on ? 1.0f : 0.0f) + offset;
+    return UpscalerSkips::SceneBias(active, BbSettings::Get().upscaler == BbSettings::UpscalerTaa,
+                                    unresolved_frames, render, output, dlss_extra && dlss_on, offset);
 }
 
 void TemporalUpscaler::ApplyFsr3Tuning() {
@@ -1752,7 +1792,7 @@ void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
     }
     const auto& image = texture_cache.GetImage(color);
     const auto& depth = texture_cache.GetImage(camera_motion.Depth());
-    if (image.info.pixel_format == vk::Format::eR8G8B8A8Unorm &&
+    if (UiComposition::FrameFormat(image.info.pixel_format) &&
         image.info.size.width == depth.info.size.width &&
         image.info.size.height == depth.info.size.height) {
         ldr_target = color;
@@ -1814,17 +1854,30 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
                         !UiComposition::SceneHasUiViewportSize(render_width, render_height)) ||
                        (scaled_session && widened_ui_viewport &&
                         !UiComposition::SceneNearUiSize(render_width, render_height));
-    const bool ui_draw = movie &&
-        (image.info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
-         image.info.pixel_format == vk::Format::eR8G8B8A8Srgb) &&
+    const bool ui_draw = movie && UiComposition::FrameFormat(image.info.pixel_format) &&
         RenderTarget(image.info.size.width, image.info.size.height) &&
         !FrameCapture::IsDisplayBuffer(image.info.guest_address);
-    switch (UiComposition::Choose(Scaled(), ui_draw,
-                                  camera_motion.Ready() && ldr_target == color,
-                                  Active() && !failed && !early_upscale)) {
+    const bool temporal_ready = Active() && !failed && !early_upscale;
+    const bool frame_accepted =
+        UpscalerSkips::AcceptFrame(ldr_target && ldr_target == color,
+                                   UiComposition::FrameFormat(image.info.pixel_format),
+                                   RenderTarget(image.info.size.width, image.info.size.height));
+    const auto background = UiComposition::Choose(Scaled(), ui_draw,
+                                                  camera_motion.Ready() && frame_accepted,
+                                                  temporal_ready);
+    if (background != UiComposition::Background::None) {
+        frame_path = UpscalerSkips::Path::Copy;
+        frame_reason = background == UiComposition::Background::Temporal
+                           ? UpscalerSkips::Reason::NotDispatched
+                           : UpscalerSkips::CopyReason(temporal_ready, ldr_target || frame_accepted,
+                                                       frame_accepted, camera_motion.Ready());
+    }
+    const bool world = ldr_target && ldr_target == color;
+    switch (background) {
     case UiComposition::Background::None:
         return;
     case UiComposition::Background::Temporal:
+        ldr_target = color;
         RunScaled();
         if (ui_phase) {
             break;
@@ -1832,7 +1885,7 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
         // A failed FSR dispatch must not force UI text back to the scene resolution.
         [[fallthrough]];
     case UiComposition::Background::Copy:
-        RunUiOnly(color, depth, ldr_target && ldr_target == color);
+        RunUiOnly(color, depth, world);
         break;
     }
     if (ui_phase) {
@@ -1849,8 +1902,7 @@ bool TemporalUpscaler::LdrFrame(VideoCore::ImageId id) const {
         return false;
     }
     const auto& image = texture_cache.GetImage(id);
-    return (image.info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
-            image.info.pixel_format == vk::Format::eR8G8B8A8Srgb) &&
+    return UiComposition::FrameFormat(image.info.pixel_format) &&
            RenderTarget(image.info.size.width, image.info.size.height) &&
            !FrameCapture::IsDisplayBuffer(image.info.guest_address);
 }
@@ -2173,12 +2225,17 @@ void TemporalUpscaler::RunScaled() {
                        [label] { return std::string{label}; });
     }
     auto& color = texture_cache.GetImage(ldr_target);
-    auto& depth = texture_cache.GetImage(camera_motion.Depth());
     // The scene fills the top-left w x h of its targets (iw x ih, aligned by the game).
     const u32 iw = color.info.size.width, ih = color.info.size.height;
+    if (const auto& last = texture_cache.GetImage(camera_motion.Depth());
+        last.info.size.width != iw || last.info.size.height != ih) {
+        camera_motion.RepickDepth(iw, ih);
+    }
+    auto& depth = texture_cache.GetImage(camera_motion.Depth());
     const auto [w, h] = SceneSize(iw, ih);
     const u32 ow = target_width, oh = target_height;
     if (depth.info.size.width != iw || depth.info.size.height != ih || w > ow || h > oh) {
+        frame_reason = UpscalerSkips::Reason::SizeMismatch;
         return;
     }
     if (!EnsureResources(w, h, ow, oh, false)) {
@@ -2444,7 +2501,10 @@ void TemporalUpscaler::RunScaled() {
     const auto& settings = BbSettings::Get();
     FfxVkPortableUpscaleDispatchInfo info{};
     info.structSize = sizeof(info);
-    info.color = Describe(color_image, color.info.pixel_format, source_width, source_height,
+    const vk::Format fsr3_color_format = color.info.pixel_format == vk::Format::eR8G8B8A8Srgb
+                                             ? vk::Format::eR8G8B8A8Unorm
+                                             : color.info.pixel_format;
+    info.color = Describe(color_image, fsr3_color_format, source_width, source_height,
                           color.usage_flags, vk::ImageAspectFlagBits::eColor,
                           FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
     info.depth = Describe(depth_image, depth_format, source_width, source_height, depth.usage_flags,
@@ -2756,7 +2816,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
     const bool use_dlss = settings.upscaler == BbSettings::UpscalerDlss && dlss;
     const bool use_xess = settings.upscaler == BbSettings::UpscalerXess && xess;
     const bool vendor = use_dlss || use_xess; // DLSS or XeSS, not the FSR 4 paths
-    if (use_dlss && CameraSpeed() > float(w) * 0.5f) {
+    if (use_dlss && BbDlss::CameraCut(CameraSpeed(), w)) {
         reset = true;
     }
     const Fsr4Upscaler::Frame frame{

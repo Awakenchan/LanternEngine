@@ -28,6 +28,7 @@ public:
     WebSocket& operator=(const WebSocket&) = delete;
 
     bool Connect(const std::string& url, int timeout_s, std::string& error);
+    static bool SandboxAllows(const std::string& url, const char* site);
     void Run(const Handler& handler);
     bool Send(const void* data, std::size_t size, bool binary);
     bool SendLossy(const void* data, std::size_t size, std::size_t most_backlog);

@@ -118,6 +118,7 @@ static SYS_ABI int32_t pad_read_state(int32_t handle, PadData *pad) {
     sample(pad);
     ++reads;
     host_unlock(&lock);
+    bbgpu_pacing_pad_read();
     return 0;
 }
 

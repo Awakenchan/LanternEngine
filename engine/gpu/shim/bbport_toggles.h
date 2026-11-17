@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "lantern_switches.h"
+
 extern "C" std::uint64_t runtime_disabled_optimizations;
 extern "C" std::uint64_t runtime_experiment_bits;
 #ifdef _WIN32
@@ -114,10 +116,7 @@ inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}
     t_write_faults{0}, t_copy_cpu{0}, copy_sys_us{0}, copy_minflt{0};
 inline std::atomic<std::uint64_t> t_image_query{0}, t_image_alloc{0}, t_refresh_hash{0},
     t_refresh_obtain{0}, t_refresh_detile{0};
-inline const bool enabled = [] {
-    const char* env = std::getenv("BB_FRAME_STATS");
-    return env && env[0] == '1';
-}();
+inline const bool& enabled = Lantern::Switches::Load().frame_stats;
 struct Timer {
     std::atomic<std::uint64_t>& total;
     std::chrono::steady_clock::time_point start =
@@ -148,6 +147,22 @@ inline std::atomic<std::uint32_t> coarse_second{0};
 inline std::atomic<std::uint64_t> vram_idle_bytes{0}, vram_unmapped_bytes{0}, vram_chunks_freed_bytes{0};
 inline std::atomic<std::uint64_t> residency_chunk_count{0}, evacuations{0}, evac_kept_gpu{0}, evac_kept_other{0};
 inline std::atomic<std::uint64_t> gc_kept_images{0};
+inline std::atomic<std::uint64_t> motion_sync_calls{0}, motion_sync_waits{0}, motion_sync_ns{0},
+    motion_sync_max_ns{0};
+inline std::atomic<std::uint64_t> motion_frame_waits{0}, motion_frame_wait_ns{0},
+    motion_frame_wait_max_ns{0};
+inline std::atomic<std::uint64_t> sync_recording_calls{0};
+inline void NoteWait(std::atomic<std::uint64_t>& count, std::atomic<std::uint64_t>& total,
+                     std::atomic<std::uint64_t>& max, std::chrono::steady_clock::time_point start) {
+    const std::uint64_t ns = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - start)
+                                               .count());
+    count.fetch_add(1, std::memory_order_relaxed);
+    total.fetch_add(ns, std::memory_order_relaxed);
+    for (std::uint64_t seen = max.load(std::memory_order_relaxed);
+         seen < ns && !max.compare_exchange_weak(seen, ns, std::memory_order_relaxed);) {
+    }
+}
 struct WaitTimer {
     std::atomic<std::uint64_t>& total;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

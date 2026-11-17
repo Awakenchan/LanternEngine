@@ -7,6 +7,7 @@
 #include "common/logging/log.h"
 #include "ip_mask.h"
 #include "net_upnp.h"
+#include "test_sandbox.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -41,6 +42,9 @@ void UPnPClient::Start() {
         return;
     }
 
+    if (!LanternSandbox::AllowHost("239.255.255.250", "UPnP discovery")) {
+        return;
+    }
     bool expected = false;
     if (!m_started.compare_exchange_strong(expected, true))
         return;

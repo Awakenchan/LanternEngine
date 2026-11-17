@@ -26,6 +26,7 @@
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/error_codes.h"
+#include "test_sandbox.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/process.h"
@@ -368,6 +369,7 @@ static const HostOverrideState& GetHostOverrideState() {
 
 // bbport: The Hunter's Dream backend (gpu/bbnet/thd).
 extern "C" bool bbthd_enabled();
+extern "C" bool bbthd_signed_out();
 extern "C" void bbthd_add_game_headers(std::vector<std::pair<std::string, std::string>>* headers);
 extern "C" void bbthd_game_reply(int status, const std::string* body);
 
@@ -861,8 +863,19 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
             (plan.scheme == "http" && plan.port != 80)) {
             base_url += ":" + std::to_string(plan.port);
         }
+        if (!LanternSandbox::AllowHost(plan.host, "guest HTTP request")) {
+            SynthesizeTransportFailureResponse(out_res);
+            return TranslateHttplibError(httplib::Error::Connection);
+        }
         httplib::Client cli(base_url);
-        cli.set_connection_timeout(pick_timeout_seconds(plan.settings.connect_timeout_us, 30));
+        const auto game_timeout = pick_timeout_seconds(plan.settings.connect_timeout_us, 10);
+        const auto connect_timeout = std::max(game_timeout, std::chrono::seconds(5));
+        static std::atomic<bool> told{false};
+        if (connect_timeout != game_timeout && !told.exchange(true)) {
+            LOG_INFO(Lib_Http, "connect timeout {}s from the game; using {}s, as bbhost does",
+                     game_timeout.count(), connect_timeout.count());
+        }
+        cli.set_connection_timeout(connect_timeout);
         cli.set_read_timeout(pick_timeout_seconds(plan.settings.recv_timeout_us, 120));
         cli.set_write_timeout(pick_timeout_seconds(plan.settings.send_timeout_us, 120));
 
@@ -1785,7 +1798,7 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
         }
     }
 
-    const bool online = EmulatorSettings.IsConnectedToNetwork();
+    const bool online = EmulatorSettings.IsConnectedToNetwork() && !bbthd_signed_out();
     LOG_INFO(Lib_Http, "reqId={} dispatched to async worker [{} {} {}://{}:{}{}]", reqId,
              online ? "ONLINE" : "OFFLINE", HttpMethodName(plan.method), plan.scheme, plan.host,
              plan.port, plan.path);

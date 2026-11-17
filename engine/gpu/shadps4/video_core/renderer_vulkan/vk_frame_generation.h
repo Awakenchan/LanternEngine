@@ -31,6 +31,7 @@
 #include <optional>
 
 #include "common/types.h"
+#include "lantern_frame_gen_pacing.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
@@ -53,9 +54,12 @@ public:
     [[nodiscard]] bool Enabled() const;
     /// bbport: DLSS Frame Generation chosen, and Streamline runs it on this GPU (vk_streamline.h).
     [[nodiscard]] static bool DlssWanted();
+    [[nodiscard]] static int SessionSetting();
+    [[nodiscard]] static bool BuiltInWanted();
+    [[nodiscard]] static bool FsrSdkWanted();
     /// The upscaler's captures are wanted: FSR 3.1 or DLSS Frame Generation.
     [[nodiscard]] bool Capturing() const {
-        return Enabled() || DlssWanted();
+        return Enabled() || DlssWanted() || FsrSdkWanted();
     }
     /// The swapchain should have one more image (Enabled, also while idle in menus).
     [[nodiscard]] bool WantsExtraImage() const {
@@ -95,6 +99,7 @@ public:
         /// bbport: a DLSS Frame Generation job (no FSR context; Record does nothing with it),
         /// with the camera of its frame for DLSS-G's constants.
         bool dlss = false;
+        bool sdk = false;
         CameraMotion::Matrices camera{};
     };
     /// PrepareFrame (draw thread): a job when this frame can have a generated one; else the
@@ -137,7 +142,14 @@ public:
     void WaitForRealSlot(Clock::time_point shown);
     /// After every real frame: its arrival (`start`, before the generated one) and whether a
     /// generated one was shown. Measures the game's interval, the overload guard, the stats.
-    void OnRealPresented(Clock::time_point start, bool generated_shown, bool generated_made);
+    void OnRealPresented(Clock::time_point start, bool generated_shown, bool generated_made,
+                         bool generated_reached);
+    [[nodiscard]] bool Recording() const;
+    void NoteSwapchain(vk::PresentModeKHR mode, u32 images) {
+        swapchain_mode.store(int(mode), std::memory_order_relaxed);
+        swapchain_images.store(images, std::memory_order_relaxed);
+    }
+    void RecordPresent(bool generated, Clock::time_point done, u32 acquire_wait_us, bool ok);
 
 private:
     /// `fsr`: with the FSR 3.1 context (DLSS Frame Generation needs only the captures).
@@ -195,6 +207,15 @@ private:
 
     // Swap thread.
     std::atomic<int> queued_flips{0};
+    std::atomic<int> swapchain_mode{-1};
+    std::atomic<u32> swapchain_images{0};
+    float reached_pct = -1.0f;
+    int slot_by_vblank = -1;
+    int slot_reports = 0;
+    LanternFrameGenPacing::PresentLog present_log;
+    std::array<LanternFrameGenPacing::PresentRecord, LanternFrameGenPacing::kRecords> present_ordered{};
+    std::array<double, LanternFrameGenPacing::kRecords> present_scratch{};
+    u32 stats_reached = 0, stats_vblank_slots = 0, stats_timer_slots = 0;
     std::atomic<s64> paused_until_ns{0};
     Clock::time_point last_real{};
     double interval_ms = 0.0;   ///< smoothed game frame interval

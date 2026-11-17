@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "camera.h"
 #include "widescreen.h"
+#include "engine_hooks.h"
 #include "bbport_platform.h"
 #include "bbport_settings.h"
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <span>
 #include <vector>
 
 namespace BbEngine::Camera {
@@ -122,7 +124,12 @@ bool Install(std::uint8_t* image, std::size_t size) {
     std::memcpy(&d, image + kRepositoryLoad + sizeof kLeaR14, 4);
     const std::size_t repository = std::size_t(std::int64_t(kRepositoryLoad + sizeof kLeaR14 + 4) + d);
     if (repository > size - 8) return false;
-    std::memcpy(image + kFovCap, kUncapped, sizeof kUncapped);
+    const bool capped = matches(kFovCap, kCapped, sizeof kCapped);
+    if (const WriteResult result = WriteCode({image, kFovCap, capped ? std::span(kCapped) : std::span(kUncapped), kUncapped});
+        result != WriteResult::Applied) {
+        std::printf("Engine: camera off: the follow camera's FOV cap %s\n", Describe(result));
+        return false;
+    }
     g_repository = reinterpret_cast<std::uint64_t>(image + repository);
     g_active = true;
     std::printf(g_controls ? "Engine: camera adjustments enabled (distance, height and FOV)\n"

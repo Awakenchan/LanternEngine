@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace BbEngine::GxBindings {
 constexpr std::uint32_t kMaxInputs = 64, kMaxDescriptors = 48, kStages = 2, kMaxRegisters = 160, kMaxSpill = 128, kSharedWords = 48, kMaxVertex = 32;
@@ -52,7 +53,61 @@ struct Render {
     std::uint32_t index_known;
     std::uint32_t index_format;
     std::uint64_t index_base;
-    std::uint64_t hash;
+};
+static_assert(offsetof(Render, color) == 144 && offsetof(Render, index_base) == 632 && sizeof(Render) == 640);
+
+#ifdef LANTERN_GX_RECORDS_MUTANTS
+enum class Mutant : std::uint8_t { None, MemoIgnoresClean, MemoComparesPrefix, MemoNeverKeeps, kCount };
+inline Mutant selected_mutant = Mutant::None;
+inline bool Mutated(Mutant mutant) {
+    return selected_mutant == mutant;
+}
+#endif
+
+struct RenderMemo {
+    Render last{};
+    bool clean = false;
+};
+
+inline bool Unchanged(const RenderMemo& memo, const Render& now) {
+    std::size_t bytes = sizeof now;
+    bool clean = memo.clean;
+#ifdef LANTERN_GX_RECORDS_MUTANTS
+    if (Mutated(Mutant::MemoComparesPrefix)) bytes = offsetof(Render, depth_target);
+    if (Mutated(Mutant::MemoIgnoresClean)) clean = true;
+#endif
+    return clean && std::memcmp(&memo.last, &now, bytes) == 0;
+}
+
+inline void Keep(RenderMemo& memo, const Render& now, bool clean) {
+#ifdef LANTERN_GX_RECORDS_MUTANTS
+    if (Mutated(Mutant::MemoNeverKeeps)) return;
+#endif
+    memo.last = now;
+    memo.clean = clean;
+}
+
+constexpr std::uint32_t kViewports = 16, kViewportFloats = 6, kScissorWords = 4;
+constexpr std::uint32_t kTargetViews = 9;
+constexpr std::uint32_t kVsRegisters = 7, kPsRegisters = 12, kMaxSemantics = 32;
+
+struct Whole {
+    std::uint32_t captured;
+    std::uint32_t topology;
+    float depth_bounds[2];
+    std::uint32_t index_bound;
+    std::uint32_t vs_bound;
+    std::uint32_t vs_registers[kVsRegisters];
+    std::uint32_t vs_modifier;
+    std::uint32_t ps_bound;
+    std::uint32_t ps_registers[kPsRegisters];
+    std::uint32_t semantics_valid;
+    std::uint32_t vertex_semantics_count;
+    std::uint8_t vertex_semantics[kMaxSemantics][2];
+    std::uint32_t pixel_semantics_count;
+    std::uint16_t pixel_semantics[kMaxSemantics];
+    float depth_clear;
+    std::uint32_t stencil_clear;
 };
 
 struct State {
@@ -71,6 +126,9 @@ struct State {
     std::uint32_t num_view_keys;
     std::uint64_t view_keys[kMaxViewKeys][2];
     Render render;
+    Whole whole;
+    std::uint64_t target_views[kTargetViews];
+    std::uint64_t objects_epoch;
 };
 
 struct Entry {
@@ -138,7 +196,6 @@ struct Register {
     std::uint32_t value;
 };
 std::uint32_t Registers(const Render& render, Register* out);
-std::uint64_t RenderHash(const Render& render);
 bool VertexWords(const State& state, std::uint32_t dword_offset, std::uint32_t out[4]);
 std::uint64_t VertexKey(const State& state, std::uint32_t dword_offset);
 std::uint64_t BufferKey(std::uint64_t object, std::uint32_t version);

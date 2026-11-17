@@ -4,6 +4,7 @@
 #endif
 #include "sys.h"
 #include "runtime.h"
+#include "save_root.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -211,7 +212,38 @@ static void load_file_list(const char *variable, const char *what, int hostapp) 
     if (mounted) printf("Runtime: %d %s (%s)\n", mounted, what, variable);
 }
 
-void sys_file_configure(const char *app0, const char *user) {
+static int test_any_root(void) {
+#ifdef LANTERN_SAVE_TEST_HOOKS
+    const char *mutant = getenv("BB_SAVE_TEST_MUTANT");
+    return mutant && atoi(mutant) == SAVE_ROOT_MUTANT_ANY_ROOT;
+#else
+    return 0;
+#endif
+}
+
+static void test_jail_check(const char *path) {
+#ifdef LANTERN_SAVE_TEST_HOOKS
+    sys_save_data_test_jail_check(path);
+#else
+    (void)path;
+#endif
+}
+
+static int full_root(const char *what, const char *root, int read_only, char *out, size_t size) {
+    SaveRootKind kind = save_root_resolve(root, out, size);
+    if (kind == SAVE_ROOT_USABLE || (read_only && kind == SAVE_ROOT_DRIVE)) return 0;
+    if (test_any_root() && (size_t)snprintf(out, size, "%s", root ? root : "") < size) return 0;
+    printf("Runtime: the %s folder is %s, so no folder is mounted or made there\n", what,
+           save_root_problem(kind));
+    return -1;
+}
+
+int sys_file_configure(const char *game, const char *saves) {
+    char app0[MOUNT_HOST], user[MOUNT_HOST];
+    if (full_root("game", game, 1, app0, sizeof(app0)) || full_root("saves", saves, 0, user, sizeof(user))) {
+        user_dir[0] = 0;
+        return -1;
+    }
     sys_file_stream_configure(app0);
     load_mod_files();
     snprintf(user_dir, sizeof(user_dir), "%s", user);
@@ -222,9 +254,11 @@ void sys_file_configure(const char *app0, const char *user) {
     const char *language = getenv("BB_LANGUAGE");
     if (language && !strcmp(language, "17"))
         puts("Runtime: Brazilian Portuguese requested (native assets; game region unchanged)");
+    test_jail_check(user);
     mkdir(user, 0755);
     char path[600];
     snprintf(path, sizeof(path), "%s/.write-test", user);
+    test_jail_check(path);
     FILE *probe = fopen(path, "wb");
     if (probe) {
         fclose(probe);
@@ -243,11 +277,13 @@ void sys_file_configure(const char *app0, const char *user) {
     static const char *const writable[] = {"temp0", "download0", "data"};
     for (int i = 0; i < 3; ++i) {
         snprintf(path, sizeof(path), "%s/%s", user, writable[i]);
+        test_jail_check(path);
         mkdir(path, 0755);
         char guest[32];
         snprintf(guest, sizeof(guest), "/%s", writable[i]);
         sys_file_mount(guest, path);
     }
+    return 0;
 }
 
 static int climbs_up(const char *path) {

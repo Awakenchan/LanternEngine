@@ -37,6 +37,7 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 int bbgpu_overlay_captures_input(void);
 int bbgpu_window_in_background(void);
 void bbgpu_anti_lag_before_input(void);
+void bbgpu_pacing_pad_read(void);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
 void bbgpu_patch_image(unsigned char *image, uint64_t size);
 /* Number of symbols registered by the vendored libraries (diagnostics). */

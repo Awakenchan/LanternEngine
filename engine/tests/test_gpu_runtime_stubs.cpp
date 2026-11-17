@@ -27,27 +27,35 @@ int sys_equeue_trigger(int64_t, uint64_t, int16_t, uint64_t) { return -1; }
 uint64_t sys_equeue_event_data(const void*) { return 0; }
 void sys_equeue_report(double) {}
 void sys_av_player_set_decoder(const void*) {}
+void sys_trophy_role(const char*) {}
 void runtime_memory_invalidate(uintptr_t, uint64_t) {}
+#ifndef LANTERN_TEST_FILE_MOUNT
 int sys_file_mount(const char*, const char*) { return -1; }
 void sys_file_unmount(const char*) {}
+#endif
 __thread RuntimeRecoverBuf* runtime_fault_recover = nullptr;
 int runtime_setjmp(RuntimeRecoverBuf*) { return 0; }
 [[noreturn]] void runtime_longjmp(RuntimeRecoverBuf*) { std::abort(); }
 uint32_t runtime_disabled_optimizations = 0;
 uint64_t runtime_experiment_bits = 0;
 uint64_t runtime_tsc_frequency() { return 1000000000; }
+#ifndef LANTERN_TEST_FILE_MOUNT
 int sys_file_translate(const char*, char*, size_t) { std::abort(); }
+#endif
 uint64_t runtime_memory_clamp(uintptr_t, uint64_t) { std::abort(); }
 uint64_t runtime_process_time_us() { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 int runtime_memory_region(uintptr_t, uintptr_t*, uintptr_t*, int*) { std::abort(); }
 void runtime_memory_set_gpu_hooks(void (*)(uintptr_t, uint64_t),
     void (*)(uintptr_t, uint64_t), void (*)(uintptr_t, uint64_t)) { std::abort(); }
 void runtime_thread_attach_host(const char*) {}
+#ifndef LANTERN_TEST_GUEST_THREADS
 int32_t runtime_thread_spawn(void**, void* (*)(void*), void*, uint64_t, const char*) { std::abort(); }
+#endif
 int32_t runtime_thread_join_spawned(void*, void**) { std::abort(); }
 void runtime_memory_gpu_protect(uintptr_t, uint64_t, int, int) { std::abort(); }
 void runtime_restart() { std::abort(); }
 uint64_t runtime_process_time_counter() { return runtime_process_time_us() * 1000; }
+uint64_t host_realtime_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 int32_t* runtime_errno() { std::abort(); }
 int runtime_memory_write_backing(uintptr_t, const void*, uint64_t) { std::abort(); }
 void runtime_memory_read_backing(uintptr_t, void*, uint64_t) { std::abort(); }

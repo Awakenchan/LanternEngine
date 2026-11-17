@@ -9,6 +9,15 @@
 
 namespace BbEngine::WorldCopy {
 
+#ifdef LANTERN_WORLD_COPY_MUTANTS
+enum class Mutant : int { None = 0, QuestStaysOwn, HostKeepsQuest, GuestTakesQuestUnasked, InsightFlagsStay, InsightGroupsDropped, ExtraStaysOwn, kCount };
+inline int g_mutant = 0;
+inline bool Is(Mutant m) { return g_mutant == int(m); }
+#define LANTERN_WC_MUTANT(name) (::BbEngine::WorldCopy::Is(::BbEngine::WorldCopy::Mutant::name))
+#else
+#define LANTERN_WC_MUTANT(name) false
+#endif
+
 constexpr std::size_t kGroupBytes = 125;
 constexpr std::size_t kEntryBytes = 4 + kGroupBytes;
 constexpr std::size_t kMostPerFrame = 64;
@@ -28,7 +37,24 @@ constexpr bool ShareGroup(std::uint32_t group) {
     return !(type == 1 && zone >= 4 && zone <= 6);
 }
 
+constexpr std::uint32_t kInsightFlags[] = {12404001, 12404002, 12404003, 12204011, 12204845, 12425291};
+
+constexpr bool IsInsightFlag(std::uint32_t id) {
+    for (const std::uint32_t flag : kInsightFlags)
+        if (flag == id) return !LANTERN_WC_MUTANT(InsightFlagsStay);
+    return false;
+}
+
+constexpr bool CarryGroup(std::uint32_t group) {
+    if (ShareGroup(group)) return true;
+    if (LANTERN_WC_MUTANT(InsightGroupsDropped)) return false;
+    for (const std::uint32_t flag : kInsightFlags)
+        if (flag / 1000 == group) return true;
+    return false;
+}
+
 constexpr bool ShareFlag(std::uint32_t id) {
+    if (IsInsightFlag(id)) return true;
     if (!ShareGroup(id / 1000)) return false;
     if (id >= 20 && id <= 29) return false;
     if (id >= 2000 && id <= 2099) return false;
@@ -200,6 +226,95 @@ inline int CopyMasked(std::uint8_t* to, const std::uint8_t* from, const Group& m
     return WriteShared(to, Masked(from, mask), mask);
 }
 
+inline Group Union(const Group& a, const Group& b) {
+    Group out = a;
+    Add(out, b);
+    return out;
+}
+
+inline Group Common(const Group& a, const Group& b) {
+    Group out{};
+    for (std::size_t i = 0; i < kGroupBytes; ++i) out[i] = std::uint8_t(a[i] & b[i]);
+    return out;
+}
+
+constexpr std::uint32_t kKeepKind = 0, kDungeonKind = 2;
+
+struct QuestSpan {
+    std::uint32_t first, last;
+};
+
+constexpr QuestSpan kQuestExtra[] = {
+#include "quest_extra_flags.inc"
+};
+
+constexpr bool IsQuestExtra(std::uint32_t id) {
+    if (!IsNpcGroup(id / 1000)) return false;
+    for (const QuestSpan& r : kQuestExtra)
+        if (id >= r.first && id <= r.last) return !LANTERN_WC_MUTANT(ExtraStaysOwn);
+    return false;
+}
+
+inline Group QuestExtraBits(std::uint32_t group) {
+    Group bits{};
+    if (LANTERN_WC_MUTANT(ExtraStaysOwn)) return bits;
+    for (const QuestSpan& r : kQuestExtra) Add(bits, RangeBits(group, r.first, r.last));
+    return bits;
+}
+
+template <typename Ranges> bool IsQuestFlag(std::uint32_t id, const Ranges& ranges) {
+    if (IsQuestExtra(id)) return true;
+    for (const auto& r : ranges)
+        if (r.kind != kKeepKind && r.kind != kDungeonKind && id >= r.first && id <= r.last) return true;
+    return false;
+}
+
+struct Split {
+    Group shared{}, own{}, quest{};
+};
+
+template <typename Ranges> Split SplitGroup(std::uint32_t group, bool personal, const Ranges& ranges) {
+    Split s;
+    s.shared = MaskOf(group);
+    if (!personal) return s;
+    if (IsPickupGroup(group)) {
+        s.own = s.shared;
+        s.shared = Group{};
+        return s;
+    }
+    Group quest{}, kept{};
+    for (const auto& r : ranges) {
+        const Group bits = RangeBits(group, r.first, r.last);
+        if (r.kind == kKeepKind || r.kind == kDungeonKind) Add(kept, bits);
+        else Add(quest, bits);
+    }
+    if (IsNpcGroup(group)) Add(quest, QuestExtraBits(group));
+    Remove(quest, kept);
+    s.quest = Common(quest, s.shared);
+    if (IsNpcGroup(group)) {
+        s.own = s.shared;
+        Remove(s.own, kept);
+        Remove(s.own, s.quest);
+    } else {
+        s.own = Common(RangeBits(group, kGiftFirst, kGiftLast), s.shared);
+    }
+    if (LANTERN_WC_MUTANT(QuestStaysOwn)) {
+        Add(s.own, s.quest);
+        s.quest = Group{};
+    }
+    Remove(s.shared, s.own);
+    Remove(s.shared, s.quest);
+    return s;
+}
+
+inline Group HostSends(const Group& shared, const Group& quest) {
+    return LANTERN_WC_MUTANT(HostKeepsQuest) ? shared : Union(shared, quest);
+}
+
+inline Group GuestTakes(const Group& shared, const Group& quest, bool host_sends_quest) {
+    return host_sends_quest || LANTERN_WC_MUTANT(GuestTakesQuestUnasked) ? Union(shared, quest) : shared;
+}
+
 class Receiver {
 public:
     bool Take(const std::uint8_t* data, std::size_t size, Image& changed) {
@@ -213,7 +328,7 @@ public:
         for (std::size_t at = 1; at < size; at += kEntryBytes) {
             std::uint32_t group = 0;
             std::memcpy(&group, data + at, 4);
-            if (!ShareGroup(group)) continue;
+            if (!CarryGroup(group)) continue;
             Group value;
             std::memcpy(value.data(), data + at + 4, kGroupBytes);
             if (in_whole) building_[group] = value;

@@ -4,6 +4,9 @@
 #include <string>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
 
 namespace BbSettings {
 
@@ -16,10 +19,16 @@ inline bool IsFsr4(int upscaler) {
 inline bool IsFrameUpscaler(int upscaler) {
     return IsFsr4(upscaler) || upscaler == UpscalerDlss || upscaler == UpscalerXess;
 }
-enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenDlss = 2, FrameGenCount };
-inline constexpr const char* FrameGenNames[] = {"off", "fsr3", "dlss"};
+enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenDlss = 2, FrameGenFsr = 3, FrameGenCount };
+inline constexpr const char* FrameGenNames[] = {"off", "fsr3", "dlss", "fsr"};
 static_assert(sizeof(FrameGenNames) / sizeof(FrameGenNames[0]) == FrameGenCount);
 inline constexpr int FrameGenFramesMax = 5;
+inline bool FrameGenNeedsRestart(int chosen, int startup, bool fsr_running) {
+    if (fsr_running) {
+        return chosen != FrameGenFsr;
+    }
+    return (chosen == FrameGenFsr || chosen == FrameGenDlss) && chosen != startup;
+}
 enum Reflex : int { ReflexOff = 0, ReflexOn = 1, ReflexBoost = 2, ReflexCount };
 inline constexpr const char* ReflexNames[] = {"off", "on", "boost"};
 static_assert(sizeof(ReflexNames) / sizeof(ReflexNames[0]) == ReflexCount);
@@ -80,6 +89,15 @@ inline constexpr bool EffectIsLive(int effect) { return effect >= EffectContactS
 inline constexpr bool EffectChangeNeedsRestart(int effect, bool now, bool at_start) {
     return now != at_start && (!EffectIsLive(effect) || (effect == EffectRayTracing && now));
 }
+inline constexpr int PointFogFalloffClassic = 0;
+inline constexpr int PointFogFalloffInverseSquare = 1;
+inline constexpr float PointFogGlowSizeMin = 0.03f, PointFogGlowSizeMax = 0.20f, PointFogGlowSizeDefault = 0.08f;
+inline constexpr float PointFogGlowSize(float value) {
+    return value >= PointFogGlowSizeMin && value <= PointFogGlowSizeMax ? value
+           : value > PointFogGlowSizeMax                                ? PointFogGlowSizeMax
+           : value < PointFogGlowSizeMin                                ? PointFogGlowSizeMin
+                                                                        : PointFogGlowSizeDefault;
+}
 inline constexpr int OutputWidths[] = {1280,1600,1920,2560,3840,2560,3440,3840,3840,5120,5120,7680,0,0};
 inline constexpr int OutputHeights[] = {720,900,1080,1440,2160,1080,1440,1600,1080,1440,2160,2160,0,0};
 inline constexpr int OutputCount = 14;
@@ -126,6 +144,8 @@ struct Values {
     std::atomic<bool> frame_gen_cap{false};
     std::atomic<bool> frame_gen_active{false};
     std::atomic<float> frame_gen_shown_fps{0.0f}, frame_gen_game_fps{0.0f};
+    std::atomic<float> frame_gen_reached_pct{-1.0f};
+    std::atomic<unsigned> frame_gen_notes{0};
     std::atomic<int> frame_gen_multiplier{2};
     std::atomic<int> frame_gen_frames{1};
     std::atomic<bool> frame_gen_dynamic{false};
@@ -136,6 +156,9 @@ struct Values {
     std::atomic<bool> streamline_loaded{false}, dlss_fg_supported{false};
     std::atomic<int> dlss_fg_max_frames{0};
     std::atomic<const char*> dlss_fg_problem{nullptr};
+    std::atomic<bool> fsr_fg_running{false};
+    std::atomic<const char*> fsr_fg_problem{nullptr};
+    std::atomic<const char*> fsr_fg_version{nullptr};
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
     std::atomic<bool> jitter{true};
@@ -184,6 +207,8 @@ struct Values {
     std::atomic<bool> graphics_controls{false}, graphics_vignette{true};
     std::atomic<float> graphics_ao_strength{1},graphics_shadow_scale{1},graphics_bloom{1},graphics_saturation{1};
     std::atomic<float> graphics_gi_strength{6},graphics_volumetric_intensity{1},graphics_point_fog_intensity{1},graphics_ssr_intensity{1};
+    std::atomic<float> graphics_point_fog_glow_size{PointFogGlowSizeDefault};
+    std::atomic<int> graphics_point_fog_falloff{PointFogFalloffClassic};
     std::atomic<int> graphics_shadow_resolution{0},graphics_local_shadow_resolution{0},graphics_motion_blur_quality{0};
     std::atomic<int> graphics_ao_quality{0}; // 0 regular GTAO, 1 high (full-res bitmask GTAO)
     std::atomic<int> look_choice{0};
@@ -211,6 +236,7 @@ struct Values {
     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false}, dlss_supported{false},
         fsr_sdk_supported{false}, xess_supported{false};
     std::atomic<int> dlss_preset{DlssPresetK}, dlss_applied_preset{-1};
+    std::atomic<unsigned> history_cuts{0};
     std::atomic<bool> dlss_mip_bias{true};
     std::atomic<bool> dlss_auto_exposure{false};
     std::atomic<bool> dlss_jitter_fade{false};
@@ -241,6 +267,14 @@ struct Values {
 };
 
 Values& Get();
+
+inline bool LowLatency() {
+    static const bool on = [] {
+        const char* v = std::getenv("BB_LOW_LATENCY");
+        return v && v[0] == '1';
+    }();
+    return on;
+}
 inline float HdrPeakNits(const Values& v) {
     const float display = v.hdr_display_peak.load(std::memory_order_relaxed);
     const float peak = v.hdr_peak_auto.load(std::memory_order_relaxed) && display >= HdrPeakMin
@@ -259,7 +293,22 @@ void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool dlss = false, bool fs
 bool FixedRenderSession();
 int RenderPreset();
 bool ResolutionNeedsRestart();
+enum class SaveResult { Written, Unchanged, LoadUnreadable, Unreadable, NotLocked, NotReplaced };
+
 void Save();
+[[nodiscard]] SaveResult SaveNow();
+[[nodiscard]] bool FlushSaves(std::chrono::milliseconds bound);
+bool FlushForExit();
+bool LastSaveFailed();
+
+struct SaveFailures {
+    std::uint32_t unreadable = 0;
+    std::uint32_t not_replaced = 0;
+    std::uint32_t not_locked = 0;
+    std::uint32_t load_unreadable = 0;
+    std::uint32_t dropped = 0;
+};
+SaveFailures SaveFailureCounts();
 
 float PresetScale(int preset);
 const char* PresetName(int preset);

@@ -143,10 +143,15 @@ inline constexpr const char* ANames[ACount] = {"draw", "pipeline", "constants", 
                                                "packet", "key", "record", "prepared", "tables"};
 inline std::array<std::atomic<std::uint64_t>, ACount> a_cycles{};
 inline std::atomic<std::uint64_t> a_draws{0};
+inline std::array<std::atomic<std::uint64_t>, ACount> a_sample_cycles{};
+inline std::atomic<std::uint64_t> a_sampled_draws{0};
+inline thread_local bool a_sampled = false;
+inline std::atomic<bool> a_timing{enabled};
 struct ScopeA {
     explicit ScopeA(AId id_) : id{id_} {
-        if (enabled) [[unlikely]] {
-            start = __rdtsc();
+        if (a_timing.load(std::memory_order_relaxed)) [[unlikely]] {
+            sampled = a_sampled;
+            if (enabled || sampled) start = __rdtsc();
         }
     }
     ~ScopeA() {
@@ -154,12 +159,26 @@ struct ScopeA {
     }
     void End() {
         if (start) [[unlikely]] {
-            a_cycles[id].fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            const std::uint64_t spent = __rdtsc() - start;
+            if (enabled) a_cycles[id].fetch_add(spent, std::memory_order_relaxed);
+            if (sampled) a_sample_cycles[id].fetch_add(spent, std::memory_order_relaxed);
             start = 0;
         }
     }
     AId id;
+    bool sampled = false;
     std::uint64_t start = 0;
+};
+struct SampleA {
+    explicit SampleA(bool take) {
+        if (take) [[unlikely]] {
+            a_sampled = true;
+            a_sampled_draws.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    ~SampleA() {
+        a_sampled = false;
+    }
 };
 
 struct KeyScope {

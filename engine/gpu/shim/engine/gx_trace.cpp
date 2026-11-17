@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_trace.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include "gx_draws.h"
@@ -27,10 +28,9 @@ constexpr const char* kMethodNames[kMethods] = {"Dispatch", "DispatchIndirect", 
                                                 "DrawIndexedInstancedIndirect", "Commit"};
 constexpr std::size_t kOffsets[kMethods] = {0x21695c0, 0x2169640, 0x21696c0, 0x2169780, 0x2169840,
                                             0x2169900, 0x21699d0, 0x2169ab0, 0x2169ba0};
-constexpr std::uint8_t kPushes[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
-constexpr std::uint8_t kPushesWide[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                        0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x18};
-constexpr std::uint8_t kCommitEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x49, 0x89, 0xf6};
+constexpr const auto& kPushes = HookEntries::kGxTracePushes;
+constexpr const auto& kPushesWide = HookEntries::kGxTracePushesWide;
+constexpr const auto& kCommitEntry = HookEntries::kGxTraceCommitEntry;
 
 constexpr std::size_t kStageBlocks[6] = {0x598, 0xa90, 0xf88, 0x1480, 0x1978, 0x1e70};
 constexpr std::size_t kStageShader = 0x4f0;
@@ -283,7 +283,7 @@ void Unlock(Stamped& s) {
     s.lock.store(0, std::memory_order_release);
 }
 
-template <int M> std::int64_t __attribute__((sysv_abi)) OnMethod(std::uint64_t, const std::uint64_t* saved) {
+template <int M> std::int64_t __attribute__((sysv_abi)) OnMethod(std::uint64_t, std::uint64_t* saved) noexcept {
     g_calls[M].fetch_add(1, std::memory_order_relaxed);
     if (GxObjects::On()) {
         if (M == Dispatch || M == DispatchIndirect) GxObjects::CheckDispatch(saved[4]);
@@ -700,15 +700,18 @@ bool Install(std::uint8_t* image, std::size_t size) {
         const std::span<const std::uint8_t> entry = m == DrawIndexedInstanced ? std::span<const std::uint8_t>(kPushesWide)
                                                     : m == CommitState        ? std::span<const std::uint8_t>(kCommitEntry)
                                                                               : std::span<const std::uint8_t>(kPushes);
-        ready = Prepare(hooks[m], image, size, kOffsets[m], entry, callbacks[m]);
+        ready = Prepare(hooks[m], image, size, kOffsets[m], SiteKind::Entry, entry, callbacks[m]);
     }
     if (!ready) {
         for (Hook& hook : hooks) Discard(hook);
         host_log("GX trace off: GX's draw calls differ from 1.09");
         return false;
     }
+    if (const WriteResult result = Commit(std::span<Hook>(hooks)); result != WriteResult::Applied) {
+        host_log("GX trace off: GX's draw calls could not be written (%s)", Describe(result));
+        return false;
+    }
     g_on.store(true, std::memory_order_relaxed);
-    Commit(std::span<Hook>(hooks));
     host_log("GX trace: on (LANTERN_GX_TRACE=1)");
     return true;
 }

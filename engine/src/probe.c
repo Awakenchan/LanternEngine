@@ -268,6 +268,42 @@ static __attribute__((noreturn)) void terminate(unsigned code) {
     TerminateProcess(GetCurrentProcess(), code);
     _exit((int)code);
 }
+static int read_words(uintptr_t a, uint64_t *out, size_t count) {
+    SIZE_T n = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (void *)a, out, count * sizeof(*out), &n) && n == count * sizeof(*out);
+}
+static void report_heap_free(CONTEXT *c) {
+    uintptr_t offset = (uintptr_t)c->Rip - (uintptr_t)image;
+    if (!image || offset < 0x20858a0 || offset >= 0x2085a5d) return;
+    char where[512];
+    fprintf(stderr, "  DLRegularHeap::Free fault:\n  r8=%016llx%s r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+            c->R8, offset >= 0x20858c1 ? " (end)" : "", c->R12, c->R13, c->R14, c->R15);
+    uint64_t heap[3], heap_end = 0;
+    int have_heap = 0;
+    if (read_words((uintptr_t)c->R14, heap, 3)) {
+        have_heap = 1;
+        heap_end = heap[2];
+        fprintf(stderr, "  heap %016llx range %016llx..%016llx\n", (unsigned long long)c->R14,
+                (unsigned long long)heap[1], (unsigned long long)heap[2]);
+    } else fprintf(stderr, "  heap at r14 unreadable\n");
+    uintptr_t rbx = (uintptr_t)c->Rbx;
+    for (intptr_t line = -64; line < 16; line += 16) {
+        uintptr_t a = rbx + line;
+        uint64_t w[2];
+        if (!read_words(a, w, 2)) { fprintf(stderr, "  rbx%+4d %016llx unreadable\n", (int)line, (unsigned long long)a); continue; }
+        char left[512];
+        describe(left, sizeof(left), (uintptr_t)w[0]);
+        describe(where, sizeof(where), (uintptr_t)w[1]);
+        fprintf(stderr, "  rbx%+4d %016llx: %016llx %016llx  %s  %s\n", (int)line, (unsigned long long)a,
+                (unsigned long long)w[0], (unsigned long long)w[1], left, where);
+    }
+    uint64_t header[2];
+    if (!read_words(rbx - 16, header, 2)) { fprintf(stderr, "  chunk header unreadable\n"); return; }
+    uint64_t next = header[1] & ~(uint64_t)3;
+    int valid = have_heap && next > rbx && next <= heap_end;
+    fprintf(stderr, "  chunk header: next=%016llx%s in_use=%u prev_in_use=%u [rbx-16]=%016llx\n", (unsigned long long)next,
+            valid ? "" : " INVALID", (unsigned)(header[1] & 1), (unsigned)((header[1] >> 1) & 1), (unsigned long long)header[0]);
+}
 static void report_exception(EXCEPTION_POINTERS *e) {
     static volatile LONG reporting;
     if (InterlockedExchange(&reporting, 1)) { Sleep(INFINITE); }
@@ -288,6 +324,7 @@ static void report_exception(EXCEPTION_POINTERS *e) {
     fprintf(stderr, " (thread %lu %s)\n", GetCurrentThreadId(), thread_name);
     fprintf(stderr, "  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax, c->Rbx, c->Rcx, c->Rdx, c->Rsi, c->Rdi, c->Rbp, c->Rsp);
+    report_heap_free(c);
     uintptr_t rbp = c->Rbp;
     for (int depth = 0; depth < 24 && rbp; ++depth) {
         uintptr_t frame[2];
@@ -558,8 +595,10 @@ static void start_crash_helper(void) {
     if (slash && (size_t)(slash - log) + sizeof("\\crash.dmp") < sizeof(crash_dump_path)) {
         snprintf(crash_dump_path, sizeof(crash_dump_path), "%.*s\\crash.dmp", (int)(slash - log), log);
     } else {
-        snprintf(crash_dump_dir, sizeof(crash_dump_dir), "logs");
-        snprintf(crash_dump_path, sizeof(crash_dump_path), "logs\\crash.dmp");
+        const char *dir = getenv("BB_LOG_DIR");
+        if (!dir || !*dir || strlen(dir) + sizeof("\\crash.dmp") >= sizeof(crash_dump_path)) dir = "logs";
+        snprintf(crash_dump_dir, sizeof(crash_dump_dir), "%s", dir);
+        snprintf(crash_dump_path, sizeof(crash_dump_path), "%s\\crash.dmp", dir);
     }
     crash_dump_request = CreateEventW(NULL, FALSE, FALSE, NULL);
     crash_dump_done = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -783,6 +822,7 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
 }
 volatile int runtime_restarting;
 void runtime_restart(void) {
+    runtime_flush_settings();
     fflush(NULL);
 #ifdef _WIN32
     const char *command = getenv("BB_RESTART_COMMAND");
@@ -878,7 +918,7 @@ int main(int argc, char **argv) {
         sys_app_content_configure(values);
     }
     if (app0) {
-        sys_file_configure(app0, user_dir ? user_dir : "user");
+        if (sys_file_configure(app0, user_dir ? user_dir : "user")) fail("the game folder must be a full path and the saves folder a full path below a drive root");
         char sfo[4096], id[16]="";
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))

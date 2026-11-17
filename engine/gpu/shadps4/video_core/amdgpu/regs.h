@@ -238,12 +238,15 @@ struct RegDirty {
     std::bitset<NumBlocks> blocks;
 #endif
     bool reset = false; ///< ClearState: defaults, then only the blocks marked after it
+    void (*on_mark)(void*, u32, u32) = nullptr;
+    void* on_mark_context = nullptr;
 
     void Mark(u32 word, u32 count) {
         if (count == 0 || word >= Regs::NumRegs) {
             return;
         }
         const u32 last = std::min(word + count, Regs::NumRegs) - 1;
+        if (on_mark) on_mark(on_mark_context, word, last + 1 - word);
         for (u32 block = word / BlockWords; block <= last / BlockWords; ++block) {
             blocks.set(block);
         }

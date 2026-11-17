@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_objects.h"
+#include "hook_entries.h"
 #include "const_census.h"
 #include "ring_constants.h"
+#include "../lantern_switches.h"
 #include "gx_sealed.h"
+#include "vertex_census.h"
 #include "batch.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
@@ -28,25 +31,25 @@ using u64 = std::uint64_t;
 struct Creator {
     const char* name;
     std::size_t offset;
-    const char* entry;
+    std::span<const std::uint8_t> entry;
     Kind kind;
     u32 description_bytes;
 };
-constexpr const char* kPushes58 = "554889e54157415641554154534883ec58";
+constexpr const auto& kPushes58 = HookEntries::kGxObjectsPushes58;
 constexpr Creator kCreators[] = {
     {"CreateBuffer", 0x2165c10, kPushes58, Buffer, 24},
     {"CreateTexture2D", 0x2165f90, kPushes58, Texture2D, 44},
     {"CreateTexture3D", 0x2166300, kPushes58, Texture3D, 36},
-    {"CreateDepthStencilView", 0x2166610, "554889e54157415641554154534883ec68", DepthView, 0},
+    {"CreateDepthStencilView", 0x2166610, HookEntries::kGxObjectsCreator0, DepthView, 0},
     {"CreateRenderTargetView", 0x21667a0, kPushes58, TargetView, 0},
     {"CreateShaderResourceView", 0x21669a0, kPushes58, ResourceView, 0},
     {"CreateUnorderedAccessView", 0x2166b60, kPushes58, AccessView, 0},
-    {"shader 0x2166d00", 0x2166d00, "554889e541574156534881ec38010000", Shader, 0},
-    {"shader 0x2166e10", 0x2166e10, "554889e541574156534881ec28010000", Shader, 0},
-    {"shader 0x2166f20", 0x2166f20, "554889e541574156534881ec28010000", Shader, 0},
-    {"CreateGeometryShader", 0x2167030, "554889e541574156534881ec58010000", Shader, 0},
-    {"shader 0x21672d0", 0x21672d0, "554889e541574156534881ec28010000", Shader, 0},
-    {"shader 0x21673e0", 0x21673e0, "554889e541574156534881ec28010000", Shader, 0},
+    {"shader 0x2166d00", 0x2166d00, HookEntries::kGxObjectsCreator1, Shader, 0},
+    {"shader 0x2166e10", 0x2166e10, HookEntries::kGxObjectsCreator2, Shader, 0},
+    {"shader 0x2166f20", 0x2166f20, HookEntries::kGxObjectsCreator2, Shader, 0},
+    {"CreateGeometryShader", 0x2167030, HookEntries::kGxObjectsCreator3, Shader, 0},
+    {"shader 0x21672d0", 0x21672d0, HookEntries::kGxObjectsCreator2, Shader, 0},
+    {"shader 0x21673e0", 0x21673e0, HookEntries::kGxObjectsCreator2, Shader, 0},
 };
 constexpr std::size_t kCreatorCount = sizeof kCreators / sizeof *kCreators;
 
@@ -130,8 +133,38 @@ void Note(u64 address, u32 creator, u64 source, const void* description) {
 }
 
 constexpr std::size_t kResourceBase = 0x20, kResourceBytes = 0x30;
-constexpr std::size_t kBufferSize = 0x2c, kBufferAligned = 0x30, kBufferDynamic = 0x40;
 GxSealed::Registry* g_sealed = nullptr;
+std::atomic<u64> g_sealed_by[GxSealed::kUsages][1u << GxSealed::kBindFlags]{};
+std::atomic<u64> g_refused_by[GxSealed::kRefusals]{};
+std::atomic<u64> g_faults_in_sealed{0}, g_faults_left_sealed{0};
+
+GxSealed::BufferTraits TraitsOf(u64 buffer, u64 init_data) {
+    GxSealed::BufferTraits t;
+    t.kind = Peek<std::uint8_t>(buffer + GxSealed::kBufferKindOffset);
+    t.usage = Peek<std::uint8_t>(buffer + GxSealed::kBufferUsageOffset);
+    t.cpu_access = Peek<std::uint8_t>(buffer + GxSealed::kBufferCpuAccessOffset);
+    t.bind = Peek<std::uint8_t>(buffer + GxSealed::kBufferBindOffset);
+    t.dynamic = Peek<std::uint8_t>(buffer + GxSealed::kBufferDynamicOffset) != 0;
+    t.has_data = init_data != 0;
+    return t;
+}
+
+u64 BufferBytes(u64 buffer) {
+    return std::max<u64>(Peek<u32>(buffer + GxSealed::kBufferSizeOffset), Peek<u32>(buffer + GxSealed::kBufferAlignedSizeOffset));
+}
+
+void NoteBufferMade(u64 buffer, u64 init_data) {
+    const GxSealed::BufferTraits traits = TraitsOf(buffer, init_data);
+    const u64 base = Peek<u64>(buffer + GxSealed::kBufferBaseOffset), bytes = BufferBytes(buffer);
+    if (VertexCensus::g_buffers) VertexCensus::g_buffers->Add(base, bytes, traits.dynamic, GxSealed::HolderOf(traits));
+    if (!g_sealed) return;
+    const GxSealed::Refusal refusal = GxSealed::SealRule(traits);
+    if (VertexCensus::On()) {
+        if (refusal == GxSealed::Sealable) g_sealed_by[traits.usage][traits.bind].fetch_add(1, std::memory_order_relaxed);
+        else g_refused_by[refusal].fetch_add(1, std::memory_order_relaxed);
+    }
+    if (refusal == GxSealed::Sealable) g_sealed->Seal(base, bytes);
+}
 struct ImageSeen {
     u64 uid;
     u32 width, height, format, bytes;
@@ -140,8 +173,6 @@ struct Resource {
     u64 object = 0, base = 0;
     u32 width = 0, height = 0, mips = 0, layers = 0, format = 0, generation = 0;
     u64 bytes = 0;
-    u64 held_uid = 0;
-    u32 held_index = 0;
     bool display = false;
     Kind kind = Buffer;
     std::vector<ImageSeen> images;
@@ -152,6 +183,8 @@ std::atomic<u64> g_widen[kWidenResults]{};
 std::atomic<u64> g_paths[kObjectPaths]{};
 std::atomic<u64> g_held_checks[kHeldChecks]{};
 std::atomic<u64> g_held_others{0};
+std::atomic<u64> g_held_dropped{0};
+HeldLinks g_held;
 std::atomic<u64> g_lookups{0};
 constexpr u64 kReportEvery = u64(1) << 18;
 std::map<std::string, u64> g_refused;
@@ -201,6 +234,7 @@ void NoteResource(u64 object, Kind kind, const u32* description, u64 base, u64 b
     }
     std::scoped_lock lock(g_resource_mutex);
     g_gone.erase(base);
+    g_held.Forget(base);
     const auto [at, inserted] = g_resources.try_emplace(base, fresh);
     if (!inserted) {
         g_finished.push_back(std::move(at->second));
@@ -214,6 +248,7 @@ void DropResource(u64 object) {
     const auto at = g_resources.find(base);
     if (at == g_resources.end() || at->second.object != object) return;
     g_gone[base] = at->second.bytes;
+    g_held.Forget(base);
     g_finished.push_back(std::move(at->second));
     g_resources.erase(at);
 }
@@ -233,21 +268,21 @@ void NoteInputs(u64 shader, u32 creator) {
     }
 }
 
-template <int C> std::int64_t __attribute__((sysv_abi)) OnCreate(std::uint64_t, const std::uint64_t* saved) {
+template <int C> std::int64_t __attribute__((sysv_abi)) OnCreate(std::uint64_t, std::uint64_t* saved) noexcept {
     const u64 out = saved[4], third = saved[3];
     const std::int64_t result = Call(reinterpret_cast<u64>(g_originals[C]), saved[5], out, third, saved[2], saved[1], saved[0], saved[7]);
     const Kind kind = kCreators[C].kind;
     const u64 made = result == 0 && out ? Peek<u64>(out) : 0;
-    if (made) {
+    const u64 init_data = saved[2];
+    if (made && !g_shards) {
+        NoteBufferMade(made, init_data);
+    } else if (made) {
         if (kind == Shader) NoteInputs(made, C);
         g_made[kind].fetch_add(1, std::memory_order_relaxed);
         Note(made, C, third, reinterpret_cast<const void*>(third));
         if (kind == Buffer) {
             BufferVersionOf(made).fetch_add(1, std::memory_order_release);
-            if (g_sealed && !Peek<std::uint8_t>(made + kBufferDynamic)) {
-                g_sealed->Seal(Peek<u64>(made + kResourceBase),
-                               std::max<u64>(Peek<u32>(made + kBufferSize), Peek<u32>(made + kBufferAligned)));
-            }
+            NoteBufferMade(made, init_data);
             NoteResource(made, kind, reinterpret_cast<const u32*>(third), Peek<u64>(made + kResourceBase), Peek<u32>(third));
         } else if (kind == Texture2D || kind == Texture3D) {
             NoteResource(made, kind, reinterpret_cast<const u32*>(third), Peek<u64>(made + kResourceBase), Peek<u32>(made + kResourceBytes));
@@ -255,25 +290,25 @@ template <int C> std::int64_t __attribute__((sysv_abi)) OnCreate(std::uint64_t, 
     } else {
         g_failed[kind].fetch_add(1, std::memory_order_relaxed);
     }
-    const_cast<std::uint64_t*>(saved)[-1] = static_cast<std::uint64_t>(result);
+    saved[-1] = static_cast<std::uint64_t>(result);
     return 1;
 }
 
 struct YebisCreator {
     std::size_t offset;
-    std::uint8_t entry[20];
+    std::span<const std::uint8_t> entry;
     Kind kind;
 };
 constexpr YebisCreator kYebisCreators[] = {
-    {0x11df570, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x18, 0x4d, 0x89, 0xcd}, Texture2D},
-    {0x11e1750, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x4d, 0x89, 0xce, 0x45, 0x89, 0xc4}, Texture3D},
+    {0x11df570, HookEntries::kGxObjectsYebis0, Texture2D},
+    {0x11e1750, HookEntries::kGxObjectsYebis1, Texture3D},
 };
 constexpr std::size_t kYebisCreatorCount = sizeof kYebisCreators / sizeof *kYebisCreators;
 constexpr std::size_t kYebisBase = 0x98;
 std::array<std::uint8_t*, kYebisCreatorCount> g_yebis_originals{};
 std::atomic<u64> g_yebis_made{0}, g_yebis_failed{0};
 
-template <int C> std::int64_t __attribute__((sysv_abi)) OnYebisCreate(std::uint64_t, const std::uint64_t* saved) {
+template <int C> std::int64_t __attribute__((sysv_abi)) OnYebisCreate(std::uint64_t, std::uint64_t* saved) noexcept {
     const u64 description = saved[2], out = saved[0];
     const std::int64_t result = Call(reinterpret_cast<u64>(g_yebis_originals[C]), saved[5], saved[4], saved[3], description, saved[1], out);
     const u64 made = static_cast<int>(result) == 0 && out ? Peek<u64>(out) : 0;
@@ -283,18 +318,18 @@ template <int C> std::int64_t __attribute__((sysv_abi)) OnYebisCreate(std::uint6
     } else {
         g_yebis_failed.fetch_add(1, std::memory_order_relaxed);
     }
-    const_cast<std::uint64_t*>(saved)[-1] = static_cast<std::uint64_t>(result);
+    saved[-1] = static_cast<std::uint64_t>(result);
     return 1;
 }
 
 constexpr std::size_t kSwapChainCreator = 0x26d5e90;
-constexpr std::uint8_t kSwapChainEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x98, 0x01, 0x00, 0x00};
+constexpr const auto& kSwapChainEntry = HookEntries::kGxObjectsSwapChainEntry;
 constexpr std::size_t kChainTargetStride = 0x2c, kChainDescription = 0x300, kChainBuffers = 0x328;
 constexpr u32 kChainMaxBuffers = 16;
 std::uint8_t* g_swap_chain_original = nullptr;
 std::atomic<u64> g_display_buffers{0};
 
-std::int64_t __attribute__((sysv_abi)) OnSwapChain(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnSwapChain(std::uint64_t, std::uint64_t* saved) noexcept {
     const u64 chain = saved[5];
     const std::int64_t result = Call(reinterpret_cast<u64>(g_swap_chain_original), saved[5], saved[4], saved[3], saved[2], saved[1], saved[0], saved[7]);
     if (static_cast<int>(result) == 0) {
@@ -305,16 +340,16 @@ std::int64_t __attribute__((sysv_abi)) OnSwapChain(std::uint64_t, const std::uin
         for (u32 i = 0; i < count; ++i) NoteResource(base(i), Texture2D, description, base(i), stride, true);
         g_display_buffers.fetch_add(count, std::memory_order_relaxed);
     }
-    const_cast<std::uint64_t*>(saved)[-1] = static_cast<std::uint64_t>(result);
+    saved[-1] = static_cast<std::uint64_t>(result);
     return 1;
 }
 
 constexpr std::size_t kUploadPool = 0x26a9b50;
-constexpr std::uint8_t kUploadPoolEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
+constexpr const auto& kUploadPoolEntry = HookEntries::kGxObjectsUploadPoolEntry;
 std::atomic<bool> g_buffers_owned{false}, g_arena_waiting{false};
 std::atomic<u64> g_arena_base{0}, g_arena_bytes{0};
 
-std::int64_t __attribute__((sysv_abi)) OnUploadPool(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnUploadPool(std::uint64_t, std::uint64_t* saved) noexcept {
     g_arena_base.store(saved[3], std::memory_order_relaxed);
     g_arena_bytes.store(saved[2] & 0xffffffff, std::memory_order_relaxed);
     g_arena_waiting.store(true, std::memory_order_release);
@@ -322,15 +357,13 @@ std::int64_t __attribute__((sysv_abi)) OnUploadPool(std::uint64_t, const std::ui
     return 0;
 }
 
-template <int V> std::int64_t __attribute__((sysv_abi)) OnRelease(std::uint64_t, const std::uint64_t* saved) {
+template <int V> std::int64_t __attribute__((sysv_abi)) OnRelease(std::uint64_t, std::uint64_t* saved) noexcept {
     const u64 address = saved[5];
-    if (kVtables[V].kind == Buffer) {
-        BufferVersionOf(address).fetch_add(1, std::memory_order_release);
-        if (g_sealed)
-            g_sealed->RetireRange(Peek<u64>(address + kResourceBase),
-                                  std::max<u64>(Peek<u32>(address + kBufferSize), Peek<u32>(address + kBufferAligned)),
-                                  GxSealed::ByRelease);
-    }
+    if (kVtables[V].kind == Buffer && VertexCensus::g_buffers) VertexCensus::g_buffers->Remove(Peek<u64>(address + kResourceBase));
+    if (kVtables[V].kind == Buffer && g_sealed)
+        g_sealed->RetireRange(Peek<u64>(address + GxSealed::kBufferBaseOffset), BufferBytes(address), GxSealed::ByRelease);
+    if (!g_shards) return 0;
+    if (kVtables[V].kind == Buffer) BufferVersionOf(address).fetch_add(1, std::memory_order_release);
     if (kVtables[V].kind == Buffer || kVtables[V].kind == Texture2D || kVtables[V].kind == Texture3D) DropResource(address);
     Shard& shard = ShardFor(address);
     std::scoped_lock lock(shard.mutex);
@@ -412,15 +445,70 @@ template <int... V> void FillRelease(std::array<Callback, kVtableCount>& out, st
     ((out[V] = OnRelease<V>), ...);
 }
 
-std::vector<std::uint8_t> Bytes(const char* hex) {
-    std::vector<std::uint8_t> out;
-    const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
-    for (; hex[0] && hex[1]; hex += 2) out.push_back(static_cast<std::uint8_t>(digit(hex[0]) * 16 + digit(hex[1])));
-    return out;
-}
 }
 
 void PrintLookups();
+
+namespace {
+struct VtableSlots {
+    std::array<u64, 2> found{}, wanted{};
+};
+CodePatch VtablePatch(std::uint8_t* image, const Vtable& v, std::uint8_t* complete, std::uint8_t* deleting, VtableSlots& slots) {
+    slots.found = {reinterpret_cast<u64>(image) + v.complete, reinterpret_cast<u64>(image) + v.deleting};
+    slots.wanted = {reinterpret_cast<u64>(complete), reinterpret_cast<u64>(deleting)};
+    return {image, v.offset, AsCode(std::span(slots.found)), AsCode(std::span(slots.wanted))};
+}
+
+bool InstallCensus(std::uint8_t* image, std::size_t size) {
+    const Vtable& v = kVtables[0];
+    if (v.offset + 16 > size || Peek<u64>(reinterpret_cast<u64>(image) + v.offset) != reinterpret_cast<u64>(image) + v.complete ||
+        Peek<u64>(reinterpret_cast<u64>(image) + v.offset + 8) != reinterpret_cast<u64>(image) + v.deleting) {
+        host_log("GX buffers: GX's buffer table differs from 1.09, no vertex data census");
+        return false;
+    }
+    std::array<Hook, 2> hooks;
+    const std::span<const std::uint8_t> entry = kCreators[0].entry;
+    bool ready = Prepare(hooks[0], image, size, kCreators[0].offset, SiteKind::Entry, entry, OnCreate<0>);
+    if (ready) {
+        g_originals[0] = OriginalStub(hooks[0]);
+        ready = g_originals[0] != nullptr;
+    }
+    if (ready) ready = Prepare(hooks[1], image, size, kUploadPool, SiteKind::Entry, kUploadPoolEntry, OnUploadPool);
+    if (ready) {
+        g_release_stubs[0] = TailStub(OnRelease<0>, reinterpret_cast<u64>(image) + v.complete);
+        g_release_stubs[1] = TailStub(OnRelease<0>, reinterpret_cast<u64>(image) + v.deleting);
+        ready = g_release_stubs[0] && g_release_stubs[1];
+    }
+    if (!ready) {
+        for (Hook& hook : hooks) Discard(hook);
+        FreeStub(g_originals[0]);
+        g_originals[0] = nullptr;
+        FreeStub(g_release_stubs[0]);
+        FreeStub(g_release_stubs[1]);
+        g_release_stubs[0] = g_release_stubs[1] = nullptr;
+        host_log("GX buffers: GX's CreateBuffer differs from 1.09, no vertex data census");
+        return false;
+    }
+    VtableSlots slots;
+    const CodePatch table = VtablePatch(image, v, g_release_stubs[0], g_release_stubs[1], slots);
+    if (const WriteResult result = Commit(std::span<Hook>(hooks), std::span(&table, 1)); result != WriteResult::Applied) {
+        if (result == WriteResult::NotApplied) {
+            FreeStub(g_originals[0]);
+            g_originals[0] = nullptr;
+            FreeStub(g_release_stubs[0]);
+            FreeStub(g_release_stubs[1]);
+            g_release_stubs[0] = g_release_stubs[1] = nullptr;
+        }
+        host_log("GX buffers: GX's CreateBuffer could not be written (%s), no vertex data census", Describe(result));
+        return false;
+    }
+    VertexCensus::g_buffers = new VertexCensus::Buffers();
+    g_sealed = new GxSealed::Registry();
+    g_sealed->TrackRetired();
+    VertexCensus::g_registry = g_sealed;
+    return true;
+}
+}
 
 bool On() {
     return g_on.load(std::memory_order_relaxed);
@@ -494,12 +582,36 @@ bool SealingOn() {
     return g_sealed != nullptr;
 }
 
-bool SealedFind(std::uint64_t address, std::uint64_t size, std::uint32_t* id, std::uint32_t* generation, std::uint64_t* base) {
+bool SealedFind(std::uint64_t address, std::uint64_t size, std::uint32_t* id, std::uint32_t* generation, std::uint64_t* base, std::uint64_t* bytes) {
     GxSealed::Hit hit;
     if (!g_sealed || !g_sealed->Find(address, size, &hit)) return false;
     *id = hit.id;
     *generation = hit.generation;
     *base = hit.base;
+    *bytes = hit.size;
+    return true;
+}
+
+void SealedFindAll(const std::uint64_t* addresses, const std::uint64_t* sizes, std::uint32_t count, SealedExtent* out) {
+    constexpr std::uint32_t kMost = 32;
+    std::array<GxSealed::Hit, kMost> hits{};
+    std::array<bool, kMost> found{};
+    count = std::min(count, kMost);
+    if (g_sealed) g_sealed->FindAll(addresses, sizes, count, hits.data(), found.data());
+    for (std::uint32_t i = 0; i < count; ++i) out[i] = {found[i], hits[i].id, hits[i].generation, hits[i].base, hits[i].size};
+}
+
+void SealForWhole(int whole) {
+    if (!g_shards || g_sealed) return;
+    g_sealed = new GxSealed::Registry();
+    host_log("GX objects: static GX buffers are sealed, watched only, for the whole draw's vertex and index binds (LANTERN_GX_WHOLE=%d)", whole);
+}
+
+bool SealedLevels(SealLevels* out) {
+    if (!g_sealed) return false;
+    out->live = g_sealed->Live();
+    out->sealed = g_sealed->Sealed();
+    out->notes = g_sealed->Notes();
     return true;
 }
 
@@ -507,16 +619,41 @@ bool SealedValid(std::uint32_t id, std::uint32_t generation) {
     return g_sealed && g_sealed->Valid({id, generation, 0, 0});
 }
 
-void NoteCpuWrite(std::uint64_t address, std::uint64_t size) {
-    if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByCpuWrite);
+void NoteCpuWrite(std::uint64_t address, std::uint64_t size, std::uint8_t retired_by) {
+    if (g_sealed) g_sealed->RetireRange(address, size, retired_by < GxSealed::kRetiredKinds ? GxSealed::Retired(retired_by) : GxSealed::ByCpuWrite);
 }
 
 void NoteGpuWrite(std::uint64_t address, std::uint64_t size) {
     if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByGpuWrite);
 }
 
-void RetireSealed(std::uint64_t address, std::uint64_t size) {
-    if (g_sealed) g_sealed->RetireRange(address, size, GxSealed::ByUpdate);
+bool SealedAt(std::uint64_t address) {
+    GxSealed::Hit hit;
+    return g_sealed && g_sealed->Find(address, 1, &hit);
+}
+
+void NoteSealedFault(bool still_sealed) {
+    g_faults_in_sealed.fetch_add(1, std::memory_order_relaxed);
+    if (still_sealed) g_faults_left_sealed.fetch_add(1, std::memory_order_relaxed);
+}
+
+GxSealed::SealTally SealCounts() {
+    GxSealed::SealTally t;
+    for (unsigned usage = 0; usage < GxSealed::kUsages; ++usage)
+        for (unsigned bind = 0; bind < (1u << GxSealed::kBindFlags); ++bind)
+            t.sealed[usage][bind] = g_sealed_by[usage][bind].load(std::memory_order_relaxed);
+    for (unsigned r = 0; r < GxSealed::kRefusals; ++r) t.refused[r] = g_refused_by[r].load(std::memory_order_relaxed);
+    t.faults_in_sealed = g_faults_in_sealed.load(std::memory_order_relaxed);
+    t.faults_left_sealed = g_faults_left_sealed.load(std::memory_order_relaxed);
+    return t;
+}
+
+void PrintSeals(const char* when) {
+    if (!g_sealed) return;
+    const GxSealed::SealTally tally = SealCounts();
+    char line[2048];
+    GxSealed::FormatSeals(line, sizeof line, when, tally);
+    std::printf("%s\n", line);
 }
 
 bool BufferAt(std::uint64_t address) {
@@ -529,15 +666,20 @@ HeldImage HeldAt(std::uint64_t address) {
     std::scoped_lock lock(g_resource_mutex);
     const auto at = g_resources.find(address);
     if (at == g_resources.end() || at->second.kind == Buffer) return {};
-    return {at->second.object, at->second.held_uid, at->second.held_index};
+    const HeldLink link = g_held.At(address);
+    return {at->second.object, link.uid, link.generation, link.index};
 }
 
-void HoldImage(std::uint64_t address, std::uint32_t index, std::uint64_t uid) {
+void HoldImage(std::uint64_t address, std::uint32_t index, std::uint64_t uid, std::uint64_t generation) {
     std::scoped_lock lock(g_resource_mutex);
     const auto at = g_resources.find(address);
     if (at == g_resources.end() || at->second.kind == Buffer) return;
-    at->second.held_index = index;
-    at->second.held_uid = uid;
+    g_held.Hold(address, index, uid, generation);
+}
+
+void DropHeldImage(std::uint64_t uid) {
+    std::scoped_lock lock(g_resource_mutex);
+    if (g_held.Drop(uid)) g_held_dropped.fetch_add(1, std::memory_order_relaxed);
 }
 
 void NoteObjectPath(ObjectPath path, const char* refused, std::size_t length) {
@@ -630,6 +772,8 @@ void PrintLookups() {
                 static_cast<unsigned long long>(g_paths[PathHeldRefused].load()));
     for (const auto& [reason, count] : g_refused) std::printf(" %s %llu;", reason.c_str(), static_cast<unsigned long long>(count));
     std::printf("\n");
+    std::printf("GX objects: held images searched again because images were made or freed since %llu; held links dropped with their freed image %llu, %zu held now\n",
+                static_cast<unsigned long long>(g_paths[PathHeldStale].load()), static_cast<unsigned long long>(g_held_dropped.load()), g_held.Size());
     if (TexturesChecked()) {
         std::printf("GX objects: checked against the old search: %llu same image, %llu resolver cases, %llu another image; %llu other images in those regions\n",
                     static_cast<unsigned long long>(g_held_checks[CheckSame].load()), static_cast<unsigned long long>(g_held_checks[CheckResolver].load()),
@@ -723,17 +867,24 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const bool want_records = records && (records[0] == '1' || records[0] == '2' || records[0] == '3');
     const char* census = std::getenv("LANTERN_CONST_CENSUS");
     const bool want_census = census && census[0] == '1';
-    const char* ring = std::getenv("LANTERN_RING_CONSTANTS");
-    const bool want_ring = RingConstants::Parse(ring) != RingConstants::Off;
+    const bool want_ring = Lantern::Switches::Get().ring_constants != Lantern::Mode::Off;
     const bool own_buffers = Batch::Switch("LANTERN_GX_OWN_BUFFERS") != Batch::Off;
     const bool objects = textures || buffers || want_records || want_census || (on && on[0] == '1');
+    const bool vertex_census = VertexCensus::On();
     if (!objects && !own_buffers) {
         host_log("GX objects: off (LANTERN_GX_TEXTURES, LANTERN_GX_BUFFERS or LANTERN_GX_RECORDS=1 turns them on)");
+        if (vertex_census && InstallCensus(image, size)) {
+            host_log("GX buffers: creations, releases and the upload pool watched for the vertex data census (BB_FRAME_STATS)");
+            if (want_ring) host_log("GX upload pool: watched for ring constants (LANTERN_RING_CONSTANTS=1)");
+            return false;
+        }
         if (want_ring) {
             Hook pool;
-            if (Prepare(pool, image, size, kUploadPool, kUploadPoolEntry, OnUploadPool)) {
-                Commit(std::span<Hook>(&pool, 1));
-                host_log("GX upload pool: watched for ring constants (LANTERN_RING_CONSTANTS=1)");
+            if (Prepare(pool, image, size, kUploadPool, SiteKind::Entry, kUploadPoolEntry, OnUploadPool)) {
+                if (const WriteResult result = Commit(std::span<Hook>(&pool, 1)); result == WriteResult::Applied)
+                    host_log("GX upload pool: watched for ring constants (LANTERN_RING_CONSTANTS=1)");
+                else
+                    host_log("GX upload pool: its entry could not be written (%s), ring constants off", Describe(result));
             } else {
                 host_log("GX upload pool: its entry differs from 1.09, ring constants off");
             }
@@ -755,15 +906,15 @@ bool Install(std::uint8_t* image, std::size_t size) {
     std::array<Hook, kCreatorCount + kYebisCreatorCount + 2> hooks;
     bool ready = true;
     for (std::size_t c = 0; c < kCreatorCount && ready; ++c) {
-        const std::vector<std::uint8_t> entry = Bytes(kCreators[c].entry);
-        ready = Prepare(hooks[c], image, size, kCreators[c].offset, entry, creators[c]);
+        const std::span<const std::uint8_t> entry = kCreators[c].entry;
+        ready = Prepare(hooks[c], image, size, kCreators[c].offset, SiteKind::Entry, entry, creators[c]);
         if (ready) {
             g_originals[c] = OriginalStub(hooks[c]);
             ready = g_originals[c] != nullptr;
         }
     }
     for (std::size_t c = 0; c < kYebisCreatorCount && ready; ++c) {
-        ready = Prepare(hooks[kCreatorCount + c], image, size, kYebisCreators[c].offset, kYebisCreators[c].entry, yebis_callbacks[c]);
+        ready = Prepare(hooks[kCreatorCount + c], image, size, kYebisCreators[c].offset, SiteKind::Entry, kYebisCreators[c].entry, yebis_callbacks[c]);
         if (ready) {
             g_yebis_originals[c] = OriginalStub(hooks[kCreatorCount + c]);
             ready = g_yebis_originals[c] != nullptr;
@@ -771,13 +922,13 @@ bool Install(std::uint8_t* image, std::size_t size) {
     }
     if (ready) {
         Hook& hook = hooks[kCreatorCount + kYebisCreatorCount];
-        ready = Prepare(hook, image, size, kSwapChainCreator, kSwapChainEntry, OnSwapChain);
+        ready = Prepare(hook, image, size, kSwapChainCreator, SiteKind::Entry, kSwapChainEntry, OnSwapChain);
         if (ready) {
             g_swap_chain_original = OriginalStub(hook);
             ready = g_swap_chain_original != nullptr;
         }
     }
-    if (ready) ready = Prepare(hooks[kCreatorCount + kYebisCreatorCount + 1], image, size, kUploadPool, kUploadPoolEntry, OnUploadPool);
+    if (ready) ready = Prepare(hooks[kCreatorCount + kYebisCreatorCount + 1], image, size, kUploadPool, SiteKind::Entry, kUploadPoolEntry, OnUploadPool);
     for (std::size_t v = 0; v < kVtableCount && ready; ++v) {
         g_release_stubs[2 * v] = TailStub(releases[v], reinterpret_cast<u64>(image) + kVtables[v].complete);
         g_release_stubs[2 * v + 1] = TailStub(releases[v], reinterpret_cast<u64>(image) + kVtables[v].deleting);
@@ -792,18 +943,32 @@ bool Install(std::uint8_t* image, std::size_t size) {
         host_log("GX objects off: GX's creators differ from 1.09");
         return false;
     }
-    g_shards = new Shard[kShards];
-    for (std::size_t v = 0; v < kVtableCount; ++v) {
-        const u64 complete = reinterpret_cast<u64>(g_release_stubs[2 * v]), deleting = reinterpret_cast<u64>(g_release_stubs[2 * v + 1]);
-        std::memcpy(image + kVtables[v].offset, &complete, sizeof complete);
-        std::memcpy(image + kVtables[v].offset + 8, &deleting, sizeof deleting);
+    std::array<VtableSlots, kVtableCount> slots;
+    std::array<CodePatch, kVtableCount> tables;
+    for (std::size_t v = 0; v < kVtableCount; ++v)
+        tables[v] = VtablePatch(image, kVtables[v], g_release_stubs[2 * v], g_release_stubs[2 * v + 1], slots[v]);
+    if (const WriteResult result = Commit(std::span<Hook>(hooks), tables); result != WriteResult::Applied) {
+        if (result == WriteResult::NotApplied) {
+            for (std::uint8_t*& stub : g_originals) { FreeStub(stub); stub = nullptr; }
+            for (std::uint8_t*& stub : g_yebis_originals) { FreeStub(stub); stub = nullptr; }
+            FreeStub(g_swap_chain_original);
+            g_swap_chain_original = nullptr;
+            for (std::uint8_t*& stub : g_release_stubs) { FreeStub(stub); stub = nullptr; }
+        }
+        host_log("GX objects off: GX's creators could not be written (%s)", Describe(result));
+        return false;
     }
-    if (own_buffers) g_sealed = new GxSealed::Registry();
+    g_shards = new Shard[kShards];
+    if (own_buffers || vertex_census) g_sealed = new GxSealed::Registry();
+    if (vertex_census) {
+        VertexCensus::g_buffers = new VertexCensus::Buffers();
+        g_sealed->TrackRetired();
+        VertexCensus::g_registry = g_sealed;
+    }
     g_on.store(objects, std::memory_order_relaxed);
     g_textures_owned.store(textures, std::memory_order_relaxed);
     g_textures_checked.store(checked, std::memory_order_relaxed);
     g_buffers_owned.store(buffers, std::memory_order_relaxed);
-    Commit(std::span<Hook>(hooks));
     if (buffers) host_log("GX objects: GX's upload arena stays in place (LANTERN_GX_BUFFERS=1)");
     if (own_buffers) host_log("GX objects: static GX buffers are sealed for their own buffers (LANTERN_GX_OWN_BUFFERS)");
     if (objects)

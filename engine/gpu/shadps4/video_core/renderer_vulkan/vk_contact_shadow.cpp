@@ -124,8 +124,16 @@ void ContactShadow::Flush(bool native_blur) {
                          scene_targets.Eligible(depth);
     if (target.info.pixel_format != vk::Format::eR8G8B8A8Unorm ||
         (!reduced && !(target.usage_flags & vk::ImageUsageFlagBits::eStorage))) {
-        failed = true;
-        std::printf("Contact shadows: the shadow target is not an RGBA8 storage image; off\n");
+        ++skipped_flushes;
+        if (skipped_flushes == 1 || skipped_flushes % 1000 == 0) {
+            std::printf("Contact shadows: frame skipped, the shadow target is format %d %ux%u usage 0x%x, reduced %d "
+                        "(%llu so far); contact and ray traced sun shadows stay on\n",
+                        static_cast<int>(target.info.pixel_format), target.info.size.width,
+                        target.info.size.height, static_cast<u32>(target.usage_flags), reduced ? 1 : 0,
+                        static_cast<unsigned long long>(skipped_flushes));
+        }
+        scheduler.EndRendering();
+        rt_shadow.RecordBuilds();
         return;
     }
     scheduler.EndRendering();

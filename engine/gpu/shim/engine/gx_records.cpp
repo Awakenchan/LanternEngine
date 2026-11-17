@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_records.h"
+#include "gx_whole_stage_a.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include "gx_draws.h"
 #include "gx_objects.h"
+#include "gx_whole.h"
+#include "gx_whole_binds.h"
+#include "gx_record_hash.h"
+#include "pipe_census.h"
+#include "bbport_native_calls.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -12,6 +20,7 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <thread>
 
 namespace BbEngine::GxRecords {
 namespace {
@@ -20,9 +29,8 @@ using u64 = std::uint64_t;
 using GxBindings::Reason;
 
 constexpr std::size_t kDraws[4] = {0x21696c0, 0x2169780, 0x2169840, 0x2169900};
-constexpr std::uint8_t kPushes[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50};
-constexpr std::uint8_t kPushesWide[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                        0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x18};
+constexpr const auto& kPushes = HookEntries::kGxRecordsPushes;
+constexpr const auto& kPushesWide = HookEntries::kGxRecordsPushesWide;
 
 constexpr std::size_t kLayout = 0, kTopology = 0x8, kRaster = 0x240, kBlend = 0x4d0, kDepthState = 0x4d8;
 constexpr std::size_t kTargets = 0x4e0, kDepthTarget = 0x520, kAccess = 0x528;
@@ -47,18 +55,20 @@ constexpr u64 kAccessMask = 0xff000000000ull, kBufferMask = 0x3fff0000ull, kGlob
 constexpr int kAccessShift = 36, kBufferShift = 16;
 constexpr u32 kGlobalSlot = 15;
 constexpr u32 kMaxInputs = 256;
+constexpr std::size_t kDepthBounds = 0x578;
+constexpr std::size_t kShaderBinary = 0x100, kBinaryRegisters = 8, kBinaryUserWords = 3, kBinaryVertexOutputs = 0x24;
+constexpr std::size_t kBinaryVertexOutputCount = 0x25, kBinaryVertexTable = 0x28, kBinaryPixelInputCount = 0x38, kBinaryPixelTable = 0x3c;
+constexpr std::size_t kLayoutFetch = 0x10, kLayoutModifier = 0x40;
+constexpr std::size_t kContextOutput = 0xb558, kOutputDepthClear = 0xf8, kOutputStencilClear = 0xfc;
+constexpr u32 kWholePublishEvery = 256, kEvidenceBytes = 256;
 
 constexpr std::size_t kDynamicUpdate = 0x26adb90, kDefaultUpdate = 0x26b3560;
-constexpr std::uint8_t kUpdateEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                         0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28};
-constexpr std::uint8_t kDefaultUpdateEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                                0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x18};
+constexpr const auto& kUpdateEntry = HookEntries::kGxRecordsUpdateEntry;
+constexpr const auto& kDefaultUpdateEntry = HookEntries::kGxRecordsDefaultUpdateEntry;
 constexpr u32 kVersionBits = 16;
 
 constexpr u32 kSlotBits = 14, kPoolBits = 13;
-struct Slot {
-    std::atomic<u64> address{0}, mixed{0}, sequence{0};
-};
+using Slot = GxWhole::RecordSlot;
 struct Payload {
     std::atomic<u64> sequence{0};
     GxBindings::State state;
@@ -70,7 +80,22 @@ std::atomic<bool> g_on{false}, g_checked{false}, g_compared{false}, g_used{false
 u64 g_image = 0;
 std::unique_ptr<std::atomic<u32>[]> g_versions;
 std::uint8_t* g_dynamic_update = nullptr;
-std::atomic<bool> g_constants{false}, g_updates{false};
+std::atomic<bool> g_constants{false}, g_updates{false}, g_binds_by_object{false};
+std::atomic<GxWhole::Mode> g_whole{GxWhole::Mode::Off};
+std::atomic<GxWhole::Mode> g_whole_requested{GxWhole::Mode::Off};
+std::atomic<bool> g_whole_counting{false};
+
+struct WholeTally {
+    GxWhole::Counts counts;
+    GxWhole::KeptMemory kept;
+    std::array<bool, GxWhole::kFields> logged{};
+    std::array<bool, GxWhole::kUnusedClasses> unused_logged{};
+    u64 seen = 0;
+    u32 unpublished = 0;
+    std::thread::id writer{};
+};
+WholeTally g_whole_tally;
+std::array<std::atomic<u64>, GxWhole::kCountWords> g_whole_published{};
 
 struct Current {
     bool set = false;
@@ -84,6 +109,7 @@ struct Tally {
     u64 constants = 0, reused = 0, constants_checked = 0, constants_differ = 0;
     u64 binds = 0, binds_reused = 0, binds_checked = 0, binds_differ = 0;
     u64 draws = 0, covered = 0, kept_words = 0, render = 0, no_render = 0;
+    u64 taken = 0, stale = 0, lost = 0, unstamped = 0, weak = 0, weak_taken = 0;
     u64 reasons[GxBindings::kReasons]{};
     u64 words = 0, words_differ = 0;
     u64 registers = 0, registers_differ = 0;
@@ -99,9 +125,10 @@ template <typename T> T Peek(u64 address) {
     return value;
 }
 
-u64 Mix(u64 hash, u64 value) {
-    hash = (hash ^ value) * 0x100000001B3ull;
-    return hash ^ (hash >> 29);
+using GxRecordHash::Mix;
+
+u64 MixBlock(u64 hash, u64 at) {
+    return GxRecordHash::Block(hash, reinterpret_cast<const void*>(at), kBlockBytes / 8);
 }
 
 std::atomic<u32>& VersionOf(u64 address) {
@@ -123,10 +150,7 @@ u64 MixStage(u64 hash, u64 pending, std::size_t block) {
     if (!shader) return hash;
     const u64 inputs = Peek<u64>(shader + kShaderInputs);
     const u32 count = Peek<u32>(shader + kShaderInputCount);
-    if (!inputs || count > kMaxInputs) {
-        for (std::size_t offset = 0; offset < kBlockBytes; offset += 8) hash = Mix(hash, Peek<u64>(at + offset));
-        return hash;
-    }
+    if (!inputs || count > kMaxInputs) return MixBlock(hash, at);
     bool whole = false;
     for (u32 i = 0; i < count && !whole; ++i) {
         const u32 word = Peek<u32>(inputs + u64(i) * 4);
@@ -151,10 +175,7 @@ u64 MixStage(u64 hash, u64 pending, std::size_t block) {
             break;
         }
     }
-    if (whole) {
-        for (std::size_t offset = 0; offset < kBlockBytes; offset += 8) hash = Mix(hash, Peek<u64>(at + offset));
-    }
-    return hash;
+    return whole ? MixBlock(hash, at) : hash;
 }
 
 u64 RecordOf(u64 pending) {
@@ -219,7 +240,7 @@ void CaptureSpill(GxBindings::Stage& stage, u64 bound, int index) {
 }
 
 void NoteViewKey(GxBindings::State& state, u64 view) {
-    if (!g_updates.load(std::memory_order_relaxed) || state.num_view_keys >= GxBindings::kMaxViewKeys) return;
+    if (!g_binds_by_object.load(std::memory_order_relaxed) || state.num_view_keys >= GxBindings::kMaxViewKeys) return;
     const u32 word1 = Peek<u32>(view + kViewSharp + 4), word3 = Peek<u32>(view + kViewSharp + 12);
     if (word3 >> 30) return;
     const u64 resource = Peek<u64>(view + kViewResource);
@@ -285,7 +306,46 @@ void CaptureStage(GxBindings::State& state, GxBindings::Stage& stage, u64 pendin
     CaptureSpill(stage, bound, index);
 }
 
+void CaptureSemantics(GxBindings::Whole& whole, u64 vertex_binary, u64 pixel_binary) {
+    const u32 inputs = Peek<std::uint8_t>(pixel_binary + kBinaryPixelInputCount);
+    const u32 outputs = vertex_binary ? Peek<std::uint8_t>(vertex_binary + kBinaryVertexOutputCount) : 0;
+    whole.semantics_valid = vertex_binary && inputs <= GxBindings::kMaxSemantics && outputs <= GxBindings::kMaxSemantics;
+    whole.vertex_semantics_count = whole.pixel_semantics_count = 0;
+    if (!whole.semantics_valid) return;
+    const u64 skipped = u64(Peek<std::uint8_t>(vertex_binary + kBinaryVertexOutputs)) + Peek<std::uint8_t>(vertex_binary + kBinaryUserWords);
+    std::memcpy(whole.vertex_semantics, reinterpret_cast<const void*>(vertex_binary + kBinaryVertexTable + skipped * 4), u64(outputs) * 2);
+    const u64 pixel_table = pixel_binary + kBinaryPixelTable + u64(Peek<std::uint8_t>(pixel_binary + kBinaryUserWords)) * 4;
+    std::memcpy(whole.pixel_semantics, reinterpret_cast<const void*>(pixel_table), u64(inputs) * 2);
+    whole.vertex_semantics_count = outputs;
+    whole.pixel_semantics_count = inputs;
+}
+
+void CaptureWhole(GxBindings::Whole& whole, u64 pending, u64 context) {
+    whole.topology = Peek<u32>(pending + kTopology);
+    std::memcpy(whole.depth_bounds, reinterpret_cast<const void*>(pending + kDepthBounds), sizeof whole.depth_bounds);
+    whole.index_bound = Peek<u64>(pending + kIndexBuffer) != 0;
+    const u64 vertex = Peek<u64>(pending + kVertexBlock + kBlockShader);
+    const u64 vertex_binary = vertex ? Peek<u64>(vertex + kShaderBinary) : 0;
+    whole.vs_bound = vertex_binary != 0;
+    if (vertex_binary) std::memcpy(whole.vs_registers, reinterpret_cast<const void*>(vertex_binary + kBinaryRegisters), sizeof whole.vs_registers);
+    const u64 layout = Peek<u64>(pending + kLayout);
+    whole.vs_modifier = layout && Peek<u64>(layout + kLayoutFetch) ? Peek<u32>(layout + kLayoutModifier) : 0;
+    const u64 pixel = Peek<u64>(pending + kPixelBlock + kBlockShader);
+    const u64 pixel_binary = pixel ? Peek<u64>(pixel + kShaderBinary) : 0;
+    whole.ps_bound = pixel_binary != 0;
+    whole.semantics_valid = 0;
+    if (pixel_binary) {
+        std::memcpy(whole.ps_registers, reinterpret_cast<const void*>(pixel_binary + kBinaryRegisters), sizeof whole.ps_registers);
+        CaptureSemantics(whole, vertex_binary, pixel_binary);
+    }
+    whole.depth_clear = Peek<float>(context + kContextOutput + kOutputDepthClear);
+    whole.stencil_clear = Peek<std::uint8_t>(context + kContextOutput + kOutputStencilClear);
+    whole.captured = 1;
+}
+
 void Capture(GxBindings::State& state, u64 pending, u64 context, u64 bound) {
+    state.whole.captured = 0;
+    if (g_whole.load(std::memory_order_relaxed) != GxWhole::Mode::Off) CaptureWhole(state.whole, pending, context);
     state.reason = GxBindings::Covered;
     state.descriptors = 0;
     state.num_view_keys = 0;
@@ -307,14 +367,17 @@ void Capture(GxBindings::State& state, u64 pending, u64 context, u64 bound) {
     std::memcpy(render.viewport, reinterpret_cast<const void*>(pending + kViewports), sizeof render.viewport);
     std::memcpy(render.scissor, reinterpret_cast<const void*>(pending + kScissors), sizeof render.scissor);
     render.color_valid = 0;
+    state.objects_epoch = GxObjects::Epoch();
     for (int i = 0; i < 8; ++i) {
         const u64 view = Peek<u64>(pending + kTargets + 8 * i);
+        state.target_views[i] = view + 1 <= 1 ? 0 : view;
         render.color[i] = ViewBase(view);
         if (view + 1 <= 1 || !(Call(g_image + kTargetValid, view + kViewSharp) & 0xffffffff)) continue;
         render.color_valid |= 1u << i;
         std::memcpy(render.targets[i], reinterpret_cast<const void*>(view + kViewSharp), sizeof render.targets[i]);
     }
     const u64 depth_view = Peek<u64>(pending + kDepthTarget);
+    state.target_views[GxBindings::kTargetViews - 1] = depth_view + 1 <= 1 ? 0 : depth_view;
     render.depth = ViewBase(depth_view);
     render.depth_valid = depth_view + 1 > 1 && ((Call(g_image + kDepthValid, depth_view + kViewSharp) & 0xffffffff) ||
                                                  (Call(g_image + kStencilValid, depth_view + kViewSharp) & 0xffffffff));
@@ -325,7 +388,6 @@ void Capture(GxBindings::State& state, u64 pending, u64 context, u64 bound) {
     render.index_known = index && !Peek<std::uint8_t>(index + kResourceDynamic);
     render.index_format = Peek<u32>(pending + kIndexFormat);
     render.index_base = render.index_known ? Peek<u64>(index + kResourceBase) + Peek<u32>(pending + kIndexOffset) : 0;
-    render.hash = GxBindings::RenderHash(render);
     state.vertex_first = state.vertex_count = 0;
     if (bound) {
         const u32 first = Peek<std::uint8_t>(bound + kVertexFirst), count = Peek<std::uint8_t>(bound + kVertexCount);
@@ -367,6 +429,11 @@ void Report() {
     }
     std::printf("; render state from the record for %llu, %llu without it\n", static_cast<unsigned long long>(t.render),
                 static_cast<unsigned long long>(t.no_render));
+    std::printf("GX records: keys %llu taken, %llu stale (address stamped again), %llu lost (slot gone), %llu unstamped; "
+                "%llu indexed draws carrying base vertex and instances keyed by check word (%llu taken)\n",
+                static_cast<unsigned long long>(t.taken), static_cast<unsigned long long>(t.stale),
+                static_cast<unsigned long long>(t.lost), static_cast<unsigned long long>(t.unstamped),
+                static_cast<unsigned long long>(t.weak), static_cast<unsigned long long>(t.weak_taken));
     if (t.binds) {
         std::printf("GX records: vertex and index buffers %llu bound, %llu by object (%llu checked, %llu differ)\n",
                     static_cast<unsigned long long>(t.binds), static_cast<unsigned long long>(t.binds_reused),
@@ -392,23 +459,23 @@ bool LogDifference() {
     return true;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnDynamicUpdate(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnDynamicUpdate(std::uint64_t, std::uint64_t* saved) noexcept {
     Call(reinterpret_cast<u64>(g_dynamic_update), saved[5], saved[4], saved[3], saved[2], saved[1]);
     const u64 address = static_cast<u64>(Call(g_image + kRename, saved[5], saved[2] + kBufferHolder));
     if (address) VersionOf(address).fetch_add(1, std::memory_order_release);
     GxObjects::TouchBuffer(saved[2]);
-    const_cast<std::uint64_t*>(saved)[-1] = 0;
+    saved[-1] = 0;
     return 1;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnDefaultUpdate(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnDefaultUpdate(std::uint64_t, std::uint64_t* saved) noexcept {
     const u64 address = Peek<u64>(saved[4] + 8);
     if (address) VersionOf(address).fetch_add(1, std::memory_order_release);
     GxObjects::TouchBuffer(saved[4] - kBufferHolder);
     return 0;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnDraw(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnDraw(std::uint64_t, std::uint64_t* saved) noexcept {
     Current& current = g_current;
     GxDraws::ForgetBound();
     current.pending = saved[4];
@@ -436,38 +503,63 @@ bool Used() {
     return g_used.load(std::memory_order_relaxed);
 }
 
+std::uint64_t Stamped() {
+    return g_next.load(std::memory_order_relaxed);
+}
+
 void Stamp(std::uint64_t record_address, std::uint32_t count) {
     Current& current = g_current;
+    auto* packet = reinterpret_cast<u32*>(record_address);
     Slot& slot = SlotFor(record_address);
     if (!current.set || current.count != count) {
-        if (slot.address.load(std::memory_order_relaxed) == record_address) slot.address.store(0, std::memory_order_relaxed);
+        GxWhole::Forget(slot, record_address);
         return;
     }
     current.set = false;
-    u64 sequence = 0;
+    u32 stamp_slot = 0, words = 0;
+    if (!BbNativeCalls::RecordLayout(packet, stamp_slot, words)) {
+        GxWhole::Forget(slot, record_address);
+        return;
+    }
+    u64 sequence = g_next.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!static_cast<u32>(sequence)) sequence = g_next.fetch_add(1, std::memory_order_relaxed) + 1;
     if (g_pool) {
-        sequence = g_next.fetch_add(1, std::memory_order_relaxed) + 1;
-        Payload& payload = g_pool[sequence & ((u64(1) << kPoolBits) - 1)];
+        Payload& payload = PayloadOf(sequence);
         payload.sequence.store(0, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         Capture(payload.state, current.pending, current.context, GxDraws::BoundState());
         payload.state.record = current.record;
         payload.sequence.store(sequence, std::memory_order_release);
     }
-    slot.sequence.store(sequence, std::memory_order_relaxed);
-    slot.mixed.store(current.record ^ record_address, std::memory_order_relaxed);
-    slot.address.store(record_address, std::memory_order_release);
+    const u32 key = stamp_slot ? static_cast<u32>(sequence) : BbNativeCalls::TokenKey(packet, stamp_slot, words);
+    GxWhole::Publish(slot, record_address, current.record, sequence, key);
+    if (stamp_slot) BbNativeCalls::Seal(packet, stamp_slot, words, key);
+}
+
+bool Pending(std::uint64_t record_address) {
+    if (!g_slots) return false;
+    const Slot& slot = SlotFor(record_address);
+    return slot.sequence.load(std::memory_order_acquire) != 0 && slot.address.load(std::memory_order_relaxed) == record_address;
 }
 
 std::uint64_t Take(std::uint64_t record_address) {
     g_taken_sequence = 0;
-    Slot& slot = SlotFor(record_address);
-    if (slot.address.load(std::memory_order_acquire) != record_address) return 0;
-    const u64 record = slot.mixed.load(std::memory_order_relaxed) ^ record_address;
-    const u64 sequence = slot.sequence.load(std::memory_order_relaxed);
-    slot.address.store(0, std::memory_order_relaxed);
-    if (g_pool) g_taken_sequence = sequence;
-    return record;
+    Tally& t = g_tally;
+    const auto* packet = reinterpret_cast<const u32*>(record_address);
+    u32 stamp_slot = 0, words = 0;
+    if (!BbNativeCalls::RecordLayout(packet, stamp_slot, words)) return 0;
+    if (!stamp_slot) ++t.weak;
+    const GxWhole::Taking taking = GxWhole::Consume(SlotFor(record_address), record_address, BbNativeCalls::TokenKey(packet, stamp_slot, words));
+    switch (taking.key) {
+    case GxWhole::Key::Unstamped: ++t.unstamped; return 0;
+    case GxWhole::Key::Lost: ++t.lost; return 0;
+    case GxWhole::Key::Stale: ++t.stale; return 0;
+    case GxWhole::Key::Taken: break;
+    }
+    ++t.taken;
+    if (!stamp_slot) ++t.weak_taken;
+    if (g_pool) g_taken_sequence = taking.sequence;
+    return taking.record;
 }
 
 const GxBindings::State* Taken(std::uint64_t record) {
@@ -521,12 +613,20 @@ bool ConstantsTracked() {
     return g_constants.load(std::memory_order_relaxed);
 }
 
-bool BindsByObject() {
+static bool BindsOff() {
     static const bool off = [] {
         const char* value = std::getenv("LANTERN_GX_BINDS");
         return value && value[0] == '0';
     }();
-    return !off && g_updates.load(std::memory_order_relaxed);
+    return off;
+}
+
+bool KeysCaptured() {
+    return !BindsOff() && g_updates.load(std::memory_order_relaxed);
+}
+
+bool BindsByObject() {
+    return KeysCaptured() && g_binds_by_object.load(std::memory_order_relaxed);
 }
 
 void NoteBind(bool reused, bool checked, bool same, std::uint64_t address, std::uint64_t size) {
@@ -566,12 +666,139 @@ void NoteTarget(int target, std::uint64_t ours, std::uint64_t old) {
     }
 }
 
-bool Install(std::uint8_t* image, std::size_t size) {
+namespace {
+void PublishWhole(const GxWhole::Counts& counts) {
+    std::array<u64, GxWhole::kCountWords> words;
+    std::memcpy(words.data(), &counts, sizeof counts);
+    for (std::size_t i = 0; i < words.size(); ++i) g_whole_published[i].store(words[i], std::memory_order_relaxed);
+}
+
+void WriteLine(const char* text, int length) {
+    if (length <= 0) return;
+    const std::size_t bytes = std::min<std::size_t>(std::size_t(length), kEvidenceBytes - 1);
+    if (std::fwrite(text, 1, bytes, stdout) != bytes) return;
+}
+
+void ReportWholeEvidence(WholeTally& t, std::span<const GxWhole::Difference> differences, u64 record, GxWhole::Mode mode) {
+    for (const GxWhole::Difference& d : differences) {
+        if (t.logged[d.field]) continue;
+        t.logged[d.field] = true;
+        char line[kEvidenceBytes];
+        const int length = std::snprintf(line, sizeof line,
+                                         "GX whole: first difference in %s at register %#x: record %08x, registers %08x (covered draw %llu, record %016llx, LANTERN_GX_WHOLE=%d)\n",
+                                         GxWhole::kFieldInfo[d.field].name, d.reg, d.ours, d.registers,
+                                         static_cast<unsigned long long>(t.seen), static_cast<unsigned long long>(record),
+                                         GxWhole::ModeNumber(mode));
+        WriteLine(line, length);
+    }
+}
+
+void ReportKeptChanges(WholeTally& t, GxWhole::Mode mode) {
+    for (u32 f = 0; f < GxWhole::kFields; ++f) {
+        if (t.counts.field_changed[f] != 1 || t.logged[f]) continue;
+        t.logged[f] = true;
+        char line[kEvidenceBytes];
+        const int length = std::snprintf(line, sizeof line,
+                                         "GX whole: kept field %s (registers %#x, %u words) changed between two covered draws (covered draw %llu, LANTERN_GX_WHOLE=%d)\n",
+                                         GxWhole::kFieldInfo[f].name, GxWhole::kFieldInfo[f].first, GxWhole::kFieldInfo[f].count,
+                                         static_cast<unsigned long long>(t.seen), GxWhole::ModeNumber(mode));
+        WriteLine(line, length);
+    }
+}
+
+void CompareWhole(WholeTally& t, const GxBindings::State& state, u64 record, bool indexed, std::span<const u32> registers, GxWhole::Mode mode) {
+    GxWhole::Counts& c = t.counts;
+    const u64 index = t.seen++;
+    if (!GxWhole::ShouldCompare(mode, index)) {
+        ++c.skipped;
+        return;
+    }
+    std::array<GxWhole::Value, GxWhole::kMaxValues> values;
+    const u32 count = GxWhole::RegistersFromRecord(state, indexed, values);
+    if (!Intact()) {
+        ++c.overwritten;
+        GxWhole::CheckKept(registers, t.kept, false, c);
+        return;
+    }
+    ++c.checked;
+    std::array<GxWhole::Difference, GxWhole::kEvidencePerDraw> evidence;
+    GxWhole::UnusedFound unused;
+    const u32 differing = GxWhole::CompareRecord(registers, std::span<const GxWhole::Value>(values.data(), count), c, evidence, &state.render,
+                                                 &unused);
+    for (u32 u = 1; mode == GxWhole::Mode::Compare && u < GxWhole::kUnusedClasses; ++u) {
+        if (!((unused.mask >> u) & 1) || t.unused_logged[u]) continue;
+        t.unused_logged[u] = true;
+        const GxWhole::Difference& d = unused.first[u];
+        char line[kEvidenceBytes];
+        const int length = std::snprintf(line, sizeof line,
+                                         "GX whole: first unread difference (%s) in %s at register %#x: record %08x, registers %08x (covered draw %llu, record %016llx, LANTERN_GX_WHOLE=2)\n",
+                                         GxWhole::kUnusedNames[u], GxWhole::kFieldInfo[d.field].name, d.reg, d.ours, d.registers,
+                                         static_cast<unsigned long long>(t.seen), static_cast<unsigned long long>(record));
+        WriteLine(line, length);
+    }
+    if (differing) {
+        ++c.differ;
+        ReportWholeEvidence(t, std::span<const GxWhole::Difference>(evidence.data(), std::min(differing, GxWhole::kEvidencePerDraw)), record, mode);
+    }
+    if (GxWhole::CheckKept(registers, t.kept, true, c)) ReportKeptChanges(t, mode);
+}
+}
+
+bool WholeCounting() {
+    return g_whole_counting.load(std::memory_order_relaxed);
+}
+
+GxWhole::Mode WholeMode() {
+    return g_whole.load(std::memory_order_relaxed);
+}
+
+GxWhole::Mode WholeRequested() {
+    return g_whole_requested.load(std::memory_order_relaxed);
+}
+
+void NoteWhole(std::uint64_t record, bool indexed, std::span<const std::uint32_t> registers) {
+    WholeTally& t = g_whole_tally;
+    const GxWhole::Mode mode = g_whole.load(std::memory_order_relaxed);
+    if (mode == GxWhole::Mode::Compare) {
+        const std::thread::id self = std::this_thread::get_id();
+        if (t.writer == std::thread::id{}) t.writer = self;
+        else if (t.writer != self) ++t.counts.other_writers;
+    }
+    GxWhole::Counts& c = t.counts;
+    ++c.total;
+    c.covered += record != 0;
+    if (mode != GxWhole::Mode::Off) {
+        const GxBindings::State* state = record ? Taken(record) : nullptr;
+        if (record && !state) ++c.no_payload;
+        else if (state && !state->whole.captured) ++c.no_whole;
+        if (state && state->whole.captured) CompareWhole(t, *state, record, indexed, registers, mode);
+        else GxWhole::CheckKept(registers, t.kept, false, c);
+    }
+    if (++t.unpublished >= kWholePublishEvery) {
+        t.unpublished = 0;
+        PublishWhole(c);
+    }
+}
+
+bool WholeLine(char* out, std::size_t size, bool* suspect) {
+    if (!WholeCounting()) return false;
+    std::array<u64, GxWhole::kCountWords> words;
+    for (std::size_t i = 0; i < words.size(); ++i) words[i] = g_whole_published[i].load(std::memory_order_relaxed);
+    GxWhole::Counts counts;
+    std::memcpy(&counts, words.data(), sizeof counts);
+    const GxWhole::Mode mode = WholeMode();
+    GxWhole::FormatLine(out, size, mode, counts);
+    if (suspect) *suspect = GxWhole::InstrumentSuspect(mode, counts);
+    return true;
+}
+
+namespace {
+bool InstallRecords(std::uint8_t* image, std::size_t size, GxWhole::Mode whole) {
     const char* on = std::getenv("LANTERN_GX_RECORDS");
     if (!on || (on[0] != '1' && on[0] != '2' && on[0] != '3')) return false;
     const bool compare = on[0] == '2';
     const char* native = std::getenv("LANTERN_GX_NATIVE");
-    const bool use = on[0] == '3' || (!compare && native && native[0] == '1');
+    const bool use = GxWhole::StageA::RecordsFeed(on, native, whole != GxWhole::Mode::Off);
     if (!GxObjects::On()) {
         host_log("GX records off: they need the object table");
         return false;
@@ -580,7 +807,7 @@ bool Install(std::uint8_t* image, std::size_t size) {
     bool ready = true;
     for (int i = 0; i < 4 && ready; ++i) {
         const std::span<const std::uint8_t> entry = i == 3 ? std::span<const std::uint8_t>(kPushesWide) : std::span<const std::uint8_t>(kPushes);
-        ready = Prepare(hooks[i], image, size, kDraws[i], entry, OnDraw);
+        ready = Prepare(hooks[i], image, size, kDraws[i], SiteKind::Entry, entry, OnDraw);
     }
     if (!ready) {
         for (Hook& hook : hooks) Discard(hook);
@@ -589,32 +816,72 @@ bool Install(std::uint8_t* image, std::size_t size) {
     }
     g_image = reinterpret_cast<u64>(image);
     const char* constants = std::getenv("LANTERN_GX_CONSTANTS");
-    if (compare || use) {
+    const bool by_object = GxWholeBinds::BindsByObjectWanted(compare, use, whole);
+    if (whole != GxWhole::Mode::Off && BindsOff())
+        host_log("GX whole binds off (LANTERN_GX_BINDS=0): no seals and no versions for the whole draw's vertex and index binds");
+    if (GxWholeBinds::VersionsWanted(compare, use, whole, BindsOff())) {
         std::array<Hook, 2> updates;
-        if (Prepare(updates[0], image, size, kDynamicUpdate, kUpdateEntry, OnDynamicUpdate) &&
-            Prepare(updates[1], image, size, kDefaultUpdate, kDefaultUpdateEntry, OnDefaultUpdate)) {
+        if (Prepare(updates[0], image, size, kDynamicUpdate, SiteKind::Entry, kUpdateEntry, OnDynamicUpdate) &&
+            Prepare(updates[1], image, size, kDefaultUpdate, SiteKind::Entry, kDefaultUpdateEntry, OnDefaultUpdate)) {
             g_versions = std::make_unique<std::atomic<u32>[]>(std::size_t(1) << kVersionBits);
             g_dynamic_update = OriginalStub(updates[0]);
-            Commit(std::span<Hook>(updates));
-            g_updates.store(true, std::memory_order_relaxed);
-            g_constants.store(constants && constants[0] == '1', std::memory_order_relaxed);
-            host_log(g_constants.load() ? "GX records: buffers versioned by GX's updates; unchanged constants reused (LANTERN_GX_CONSTANTS=1), vertex and index buffers bound by object"
-                                        : "GX records: buffers versioned by GX's updates; vertex and index buffers bound by object (LANTERN_GX_BINDS=0 turns it off)");
+            if (const WriteResult result = Commit(std::span<Hook>(updates)); result != WriteResult::Applied) {
+                if (result == WriteResult::NotApplied) {
+                    FreeStub(g_dynamic_update);
+                    g_dynamic_update = nullptr;
+                }
+                host_log("GX records: buffer updates could not be written (%s), buffers bound by address", Describe(result));
+            } else {
+                g_updates.store(true, std::memory_order_relaxed);
+                g_binds_by_object.store(by_object, std::memory_order_relaxed);
+                g_constants.store(by_object && constants && constants[0] == '1', std::memory_order_relaxed);
+                if (!by_object)
+                    host_log("GX records: buffers versioned by GX's updates for the whole draw's vertex and index binds (LANTERN_GX_WHOLE=%d), still bound by address", GxWhole::ModeNumber(whole));
+                else
+                    host_log(g_constants.load() ? "GX records: buffers versioned by GX's updates; unchanged constants reused (LANTERN_GX_CONSTANTS=1), vertex and index buffers bound by object"
+                                                : "GX records: buffers versioned by GX's updates; vertex and index buffers bound by object (LANTERN_GX_BINDS=0 turns it off)");
+            }
         } else {
             for (Hook& hook : updates) Discard(hook);
             host_log("GX records: buffer updates differ from 1.09, buffers bound by address");
         }
     }
     g_slots = std::make_unique<Slot[]>(std::size_t(1) << kSlotBits);
-    if (compare || use) g_pool = std::make_unique<Payload[]>(std::size_t(1) << kPoolBits);
+    if (compare || use || whole != GxWhole::Mode::Off) g_pool = std::make_unique<Payload[]>(std::size_t(1) << kPoolBits);
     g_checked.store(compare, std::memory_order_relaxed);
     g_compared.store(compare, std::memory_order_relaxed);
+    if (const WriteResult result = Commit(std::span<Hook>(hooks)); result != WriteResult::Applied) {
+        host_log("GX records off: GX's draw calls could not be written (%s)", Describe(result));
+        return false;
+    }
     g_used.store(use, std::memory_order_relaxed);
     g_on.store(true, std::memory_order_relaxed);
-    Commit(std::span<Hook>(hooks));
     host_log(compare ? "GX records: on, each pipeline, binding and render state compared with the old path's (LANTERN_GX_RECORDS=2)"
              : use   ? "GX records: on, pipelines, bindings and render state from the record (LANTERN_GX_RECORDS=3)"
                      : "GX records: on (LANTERN_GX_RECORDS=0 turns them off)");
+    return true;
+}
+}
+
+bool Install(std::uint8_t* image, std::size_t size) {
+    const GxWhole::Mode whole = GxWhole::ModeOf(std::getenv(GxWhole::kSwitch));
+    g_whole_requested.store(whole, std::memory_order_relaxed);
+    g_whole.store(whole, std::memory_order_relaxed);
+    const bool records = InstallRecords(image, size, whole);
+    if (GxWholeBinds::SealsForWhole(records, whole, BindsOff())) GxObjects::SealForWhole(GxWhole::ModeNumber(whole));
+    if (!records) {
+        g_whole.store(GxWhole::Mode::Off, std::memory_order_relaxed);
+        if (whole != GxWhole::Mode::Off) host_log("GX whole off: it needs GX records (LANTERN_GX_RECORDS=1, 2 or 3)");
+        return false;
+    }
+    g_whole_counting.store(whole != GxWhole::Mode::Off || PipeCensus::On(), std::memory_order_relaxed);
+    if (whole == GxWhole::Mode::Compare) {
+        host_log("GX whole: every covered draw's register fields compared with the record (LANTERN_GX_WHOLE=2), counts in the BB_FRAME_STATS log");
+    } else if (whole == GxWhole::Mode::Feed) {
+        host_log("GX whole: the record carries every field a covered draw reads, one covered draw in %u compared (LANTERN_GX_WHOLE=1)", GxWhole::kSampleEvery);
+    } else if (WholeCounting()) {
+        host_log("GX whole: count only, covered and total draws (LANTERN_GX_WHOLE=0, BB_FRAME_STATS=1)");
+    }
     return true;
 }
 }

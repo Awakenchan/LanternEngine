@@ -57,7 +57,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *user = getenv("TEST_USER_DIR");
-    if (user) sys_file_configure(".", user);
+    if (user && sys_file_configure(".", user)) {
+        fputs("FAIL: the test folders were refused\n", stderr);
+        return 1;
+    }
     const char *mode = argc > 1 ? argv[1] : "";
     if (!strcmp(mode, "--missing")) {
         load(0xB4);

@@ -23,9 +23,14 @@
 #include "core/libraries/videoout/driver.h"
 #include "core/platform.h"
 #include "imgui/renderer/imgui_core.h"
+#include "lantern_frame_clock.h"
 #include "lantern_frame_gen_cap.h"
+#include "lantern_frame_gen_pacing.h"
 #include "lantern_frame_report.h"
+#include "lantern_meter.h"
+#include "lantern_pacing_stats.h"
 #include "lantern_pacing.h"
+#include "lantern_vblank_watch.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -38,6 +43,7 @@ namespace Libraries::VideoOut {
 namespace {
 
 constexpr s32 VideoHandle = 1;
+constexpr auto kLowLatencyQueueWait = std::chrono::milliseconds(100);
 constexpr s32 ErrorHandle = s32(0x8029000B);
 
 static_assert(sizeof(BufferAttribute) == sizeof(SysVideoOutAttribute));
@@ -48,6 +54,7 @@ struct FlipRequest {
     s64 argument = 0;
     s32 index = -1;
     bool from_gpu = false;
+    std::size_t queued = 0;
 
     explicit operator bool() const noexcept {
         return frame != nullptr;
@@ -78,7 +85,10 @@ public:
             frame = presenter->PrepareFrame(*reinterpret_cast<const BufferAttributeGroup*>(group), address);
         }
         {
-            std::scoped_lock lock{request_mutex};
+            std::unique_lock lock{request_mutex};
+            if (BbSettings::LowLatency()) {
+                request_taken.wait_for(lock, kLowLatencyQueueWait, [this] { return requests.empty(); });
+            }
             requests.push({frame, argument, index, from_gpu});
         }
         request_ready.notify_one();
@@ -86,12 +96,17 @@ public:
 
 private:
     FlipRequest TakeRequest() {
-        std::scoped_lock lock{request_mutex};
-        if (requests.empty()) {
-            return {};
+        FlipRequest request;
+        {
+            std::scoped_lock lock{request_mutex};
+            if (requests.empty()) {
+                return {};
+            }
+            request = requests.front();
+            request.queued = requests.size();
+            requests.pop();
         }
-        const FlipRequest request = requests.front();
-        requests.pop();
+        request_taken.notify_all();
         return request;
     }
 
@@ -129,12 +144,19 @@ private:
     }
 
     void Flip(const FlipRequest& request) {
+        LanternPacingStats::PresentTaken(request.queued);
         BbFreeze::NoteFlip();
         presenter->NoteFlipQueued(1);
-        RunOnSwapThread([frame = request.frame] {
+        const bool done_after_present = BbSettings::LowLatency();
+        RunOnSwapThread([frame = request.frame, done_after_present, index = request.index, argument = request.argument,
+                         from_gpu = request.from_gpu] {
             presenter->NoteFlipQueued(-1);
             presenter->SetHDR(false);
             presenter->Present(frame);
+            LanternPacingStats::Presented();
+            if (done_after_present) {
+                sys_video_out_flip_done(index, argument, from_gpu);
+            }
         });
         const SysVideoOutGroup* group = nullptr;
         u64 address = 0;
@@ -148,7 +170,9 @@ private:
         }
         last_flip = std::chrono::steady_clock::now();
         LanternFrameReport::OnFlip();
-        sys_video_out_flip_done(request.index, request.argument, request.from_gpu);
+        if (!done_after_present) {
+            sys_video_out_flip_done(request.index, request.argument, request.from_gpu);
+        }
     }
 
     void DrawIdleFrame() {
@@ -174,11 +198,17 @@ private:
         return vblanks % (u64(sys_video_out_flip_rate()) + 1) == 0;
     }
 
+    static Vulkan::PresentPolicy::PresentMode PacingPresentMode() {
+        return presenter ? presenter->PacingPresentMode()
+                         : Vulkan::PresentPolicy::PresentModeFromName(EmulatorSettings.GetPresentMode());
+    }
+
     u32 LimitFromSettings() {
+        using Vulkan::PresentPolicy::PresentMode;
         u32 limit = EmulatorSettings.GetFrameLimit();
-        const std::string_view mode = EmulatorSettings.GetPresentMode();
+        const PresentMode mode = PacingPresentMode();
         const u32 refresh = Frontend::DisplayRefreshHz();
-        if (EmulatorSettings.IsUncappedVblank() && mode != "Immediate") {
+        if (EmulatorSettings.IsUncappedVblank() && mode != PresentMode::Immediate) {
             const char* keep = std::getenv("BB_CAP_TO_REFRESH");
             if (!(keep && keep[0] == '0') && refresh >= 30 && (limit == 0 || limit > refresh)) {
                 std::printf("VideoOut: frame limit %u FPS lowered to the display's %u Hz "
@@ -186,7 +216,7 @@ private:
                             limit, refresh);
                 limit = refresh;
             }
-        } else if (refresh >= 30 && limit > refresh + 1 && mode == "Mailbox") {
+        } else if (refresh >= 30 && limit > refresh + 1 && mode == PresentMode::Mailbox) {
             std::printf("VideoOut: the %u FPS preset is faster than the display's %u Hz: about %u%% of the "
                         "frames are rendered and never shown (a lower FPS preset saves that GPU work)\n",
                         limit, refresh, 100 - refresh * 100 / limit);
@@ -201,7 +231,7 @@ private:
         }();
         static int delivered = 0;
         const auto& settings = BbSettings::Get();
-        if (!variable_timestep || !settings.frame_gen_active.load(std::memory_order_relaxed)) {
+        if (!settings.frame_gen_active.load(std::memory_order_relaxed)) {
             delivered = 0;
             return base;
         }
@@ -214,8 +244,50 @@ private:
         delivered = LanternFrameGenCap::DeliveredMultiplier(
             asked, dynamic, settings.frame_gen_game_fps.load(std::memory_order_relaxed),
             settings.frame_gen_shown_fps.load(std::memory_order_relaxed), delivered);
-        return LanternFrameGenCap::Limit(base, true, delivered, Frontend::DisplayRefreshHz(),
-                                         settings.frame_gen_cap.load(std::memory_order_relaxed));
+        const bool fsr3 = settings.frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenFsr3;
+        const u32 refresh = Frontend::DisplayRefreshHz();
+        const u32 limit =
+            !variable_timestep
+                ? LanternFrameGenCap::FixedRateLimit(base, true, delivered, refresh)
+                : LanternFrameGenCap::Limit(
+                      base, true, delivered, refresh,
+                      LanternFrameGenPacing::CapToRefresh(settings.frame_gen_cap.load(std::memory_order_relaxed), fsr3));
+        if (fsr3) {
+            NoteFrameGenLimit(base, limit, delivered, refresh, settings.frame_gen_game_fps.load(std::memory_order_relaxed));
+        }
+        return limit;
+    }
+
+    static void NoteFrameGenLimit(u32 base, u32 limit, int delivered, u32 refresh, float game_fps) {
+        static unsigned logged = 0;
+        const unsigned notes = LanternFrameGenPacing::Notes(base, limit, delivered, refresh, game_fps);
+        BbSettings::Get().frame_gen_notes.store(notes, std::memory_order_relaxed);
+        const unsigned fresh = notes & ~logged;
+        if (!fresh) {
+            return;
+        }
+        logged |= fresh;
+        if (fresh & LanternFrameGenPacing::NoteHeld) {
+            std::printf("Frame generation: the %u FPS frame rate is above half the display's %u Hz: the game runs at "
+                        "%u FPS so every generated frame can be shown\n",
+                        base, refresh, limit);
+        }
+        if (fresh & LanternFrameGenPacing::NoteUneven) {
+            std::printf("Frame generation: %u game and %u generated frames a second do not divide the display's %u Hz "
+                        "evenly: some frames stay on screen longer (%u FPS, half the refresh, paces evenly)\n",
+                        limit, limit, refresh, refresh / 2);
+        }
+        if (fresh & LanternFrameGenPacing::NoteUnshowable) {
+            std::printf("Frame generation: the display's %u Hz cannot show every generated frame (game frame limit "
+                        "%u): some generated frames are never shown\n",
+                        refresh, limit);
+        }
+        if (fresh & LanternFrameGenPacing::NoteLowReal) {
+            std::printf("Frame generation: the game runs at %.0f FPS (limit %u): generated frames from under %u real "
+                        "frames a second look and feel worse\n",
+                        double(game_fps), limit, LanternFrameGenPacing::kLowRealFps);
+        }
+        std::fflush(stdout);
     }
 
     static std::chrono::nanoseconds PeriodOf(u32 limit) {
@@ -229,34 +301,49 @@ private:
         LanternPacing::Cadence ticks{vblank_period, Clock::now() + vblank_period};
         LanternPacing::Cadence flips{pace()};
         const auto max_spin = std::min<std::chrono::nanoseconds>(std::chrono::microseconds(1500), vblank_period / 8);
-        const bool lock_allowed = LanternPacing::VblankPacing() && EmulatorSettings.GetPresentMode() != "Immediate";
+        const bool lock_allowed =
+            LanternPacing::VblankPacing() && PacingPresentMode() != Vulkan::PresentPolicy::PresentMode::Immediate;
         bool locked = false;
+        std::chrono::nanoseconds locked_vblank{0};
         int lock_reports = 0;
+        bool lock_outcome_owed = false;
+        LanternFrameClock::SetWaiter([](std::int64_t deadline) {
+            LanternPacing::WaitUntil(Clock::time_point(std::chrono::nanoseconds(deadline)), true);
+        });
+        const auto publish = [&] {
+            if (!limit) {
+                LanternFrameClock::Clear();
+                return;
+            }
+            LanternFrameClock::Publish(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(flips.Slot().time_since_epoch()).count(),
+                flips.Period().count(), locked ? locked_vblank.count() : 0);
+        };
 
         const auto lock_to_display = [&] {
             std::optional<LanternPacing::VblankTime> vblank;
-            if (lock_allowed && limit && !BbSettings::Get().frame_gen_active.load(std::memory_order_relaxed)) {
+            const bool frame_gen_active = BbSettings::Get().frame_gen_active.load(std::memory_order_relaxed);
+            const bool frame_gen_fsr3 =
+                BbSettings::Get().frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenFsr3;
+            if (LanternFrameGenPacing::LockWanted(lock_allowed, limit, frame_gen_active, frame_gen_fsr3)) {
                 vblank = LanternPacing::Vblank();
             }
             u32 refreshes = 0;
             double hz = 0;
             if (vblank && vblank->period.count() > 0) {
                 hz = 1e9 / double(vblank->period.count());
-                const double nominal = Frontend::DisplayRefreshHz();
-                const double ratio = hz / double(limit);
-                const double whole = std::round(ratio);
-                if (nominal > 0 && std::abs(hz - nominal) < nominal * 0.005 && whole >= 1 &&
-                    std::abs(ratio - whole) < whole * 0.01) {
-                    refreshes = u32(whole);
-                }
+                refreshes = LanternVblankWatch::LockRefreshes(hz, Frontend::DisplayRefreshHz(), limit);
             }
-            if ((refreshes != 0) != locked && lock_reports < 8) {
-                ++lock_reports;
+            if (((refreshes != 0) != locked && lock_reports < 8) || lock_outcome_owed) {
+                lock_reports += lock_outcome_owed ? 0 : 1;
+                lock_outcome_owed = false;
                 if (refreshes) {
                     std::printf("VideoOut: flips locked to the display's vblanks (%.3f Hz, %u refresh%s a frame)\n", hz,
                                 refreshes, refreshes == 1 ? "" : "es");
                 } else {
-                    std::printf("VideoOut: flips keep their own clock (no steady vblanks to lock to)\n");
+                    std::printf("VideoOut: flips keep their own clock (%s)\n",
+                                LanternFrameGenPacing::UnlockedReason(frame_gen_active, frame_gen_fsr3,
+                                                                      vblank.has_value()));
                 }
             }
             if (!refreshes) {
@@ -267,6 +354,7 @@ private:
                 return;
             }
             locked = true;
+            locked_vblank = vblank->period;
             flips.SetPeriod(vblank->period * refreshes);
             const auto offset = std::min<std::chrono::nanoseconds>(flips.Period() / 16 + std::chrono::microseconds(300),
                                                                    vblank->period / 2);
@@ -276,16 +364,24 @@ private:
         const auto take = [&](const FlipRequest& request, Clock::time_point now) {
             flips.Taken(now);
             lock_to_display();
+            publish();
             Flip(request);
         };
+
+        publish();
 
         while (!token.stop_requested()) {
             const u32 wanted = LimitWithFrameGeneration(base_limit);
             if (wanted != limit) {
                 std::printf("VideoOut: frame limit %u FPS%s\n", wanted,
-                            wanted != base_limit ? " (frame generation: the delivered multiplier's share)" : "");
+                            wanted != base_limit ? " (frame generation: the delivered multiplier's share of the frame "
+                                                   "rate or of the display's refresh)"
+                                                 : "");
                 limit = wanted;
+                Lantern::Meter::SetFlipCap(limit);
                 flips.SetPeriod(pace());
+                lock_outcome_owed = lock_allowed && limit != 0;
+                publish();
             }
             const Clock::time_point next_tick = ticks.Slot();
             const auto now = Clock::now();
@@ -307,6 +403,7 @@ private:
                 if (flips.Slot() - flips.Period() / 16 >= next_tick) {
                     break;
                 }
+                NoteHold(flips.Slot() - flips.Period() / 16);
                 LanternPacing::WaitUntil(flips.Slot() - flips.Period() / 16, true, max_spin);
                 if (const FlipRequest request = TakeRequest()) {
                     take(request, Clock::now());
@@ -315,6 +412,7 @@ private:
             LanternPacing::WaitUntil(next_tick, !limit, max_spin);
             ticks.Tick(Clock::now());
         }
+        LanternFrameClock::Clear();
     }
 
     void TickLoop(std::stop_token token, u32 base_limit, std::chrono::nanoseconds vblank_period, bool immediate) {
@@ -326,6 +424,7 @@ private:
             const auto next_tick = std::chrono::steady_clock::now() + vblank_period;
             if (immediate) {
                 limit = LimitWithFrameGeneration(base_limit);
+                Lantern::Meter::SetFlipCap(limit);
             }
             const auto period = PeriodOf(limit);
             const auto now = std::chrono::steady_clock::now();
@@ -345,6 +444,7 @@ private:
                 timer.End();
                 continue;
             }
+            bool held = false;
             while (!token.stop_requested()) {
                 {
                     std::unique_lock lock{request_mutex};
@@ -354,8 +454,10 @@ private:
                 }
                 if (std::chrono::steady_clock::now() < next_flip) {
                     if (next_flip >= next_tick) {
+                        held = true;
                         break;
                     }
+                    NoteHold(next_flip);
                     std::this_thread::sleep_until(next_flip);
                 }
                 const auto woke = std::chrono::steady_clock::now();
@@ -364,7 +466,18 @@ private:
                     Flip(request);
                 }
             }
+            if (held) {
+                NoteHold(next_tick);
+            }
             std::this_thread::sleep_until(next_tick);
+        }
+    }
+
+    template <typename TimePoint> static void NoteHold(TimePoint until) {
+        const auto now = std::chrono::steady_clock::now();
+        if (until > now) {
+            Lantern::Meter::NoteFlipHold(
+                u64(std::chrono::duration_cast<std::chrono::nanoseconds>(until - now).count()));
         }
     }
 
@@ -373,8 +486,13 @@ private:
         Common::SetCurrentThreadName("bb:VideoOut");
         Common::SetCurrentThreadRealtime(vblank_period);
         const u32 limit = LimitFromSettings();
-        std::printf("VideoOut: vblank %u Hz, frame limit %u FPS, precise pacing %s\n", EmulatorSettings.GetVblankFrequency(),
+        Lantern::Meter::SetFlipCap(limit);
+        std::printf("VideoOut: game vblank %u Hz, frame limit %u FPS, precise pacing %s\n", EmulatorSettings.GetVblankFrequency(),
                     limit, LanternPacing::Enabled() ? "on" : "off");
+        if (BbSettings::LowLatency()) {
+            std::printf("VideoOut: low latency on (BB_LOW_LATENCY): one flip queued at most, the flip is reported done "
+                        "after its present, no submissions ahead of the previous frame\n");
+        }
         const bool immediate = limit != 0 || EmulatorSettings.IsUncappedVblank();
         if (immediate && LanternPacing::Enabled()) {
             PreciseLoop(token, limit, vblank_period);
@@ -391,6 +509,7 @@ private:
     std::jthread swap_thread;
     std::mutex request_mutex;
     std::condition_variable request_ready;
+    std::condition_variable request_taken;
     std::queue<FlipRequest> requests;
     std::chrono::steady_clock::time_point last_flip = std::chrono::steady_clock::now();
     u64 vblanks = 0;

@@ -115,7 +115,7 @@ namespace BloodborneLauncher.Views
                 .SelectMany(place =>
                 {
                     try { return SaveStore.Characters(place).Select(character => (place, character)).ToList(); }
-                    catch (IOException e) { Report(e); return new List<(SavePlace place, SaveCharacter character)>(); }
+                    catch (System.IO.IOException e) { Report(e); return new List<(SavePlace place, SaveCharacter character)>(); }
                 })
                 .OrderByDescending(f => f.character.Saved)
                 .ToList();

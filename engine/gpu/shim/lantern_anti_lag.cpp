@@ -93,6 +93,8 @@ extern "C" void bbgpu_anti_lag_before_input(void) {
     }
     std::shared_lock lock{lifetime};
     if (pacer) {
-        pacer->BeforeInput(BbSettings::Get().anti_lag.load(std::memory_order_relaxed));
+        const auto& s = BbSettings::Get();
+        pacer->BeforeInput(s.anti_lag.load(std::memory_order_relaxed) &&
+                           !s.fsr_fg_running.load(std::memory_order_relaxed));
     }
 }

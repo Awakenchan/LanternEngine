@@ -22,6 +22,8 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline.h"
 #include "bbport_settings.h"
+#include "engine/utf8_wide.h"
+#include "dlss_rules.h"
 
 namespace Vulkan {
 
@@ -39,7 +41,6 @@ constexpr unsigned long long kApplicationId = 231313132; // NVIDIA's id for unre
 constexpr const char* kProjectId = "5c1f3a9e-7b42-4d86-9e31-0f6a2b7cd481";
 constexpr const char* kEngineVersion = "0.9.41";
 constexpr int kEngineCustom = 0;
-constexpr unsigned kPresetF = 6;
 
 enum DlssFlags : int {
     FlagIsHdr = 1 << 0,
@@ -137,7 +138,7 @@ void SetP(NgxParameter* p, const char* name, void* v) {
 }
 /// bbport: NVSDK_NGX_DLSS_Hint_Render_Preset (0 the DLL's default, 1 A ... 11 K): dlss_preset in
 /// lantern.ini, BB_DLSS_PRESET overrides it ("k" when neither); live from the menu.
-unsigned DlssPreset(int quality);
+unsigned DlssPreset(int quality, bool turing_or_ampere);
 /// The same preset for every quality mode: the feature is created again when the mode changes.
 void SetPreset(NgxParameter* p, unsigned preset) {
     for (const char* name : {"DLSS.Hint.Render.Preset.DLAA", "DLSS.Hint.Render.Preset.Quality",
@@ -189,16 +190,9 @@ int Quality(int preset) {
     }
 }
 
-/// The preset for a quality mode: dlss_preset, or with "auto" the model NVIDIA's DLSS 4.5 pairs
-/// with the mode (M for Performance, L for Ultra Performance, K for the others).
-unsigned DlssPreset(int quality) {
-    const int preset = BbSettings::Get().dlss_preset.load(std::memory_order_relaxed);
-    if (preset == BbSettings::DlssPresetAuto) {
-        return unsigned(quality == MaxPerf            ? BbSettings::DlssPresetM
-                        : quality == UltraPerformance ? BbSettings::DlssPresetL
-                                                      : BbSettings::DlssPresetK);
-    }
-    return unsigned(std::clamp(preset, BbSettings::DlssPresetDefault, BbSettings::DlssPresetMax));
+unsigned DlssPreset(int quality, bool turing_or_ampere) {
+    return unsigned(BbDlss::Applied(BbSettings::Get().dlss_preset.load(std::memory_order_relaxed), quality,
+                                    turing_or_ampere));
 }
 
 ResourceVk Resource(const Fsr4Upscaler::Image& image, vk::ImageAspectFlags aspect, bool rw) {
@@ -221,6 +215,7 @@ ResourceVk Resource(const Fsr4Upscaler::Image& image, vk::ImageAspectFlags aspec
 struct DlssUpscaler::Impl {
     const Instance& instance;
     Scheduler& scheduler;
+    const bool turing_or_ampere = BbDlss::TuringOrAmpere(instance.GetVendorID(), instance.GetDeviceID());
     bool available = false;
     bool fatal = false;
     std::string problem;
@@ -341,11 +336,80 @@ struct DlssUpscaler::Impl {
         return true;
     }
 
-    /// Directories searched for nvngx_dlss: BB_DLSS_DIR, then the executable's directory.
-    std::vector<std::wstring> SearchPaths() {
+#ifndef _WIN32
+    static std::wstring Utf8ToWide(const std::string& text) {
+        const std::u32string points = BbEngine::Utf8::ToCodePoints(text);
+        return std::wstring(points.begin(), points.end());
+    }
+
+    static bool SameFile(const std::filesystem::path& from, const std::filesystem::path& to) {
+        std::error_code a, b, c, d;
+        const auto size_from = std::filesystem::file_size(from, a);
+        const auto size_to = std::filesystem::file_size(to, b);
+        const auto time_from = std::filesystem::last_write_time(from, c);
+        const auto time_to = std::filesystem::last_write_time(to, d);
+        return !a && !b && !c && !d && size_from == size_to && time_to >= time_from;
+    }
+
+    static std::filesystem::path PrivateDataDir() {
+        std::error_code ec;
+        std::filesystem::path base;
+        if (const char* cache = std::getenv("XDG_CACHE_HOME"); cache && *cache) {
+            base = cache;
+        } else if (const char* home = std::getenv("HOME"); home && *home) {
+            base = std::filesystem::path(home) / ".cache";
+        }
+        if (!base.empty() && BbEngine::Utf8::IsAscii(base.string())) {
+            const auto dir = base / "lantern-ngx";
+            std::filesystem::create_directories(dir, ec);
+            if (!ec) {
+                std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+                                             std::filesystem::perm_options::replace, ec);
+                return dir;
+            }
+        }
+        return std::filesystem::temp_directory_path(ec) / "lantern-ngx";
+    }
+
+    static void AddSearchDir(const std::filesystem::path& dir, std::vector<std::wstring>& paths,
+                             const std::filesystem::path& data_dir, const char* slot) {
+        std::error_code ec;
+        const auto native = dir.string();
+        if (BbEngine::Utf8::IsAscii(native)) {
+            paths.push_back(Utf8ToWide(native));
+            return;
+        }
+        const auto copy_dir = data_dir / "dlss" / slot;
+        std::filesystem::create_directories(copy_dir, ec);
+        bool copied = false;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (name.rfind("libnvidia-ngx-dlss.so", 0) != 0) {
+                continue;
+            }
+            if (SameFile(it->path(), copy_dir / name)) {
+                copied = true;
+                continue;
+            }
+            std::error_code copy_ec;
+            std::filesystem::copy_file(it->path(), copy_dir / name,
+                                       std::filesystem::copy_options::overwrite_existing, copy_ec);
+            if (!copy_ec) {
+                copied = true;
+            }
+        }
+        paths.push_back(Utf8ToWide(copied ? copy_dir.string() : native));
+    }
+#endif
+
+    std::vector<std::wstring> SearchPaths(const std::filesystem::path& data_dir) {
         std::vector<std::wstring> paths;
         if (const char* env = std::getenv("BB_DLSS_DIR"); env && *env) {
+#ifdef _WIN32
             paths.push_back(std::filesystem::path(env).wstring());
+#else
+            AddSearchDir(std::filesystem::path(env), paths, data_dir, "override");
+#endif
         }
 #ifdef _WIN32
         wchar_t exe[MAX_PATH];
@@ -356,7 +420,7 @@ struct DlssUpscaler::Impl {
         std::error_code ec;
         const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
         if (!ec) {
-            paths.push_back(exe.parent_path().wstring());
+            AddSearchDir(exe.parent_path(), paths, data_dir, "engine");
         }
 #endif
         return paths;
@@ -386,10 +450,24 @@ struct DlssUpscaler::Impl {
             return;
         }
         std::error_code ec;
+#ifdef _WIN32
         const auto data_dir = std::filesystem::temp_directory_path(ec) / "lantern-ngx";
         std::filesystem::create_directories(data_dir, ec);
         const std::wstring data_path = data_dir.wstring();
-        const auto paths = SearchPaths();
+        auto paths = SearchPaths(data_dir);
+#else
+        const auto data_dir = PrivateDataDir();
+        std::filesystem::create_directories(data_dir, ec);
+        const std::wstring data_path = Utf8ToWide(data_dir.string());
+        auto paths = SearchPaths(data_dir);
+        if (BbEngine::Utf8::IsAscii(data_dir.string())) {
+            paths.push_back(data_path);
+        } else {
+            std::printf("DLSS: the NGX data folder has non-ASCII characters (%s); a DLSS runtime in a non-ASCII folder "
+                        "cannot be found from it (set XDG_CACHE_HOME or BB_DLSS_DIR to an ASCII path)\n",
+                        data_dir.string().c_str());
+        }
+#endif
         std::vector<const wchar_t*> path_ptrs;
         for (const auto& p : paths) {
             path_ptrs.push_back(p.c_str());
@@ -464,7 +542,7 @@ struct DlssUpscaler::Impl {
         const int quality = native ? int(Dlaa) : Quality(f.preset);
         const Key wanted{f.render_width, f.render_height, f.output.width, f.output.height,
                          quality, IsFloatFormat(f.color.format),
-                         DlssPreset(quality),
+                         DlssPreset(quality, turing_or_ampere),
                          BbSettings::Get().dlss_auto_exposure.load(std::memory_order_relaxed)};
         if (!feature || !(wanted == key)) {
             if (feature) {
@@ -496,8 +574,8 @@ struct DlssUpscaler::Impl {
             SetI(params, "DLSS.Enable.Output.Subrects", 0);
             // bbport: the model is chosen, not left to the DLL's default per mode: preset K (the
             // transformer model) keeps thin moving objects - a weapon on the back, railings -
-            // steadier than the CNN presets. dlss_preset / BB_DLSS_PRESET: a letter (e: the last CNN
-            // model) or "default". A preset the DLL refuses is retried with its default.
+            // steadier than the CNN presets. dlss_preset / BB_DLSS_PRESET: a letter or "default".
+            // A preset the DLL refuses is retried with its default.
             const unsigned preset = wanted.preset;
             SetPreset(params, preset);
             const auto lock = QueueLock();
@@ -520,10 +598,13 @@ struct DlssUpscaler::Impl {
             }
             key = wanted;
             BbSettings::Get().dlss_applied_preset = int(applied_preset);
-            std::printf("DLSS: %ux%u -> %ux%u, quality mode %d, %s input, preset %s",
+            const bool auto_preset =
+                BbSettings::Get().dlss_preset.load(std::memory_order_relaxed) == BbSettings::DlssPresetAuto;
+            std::printf("DLSS: %ux%u -> %ux%u, quality mode %d, %s input, preset %s%s",
                         key.render_width, key.render_height, key.out_width, key.out_height,
                         key.quality, key.hdr ? "HDR" : "LDR",
-                        applied_preset ? std::string(1, char('A' + applied_preset - 1)).c_str() : "default");
+                        applied_preset ? std::string(1, char('A' + applied_preset - 1)).c_str() : "default",
+                        !auto_preset ? "" : turing_or_ampere ? " (auto, RTX 20/30: K)" : " (auto)");
             std::putchar(10);
         }
         ResourceVk color = Resource(f.color, vk::ImageAspectFlagBits::eColor, false);
@@ -534,16 +615,6 @@ struct DlssUpscaler::Impl {
         SetP(params, "Depth", &depth);
         SetP(params, "MotionVectors", &motion);
         SetP(params, "Output", &output);
-        // bbport: the reactive mask (menu) as DLSS's bias towards the current colour: 1 trusts this
-        // frame alone where blended effects changed it. Null clears the previous frame's.
-        ResourceVk bias{};
-        const bool bias_mask = f.reactive.view && applied_preset == kPresetF;
-        if (bias_mask) {
-            bias = Resource(f.reactive, vk::ImageAspectFlagBits::eColor, false);
-        }
-        SetP(params, "DLSS.Input.Bias.Current.Color.Mask", bias_mask ? &bias : nullptr);
-        SetUI(params, "DLSS.Input.Bias.Current.Color.Subrect.Base.X", 0);
-        SetUI(params, "DLSS.Input.Bias.Current.Color.Subrect.Base.Y", 0);
         SetF(params, "Jitter.Offset.X", f.jitter[0]);
         SetF(params, "Jitter.Offset.Y", f.jitter[1]);
         SetF(params, "Sharpness", 0.0f);
@@ -557,6 +628,7 @@ struct DlssUpscaler::Impl {
             const auto lock = QueueLock();
             return evaluate_feature(VkCommandBuffer(f.cmdbuf), feature, params, nullptr);
         }();
+        scheduler.GetDynamicState().Invalidate();
         if (Failed(r)) {
             Fail(fmt_hex("DLSS evaluation failed", r), false);
             return false;

@@ -1,0 +1,83 @@
+runtime-core: @always tests/test_pad.c tests/test_runtime.c tests/test_sema.c src/* tests/sys_test_host.c third_party/LibAtrac9/* tests/no_dialog.h tests/test_no_dialog_assert.c
+runtime-sys: tests/test_content.c tests/test_sys_rtc.c tests/test_sys_mutex.c tests/test_sys_thread.c tests/test_sys_clock.c tests/test_sys_file.c tests/test_save_data.c tests/test_file_root.c tests/test_game_language.c tests/test_sys_memory.c tests/test_sys_video_out.c tests/test_sys_av_player.c src/* tests/sys_test_host.c third_party/LibAtrac9/*
+server: @always tests/test_offline_contract.c tests/golden/* tests/test_thd_signal.cpp gpu/bbnet/vendor/bbhost/np_signaling.cpp tests/test_online_gate.cpp tests/test_thd_resend.cpp tests/test_online_profile.cpp start/online.cpp start/common.cpp gpu/bbnet/* tests/test_sandbox.cpp tests/test_room_* tests/test_thd_* tests/test_bbnet_* tests/bbnet_test_symbols.cpp src/* third_party/LibAtrac9/*
+toml-patch: tests/test_toml_patch.cpp start/toml_patch.cpp start/xml.cpp start/common.cpp
+game-heaps: tests/test_game_heaps.cpp
+gx-records: tests/test_gx_records.cpp gpu/shim/engine/gx_bindings.cpp
+gx-whole: tests/test_gx_whole.cpp
+cache-settings: tests/test_cache_settings.cpp
+bottleneck-meter: tests/test_bottleneck_meter.cpp gpu/shim/lantern_meter_threads.cpp
+gpu-stamps: tests/test_gpu_stamps.cpp
+gx-whole-stageb: tests/test_gx_whole_stageb.cpp
+gx-whole-owed-blocks: tests/test_gx_whole_owed_blocks.cpp
+gx-whole-targets: tests/test_gx_whole_targets.cpp
+main-jobs-barrier: tests/test_main_jobs_barrier.cpp
+gx-stream-plan: tests/test_gx_stream_plan.cpp
+utf8-wide: tests/test_utf8_wide.cpp gpu/shim/engine/utf8_wide.h
+ui-composition: tests/test_ui_composition.cpp
+upscaler-skips: tests/test_upscaler_skips.cpp
+dlss-rules: tests/test_dlss_rules.cpp
+fog-scale: tests/test_fog_scale.cpp
+fps-box: tests/test_fps_box.cpp gpu/shim/engine/fps_box.h
+lamp-fog-lights: tests/test_lamp_fog_lights.cpp
+frame-gen-pacing: tests/test_frame_gen_pacing.cpp
+vblank-watch: tests/test_vblank_watch.cpp gpu/shim/lantern_vblank_watch.h
+fsr-framegen-rules: tests/test_fsr_framegen_rules.cpp
+gc-marks: tests/test_gc_marks.cpp
+motion-history: tests/test_motion_history.cpp
+p2p-split: tests/test_p2p_split.cpp gpu/bbnet/thd/p2p_split.h gpu/bbnet/thd/thd_net.cpp
+room-bundle: tests/test_room_bundle.cpp gpu/bbnet/room/room_bundle.h gpu/bbnet/room/room_frames.h gpu/bbnet/room/room_service.cpp
+room-calls: tests/test_room_calls.cpp gpu/bbnet/room/room_calls.h
+rt-scene-rules: tests/test_rt_scene_rules.cpp gpu/shadps4/video_core/renderer_vulkan/rt_scene_rules.h
+rt-lamps: tests/test_rt_lamps.cpp gpu/shadps4/video_core/renderer_vulkan/rt_lamp_rules.h
+catalog-keys: tests/test_catalog_keys.cpp gpu/shim/engine/catalog_keys.h tests/shader_lab.cpp
+net-counts: tests/test_net_counts.cpp gpu/bbnet/room/room_counters.h
+pc-input: tests/test_pc_input.cpp
+party-death: tests/test_party_death.cpp
+trophy-rules: tests/test_trophy_rules.cpp
+kept-travel: tests/test_kept_travel.cpp
+world-copy: tests/test_world_copy.cpp
+insight-sync: tests/test_insight_sync.cpp
+torn-vsharps: tests/test_torn_vsharps.cpp
+gx-whole-binds: tests/test_gx_whole_binds.cpp
+gx-owed-registers: tests/test_gx_owed_registers.cpp
+gx-whole-stage-a: tests/test_gx_whole_stage_a.cpp
+draw-tokens: tests/test_draw_tokens.cpp
+const-census: tests/test_const_census.cpp
+ring-constants: tests/test_ring_constants.cpp
+batch: @always tests/test_batch.cpp gpu/shim/lantern_steps.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+frame-gen-cap: tests/test_frame_gen_cap.cpp
+present-policy: tests/test_present_policy.cpp
+pacing-stats: tests/test_pacing_stats.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+gx-sealed: tests/test_gx_sealed.cpp
+vram-evict: tests/test_vram_evict.cpp
+texset-static: tests/test_texset_static.cpp
+vertex-census: tests/test_vertex_census.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+pipe-census: tests/test_pipe_census.cpp gpu/shim/engine/pipe_census.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+reg-window: tests/test_reg_window.cpp
+decoder-walk: tests/test_decoder_walk.cpp
+gx-whole-census: tests/test_gx_whole_census.cpp
+gx-readers: tools/check-gx-readers.sh tests/gx_readers.txt gpu/*
+gx-flush-census: tests/test_gx_flush_census.cpp
+pipeline-memo: tests/test_pipeline_memo.cpp
+breadcrumbs-ring: tests/test_breadcrumbs_ring.cpp
+crash-markers: tests/test_crash_markers.cpp gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs_note.cpp gpu/shadps4/common/io_file.cpp gpu/shadps4/common/path_util.cpp gpu/shadps4/common/error.cpp gpu/shim/common/logging/log.cpp gpu/shim/common/assert.cpp
+gpu-cache-stamp: tests/test_gpu_cache_stamp.cpp gpu-cache.accepted.id start/main.cpp
+gpu-cache-inputs: tests/test_gpu_cache_inputs.sh tests/gpu_cache_required_inputs.txt gpu-cache.accepted.id gpu/shadps4/* gpu/shim/engine/* gpu/shim/core/* gpu/shim/lifter/* gpu/third_party/sirit/*
+driver-cache-save: tests/test_driver_cache_save.cpp gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_serialization.cpp gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_cache.cpp gpu/shadps4/video_core/renderer_vulkan/vk_breadcrumbs.cpp
+scene-proxy-release: tests/test_scene_proxy_release.cpp
+submit-failures: tests/test_submit_failures.cpp
+settings: tests/test_settings.cpp tests/test_settings_writes.cpp gpu/shim/bbport_settings.cpp gpu/shim/bbport_menu_i18n.cpp gpu/win_compat.h
+launcher: tests/test_launcher_settings.py tests/test_settings_writes.cpp gpu/shim/bbport_settings.cpp gpu/shim/bbport_menu_i18n.cpp gpu/shim/lantern_switches.inc gpu/win_compat.h launcher/* /launcher/*
+switches: @always tests/test_switches.cpp gpu/shim/engine/pipe_census.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp gpu/shim/lantern_shown_values.h
+package-switches: tests/test_package_switches.cpp start/package_switches.cpp start/package_switches.h start/main.cpp gpu/shim/lantern_shown_values.h gpu/shim/lantern_switches.inc
+steps: @always tests/test_steps.cpp tests/bench_steps.cpp gpu/shim/lantern_steps.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+scrub: @always tests/test_scrub.cpp gpu/shim/lantern_scrub.cpp
+diag-gates: @always
+later: tests/test_vertex_memo.cpp gpu/shim/engine/vertex_memo.cpp tests/test_triage.cpp tests/test_crash_writer.cpp gpu/shim/lantern_crash.cpp tests/test_guest_symbols.cpp gpu/shim/lantern_guest_symbols.cpp gpu/shim/lantern_steps.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+stageb-counts: tests/test_stageb_counts.cpp
+sealed-holds: tests/test_sealed_holds.cpp
+dynamic-state-skip: tests/test_dynamic_state_skip.cpp
+main-jobs: tests/test_main_jobs.cpp tests/test_main_jobs_image.cpp tools/engine/sha256.cpp gpu/shim/engine/main_jobs.cpp gpu/shim/engine/engine_hooks.cpp gpu/shim/lantern_steps.cpp gpu/shim/lantern_switches.cpp gpu/shim/lantern_scrub.cpp
+gpu-hooks: gpu/* src/* tests/test_engine_hooks.cpp tests/test_frame_rate.cpp tests/test_widescreen.cpp tests/test_engine_menu_memory.cpp tests/test_native_local_shadows.cpp tests/test_cheats_code.cpp tests/test_gx_whole_hooks.cpp tests/test_boot_install.cpp tests/test_gpu_runtime_stubs.cpp tools/engine/* tests/golden/*
+build-only: start/* src/lantern.rc tools/* packaging/* shell.nix pgo/* README* third_party/*

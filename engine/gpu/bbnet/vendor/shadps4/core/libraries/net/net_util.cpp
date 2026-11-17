@@ -43,6 +43,7 @@ typedef int net_socket;
 #include "core/libraries/net/net_error.h"
 #include "core/libraries/net/net_types.h"
 #include "net_util.h"
+#include "test_sandbox.h"
 
 namespace NetUtil {
 
@@ -90,9 +91,12 @@ bool NetUtilInternal::RetrieveEthernetAddr() {
     char buf[1024];
     int success = 0;
 
+    if (!LanternSandbox::AllowLocalSocket("network interface query"))
+        return false;
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock == -1)
         return false;
+    LanternSandbox::NoteSocket();
 
     ifc.ifc_len = sizeof(buf);
     ifc.ifc_buf = buf;
@@ -177,10 +181,14 @@ bool NetUtilInternal::RetrieveDefaultGateway() {
 
     struct BSDRoutingMessage routingMessage;
     // It creates a raw socket that can be used for routing-related operations
+    if (!LanternSandbox::AllowLocalSocket("network route query")) {
+        return false;
+    }
     int sockfd = socket(PF_ROUTE, SOCK_RAW, 0);
     if (sockfd < 0) {
         return false;
     }
+    LanternSandbox::NoteSocket();
     memset(reinterpret_cast<char*>(&routingMessage), 0, sizeof(routingMessage));
     routingMessage.header.rtm_msglen = sizeof(struct rt_msghdr);
     routingMessage.header.rtm_version = RTM_VERSION;
@@ -350,10 +358,14 @@ u32 NetUtilInternal::GetNatType() const {
 bool NetUtilInternal::RetrieveIp() {
     std::scoped_lock lock{m_mutex};
 
+    if (!LanternSandbox::AllowHost("1.1.1.1", "local address probe")) {
+        return false;
+    }
     auto sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd == -1) {
         return false;
     }
+    LanternSandbox::NoteSocket();
 
     sockaddr_in sa{};
     socklen_t sa_len{sizeof(sa)};
@@ -394,6 +406,9 @@ int NetUtilInternal::ResolveHostname(const char* hostname, Libraries::Net::Orbis
         .ai_family = AF_INET,
     };
 
+    if (!LanternSandbox::AllowHost(hostname ? hostname : "", "guest host resolve")) {
+        return ORBIS_NET_ERETURN;
+    }
     addrinfo* info = nullptr;
     auto gai_result = getaddrinfo(hostname, nullptr, &hints, &info);
 

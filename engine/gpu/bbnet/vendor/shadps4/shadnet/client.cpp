@@ -8,6 +8,7 @@
 #include <fmt/format.h>
 
 #include "client.h"
+#include "test_sandbox.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/scm_rev.h"
@@ -297,6 +298,10 @@ bool ShadNetClient::DoConnect() {
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
+    if (!LanternSandbox::AllowHost(m_host, "shadNet connect")) {
+        m_state = ShadNetState::FailureConnect;
+        return false;
+    }
     if (::getaddrinfo(m_host.c_str(), std::to_string(m_port).c_str(), &hints, &res_list) != 0 ||
         !res_list) {
         LOG_ERROR(ShadNet, "DNS resolution failed for '{}'", m_host);
@@ -310,6 +315,7 @@ bool ShadNetClient::DoConnect() {
         m_state = ShadNetState::FailureConnect;
         return false;
     }
+    LanternSandbox::NoteSocket();
 
     // Use non-blocking connect + select() so we time out instead of hanging
     // for the OS default TCP timeout (75 s on Linux, >20 s on Windows).

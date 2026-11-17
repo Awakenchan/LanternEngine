@@ -14,6 +14,9 @@
 #include <utility>
 #include <vector>
 #include "bbport_platform.h"
+#include "engine/bottleneck_meter.h"
+#include "lantern_meter.h"
+#include "lantern_meter_threads.h"
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
@@ -25,18 +28,101 @@ constexpr unsigned long long kGuestLo = 0x800000000ull, kGuestHi = 0x810000000ul
 
 using Site = std::pair<unsigned long long, unsigned long long>;
 
+enum class Role { Other, Main, StageA, StageB, Recorder, Count };
+constexpr std::size_t kRoles = static_cast<std::size_t>(Role::Count);
+constexpr const char* kRoleNames[kRoles] = {"", "main", "stage A", "stage B", "recorders"};
+
+Role RoleOf(const std::string& name) {
+    if (name == "main") return Role::Main;
+    if (name == "shadPS4:GpuCommandProcessor") return Role::StageA;
+    if (name == "bb:DrawRec") return Role::StageB;
+    if (name.rfind("bb:VkRecorder", 0) == 0) return Role::Recorder;
+    return Role::Other;
+}
+
 struct Target {
     HANDLE handle = nullptr;
     std::string name;
+    Role role = Role::Other;
     unsigned long long samples = 0;
     std::map<Site, unsigned long long> sites;
 };
+
+struct Placement {
+    std::vector<int> core_of;
+    unsigned long long main_busy = 0;
+    unsigned long long both[kRoles] = {};
+    unsigned long long sibling[kRoles] = {};
+    unsigned long long same[kRoles] = {};
+};
+
+struct TickSample {
+    bool busy = false;
+    unsigned cpu = 0;
+};
+
+std::pair<unsigned long long, unsigned long long> WaitCode() {
+    static const auto range = [] {
+        const auto base = reinterpret_cast<unsigned long long>(GetModuleHandleW(L"ntdll.dll"));
+        if (!base) return std::pair{0ull, 0ull};
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        return std::pair{base, base + nt->OptionalHeader.SizeOfImage};
+    }();
+    return range;
+}
+
+int CoreOf(const Placement& p, unsigned cpu) {
+    return cpu < p.core_of.size() ? p.core_of[cpu] : -1;
+}
+
+bool Counted(std::size_t role) {
+    return role != static_cast<std::size_t>(Role::Main) && role != static_cast<std::size_t>(Role::Other);
+}
+
+void CountPlacement(Placement& p, const TickSample& main, const TickSample (&role)[kRoles]) {
+    if (!main.busy) return;
+    ++p.main_busy;
+    const int main_core = CoreOf(p, main.cpu);
+    for (std::size_t r = 0; r < kRoles; ++r) {
+        if (!Counted(r) || !role[r].busy) continue;
+        ++p.both[r];
+        if (role[r].cpu == main.cpu) ++p.same[r];
+        else if (main_core >= 0 && CoreOf(p, role[r].cpu) == main_core) ++p.sibling[r];
+    }
+}
+
+constexpr std::size_t kPlacementLine = 1024;
+
+void ReportPlacement(Placement& p) {
+    if (!p.main_busy) return;
+    char line[kPlacementLine];
+    BbEngine::BottleneckMeter::Writer out{line, sizeof line};
+    line[0] = '\0';
+    out.Put("Placement: main busy in %llu samples;", p.main_busy);
+    for (std::size_t r = 0; r < kRoles; ++r) {
+        if (!Counted(r)) continue;
+        if (!p.both[r]) {
+            out.Put(" %s not busy with it,", kRoleNames[r]);
+            continue;
+        }
+        out.Put(" %s busy with it %.0f%%, on main's SMT sibling %.0f%% of those (same CPU, a stale reading, %.0f%%),",
+                kRoleNames[r], 100.0 * double(p.both[r]) / double(p.main_busy),
+                100.0 * double(p.sibling[r]) / double(p.both[r]), 100.0 * double(p.same[r]) / double(p.both[r]));
+    }
+    out.Put(" CPU numbers as each thread last noted them");
+    Lantern::LogLine(Lantern::LogChannel::Always, line);
+    p.main_busy = 0;
+    std::fill(std::begin(p.both), std::end(p.both), 0ull);
+    std::fill(std::begin(p.sibling), std::end(p.sibling), 0ull);
+    std::fill(std::begin(p.same), std::end(p.same), 0ull);
+}
 
 std::vector<std::string> Wanted() {
     std::vector<std::string> names;
     const char* env = std::getenv("BB_SAMPLE_THREADS");
     std::string list = env ? env : "";
-    if (list == "load") list = "main,GXRenderThread,Core.Res.,shadPS4:GpuCommandProcessor,bb:DrawRec,bb:VkRecorder";
+    if (list == "load") list = "main,GXRenderThread,GXWorker,CSChrThread,Core.Res.,shadPS4:GpuCommandProcessor,bb:DrawRec,bb:VkRecorder";
     size_t start = 0;
     for (;;) {
         const size_t comma = list.find(',', start);
@@ -60,6 +146,9 @@ std::string Describe(HANDLE thread) {
     return name;
 }
 
+constexpr long long kDefaultPeriodUs = 2000;
+constexpr long long kTimerUnitsPerUs = 10;
+
 constexpr DWORD kAccess = THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION;
 
 void Refresh(const std::vector<std::string>& wanted, std::map<DWORD, Target>& targets) {
@@ -78,7 +167,7 @@ void Refresh(const std::vector<std::string>& wanted, std::map<DWORD, Target>& ta
         if (!targets.count(entry.th32ThreadID)) {
             const std::string name = Describe(thread);
             for (const auto& w : wanted) want |= !name.empty() && name.rfind(w, 0) == 0;
-            if (want) targets[entry.th32ThreadID] = Target{thread, name};
+            if (want) targets[entry.th32ThreadID] = Target{thread, name, RoleOf(name)};
         }
         if (!want) CloseHandle(thread);
     }
@@ -105,7 +194,7 @@ std::pair<unsigned long long, unsigned long long> EngineCode() {
     return range;
 }
 
-bool Sample(Target& t, Site* site) {
+bool Sample(Target& t, Site* site, bool* busy) {
     if (SuspendThread(t.handle) == static_cast<DWORD>(-1)) return false;
     CONTEXT context{};
     context.ContextFlags = CONTEXT_CONTROL;
@@ -135,6 +224,8 @@ bool Sample(Target& t, Site* site) {
     }
     ResumeThread(t.handle);
     if (!rip) return false;
+    const auto [wait_start, wait_end] = WaitCode();
+    *busy = rip < wait_start || rip >= wait_end;
     *site = rip >= kGuestLo && rip < kGuestHi ? Site{rip - kGuestLo, ~0ull} : Site{rip, caller};
     return true;
 }
@@ -198,30 +289,50 @@ void Run(std::vector<std::string> wanted) {
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     auto last_refresh = std::chrono::steady_clock::now() - std::chrono::seconds(10);
     auto last_report = std::chrono::steady_clock::now();
-    std::printf("Sampler: BB_SAMPLE_THREADS=%s, about every 2 ms, reported every 5 s\n", std::getenv("BB_SAMPLE_THREADS"));
+    const long hz = Lantern::Switches::Get().bb_sample_hz;
+    const long long period_us = hz > 0 ? 1000000 / hz : kDefaultPeriodUs;
+    std::printf("Sampler: BB_SAMPLE_THREADS=%s, every %lld us (BB_SAMPLE_HZ %ld), reported every 5 s\n",
+                std::getenv("BB_SAMPLE_THREADS"), period_us, hz);
+    Placement placement;
+    placement.core_of = Lantern::Meter::Threads::CoreOfCpu();
+    {
+        int cores = 0;
+        for (const int core : placement.core_of) cores = std::max(cores, core + 1);
+        Lantern::Log(Lantern::LogChannel::Always, "Placement: %zu logical CPUs in %d cores", placement.core_of.size(), cores);
+    }
     for (;;) {
         const auto now = std::chrono::steady_clock::now();
         if (now - last_refresh >= std::chrono::seconds(2)) {
             Refresh(wanted, targets);
             last_refresh = now;
         }
+        TickSample main_tick, role_tick[kRoles];
         for (auto& [id, t] : targets) {
             Site site;
-            if (Sample(t, &site)) {
-                ++t.samples;
-                ++t.sites[site];
+            bool busy = false;
+            if (!Sample(t, &site, &busy)) continue;
+            ++t.samples;
+            ++t.sites[site];
+            if (t.role == Role::Other || !busy) continue;
+            TickSample& tick = t.role == Role::Main ? main_tick : role_tick[static_cast<std::size_t>(t.role)];
+            unsigned cpu = 0;
+            if (!tick.busy && Lantern::Meter::CpuOfThread(id, &cpu)) {
+                tick.busy = true;
+                tick.cpu = cpu;
             }
         }
+        CountPlacement(placement, main_tick, role_tick);
         if (now - last_report >= std::chrono::seconds(5)) {
             Report(targets);
+            ReportPlacement(placement);
             last_report = now;
         }
         if (timer) {
             LARGE_INTEGER due;
-            due.QuadPart = -20000;
+            due.QuadPart = -period_us * kTimerUnitsPerUs;
             if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::microseconds(period_us));
         }
     }
 }

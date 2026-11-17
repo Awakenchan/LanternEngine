@@ -32,7 +32,6 @@ bool Trace();
 
 struct Config {
     std::string np_base;   // BB_THD_SERVER: the session service, https://thehuntersdream.com:18671
-    std::string auth_base; // BB_THD_AUTH: the account service, https://thehuntersdream.com
     std::string stun;      // BB_THD_STUN: host[:port]; empty: the server's host on 3478; "off"
     std::string ruleset;   // BB_THD_RULESET: X-BBHost-Ruleset, "vanilla"
     std::string client;    // what the User-Agent names this client by (BB_CLIENT_VERSION)

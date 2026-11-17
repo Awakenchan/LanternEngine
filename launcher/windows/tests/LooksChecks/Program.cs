@@ -30,7 +30,7 @@ foreach (var knob in Looks.Knobs)
 foreach (var look in Looks.Presets)
 {
     Require(look.BuiltIn && look.Description.Length > 0, look.Name + ": a preset says what it costs");
-    Require(look.Values.Keys.All(knobs.Contains), look.Name + ": a preset sets a key outside the list");
+    Require(look.Values.Keys.All(k => knobs.Contains(k) || k == Looks.UpscalerKey), look.Name + ": a preset sets a key outside the list");
 }
 
 var values = new Dictionary<string, string> { ["effect_gi"] = "1", ["graphics_gi_strength"] = "7.5" };
@@ -102,5 +102,35 @@ var steadyFog = EngineSwitches.All.SingleOrDefault(e => e.Env == "BB_POINT_FOG_S
 Require(steadyFog != null, "Steady lamp fog is not an Engine switch");
 Require(steadyFog!.Group == EngineSwitches.Graphics, "Steady lamp fog is not in the Engine Graphics group");
 Require(steadyFog.Default == steadyFog.On, "Steady lamp fog does not start on");
+
+var classicIni = new IniFile();
+classicIni.Set("graphics_bloom", "2");
+classicIni.Set(Looks.GlowSizeKey, "0.15");
+var classicLook = Looks.FromCurrent(classicIni, "Classic fog", "");
+var classicJson = Looks.ToJson(classicLook);
+Require(!classicJson.Contains(Looks.GlowSizeKey) && !classicJson.Contains(Looks.FalloffKey),
+    "A classic-fog look carries a key older launchers refuse");
+Require(Looks.Parse(classicJson).Values.Count == 1, "A classic-fog look lost or gained values");
+Require(Looks.IsCurrent(classicLook, classicIni), "Glow size counts against a classic-fog look");
+classicIni.Set(Looks.FalloffKey, "0");
+Require(!Looks.ToJson(Looks.FromCurrent(classicIni, "Classic fog", "")).Contains(Looks.FalloffKey),
+    "An explicit classic falloff went into a look");
+var withGlow = new Looks.Look("Odd", "", new Dictionary<string, string> { [Looks.GlowSizeKey] = "0.15", [Looks.FalloffKey] = "0" });
+var withGlowJson = Looks.ToJson(withGlow);
+Require(!withGlowJson.Contains(Looks.GlowSizeKey) && !withGlowJson.Contains(Looks.FalloffKey),
+    "A classic-fog look written with glow size carries keys older launchers refuse");
+
+var inverseIni = new IniFile();
+inverseIni.Set(Looks.FalloffKey, "1");
+inverseIni.Set(Looks.GlowSizeKey, "0.15");
+var inverseLook = Looks.Parse(Looks.ToCode(Looks.FromCurrent(inverseIni, "Inverse fog", "")));
+Require(inverseLook.Values[Looks.FalloffKey] == "1" && inverseLook.Values[Looks.GlowSizeKey] == "0.15",
+    "An inverse-square look lost its falloff or glow size");
+Require(Looks.IsCurrent(inverseLook, inverseIni), "An inverse-square look does not read as current");
+inverseIni.Set(Looks.GlowSizeKey, "0.05");
+Require(!Looks.IsCurrent(inverseLook, inverseIni), "Glow size does not count for an inverse-square look");
+Require(!Looks.IsCurrent(classicLook, inverseIni), "A classic-fog look reads as current with inverse-square on");
+var glowClamp = Looks.Parse(Good.Replace("effect_gi\":\"1\"", Looks.GlowSizeKey + "\":\"9\""));
+Require(glowClamp.Values[Looks.GlowSizeKey] == "0.2", "No clamp of the glow size");
 
 Console.WriteLine("PASS looks: " + Looks.Knobs.Length + " knobs, " + Looks.Presets.Count + " presets");

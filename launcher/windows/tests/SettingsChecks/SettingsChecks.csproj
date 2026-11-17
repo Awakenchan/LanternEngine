@@ -7,7 +7,6 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../BloodborneLauncher/Core/SettingsFile.cs" Link="SettingsFile.cs" />
-    <Compile Include="../../BloodborneLauncher/Core/SavesFolder.cs" Link="SavesFolder.cs" />
+    <ProjectReference Include="../../LanternLauncher/LanternLauncher.csproj" />
   </ItemGroup>
 </Project>

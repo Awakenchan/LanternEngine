@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_occlusion.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "lantern_switches.h"
 
 extern "C" void runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
 
@@ -396,8 +397,7 @@ bool Occlusion::Resolver::Store(VAddr block, u32 dbs, u64 count) {
 }
 
 void Occlusion::Resolver::Report() {
-    static const bool wanted = std::getenv("BB_FRAME_STATS") != nullptr;
-    if (!wanted) {
+    if (!Lantern::Switches::Get().frame_stats) {
         return;
     }
     const auto now = std::chrono::steady_clock::now();

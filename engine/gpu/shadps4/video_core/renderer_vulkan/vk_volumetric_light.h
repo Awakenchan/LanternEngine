@@ -51,7 +51,8 @@ private:
     VideoCore::TextureCache& texture_cache;
     Runtime& runtime;
     SceneTargets& scene_targets;
-    Pass integrate, repair, tint, filter, composite, point;
+    Pass integrate, repair, tint, filter, composite, point, point_falloff;
+    bool point_falloff_ready = false;
     std::unique_ptr<VideoCore::Buffer> tint_state;
     std::chrono::steady_clock::time_point tint_time{};
     std::unique_ptr<VideoCore::Buffer> fog_data;
@@ -85,6 +86,7 @@ private:
     bool tinted = false;
     bool tried = false;
     bool failed = false;
+    u64 skipped_frames = 0;
     bool composite_reported = false;
     bool tint_reported = false;
 };

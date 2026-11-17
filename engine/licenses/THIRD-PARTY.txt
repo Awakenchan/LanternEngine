@@ -1,0 +1,648 @@
+Third-party components in Lantern Engine
+========================================
+
+This file lists the third-party software shipped in this package: what it is, its exact version,
+its license and where its license text is in the package. Paths are relative to the package
+folder. Lantern Engine's own code and its terms are described in NOTICE and LICENSE.
+
+
+1. MSYS2 CLANG64 libraries (engine/out/*.dll)
+---------------------------------------------
+
+These DLLs are unchanged binaries from MSYS2 CLANG64 packages (https://www.msys2.org/). Each entry
+names the package and version as installed when the package was built (pacman -Q), the license
+the MSYS2 package declares, the folder of its license texts, the DLLs it provides, and the MSYS2
+source package for that exact version.
+
+FFmpeg (avcodec, avformat, avutil, swresample, swscale) is built by MSYS2 with --enable-gpl and
+--enable-version3, with libx264, libx265, libxvid and opencore-amr, and is therefore distributed
+under the GNU General Public License version 3 or later (engine/licenses/msys2/ffmpeg/COPYING.GPLv3).
+
+Source code. The GPL- and LGPL-licensed libraries in this section are cairo
+1.18.6-2, ffmpeg 9.0.2-1, freetype 2.14.3-1, fribidi 1.0.17-1, gdk-pixbuf2 2.44.8-1,
+gettext-runtime 1.0-1, glib2 2.90.1-1, gmp 6.3.0-2, gnutls 3.8.13-3, graphite2 1.3.15-1,
+jbigkit 2.1-6, lame 3.100-3, lcms2 2.19.1-1, libbluray 1.5.0-1, libdatrie 0.2.14-1, libgme 0.6.5-2,
+libiconv 1.19-1, libidn2 2.3.8-4, librsvg 2.63.2-1, libsoxr 0.1.3-6, libssh 0.12.2-1,
+libtasn1 4.21.0-1, libthai 0.1.30-1, libunistring 1.4.2-1, libx264 0.165.r3222.b35605a-3,
+nettle 4.0-1, pango 1.58.2-1, rtmpdump 2.6-2, x265 4.3-1, xvidcore 1.3.7-5, xxhash 0.8.4-1,
+xz 5.8.4-1, zstd 1.5.7-2 and zvbi 0.2.45-1 (MSYS2 CLANG64 package versions). The complete
+corresponding source code of every library in this section, for exactly these versions, is the
+MSYS2 source package named on each entry's "Source" line, available from
+https://repo.msys2.org/mingw/sources/ ; each source package holds the PKGBUILD, the patches and the
+upstream sources MSYS2 built the binary from. Lantern Engine ships these libraries
+unmodified.
+
+abseil-cpp 20260526.0-1
+    License (MSYS2 package field): Apache-2.0
+    Text: engine/licenses/msys2/abseil-cpp/
+    Files (engine/out): libabsl_*-2605.0.0.dll (44 files)
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-abseil-cpp-20260526.0-1.src.tar.zst
+
+aom 3.15.2-1
+    License (MSYS2 package field): BSD-2-Clause
+    Text: engine/licenses/msys2/aom/
+    Files (engine/out): libaom.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-aom-3.15.2-1.src.tar.zst
+
+brotli 1.2.0-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/brotli/
+    Files (engine/out): libbrotlicommon.dll libbrotlidec.dll libbrotlienc.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-brotli-1.2.0-1.src.tar.zst
+
+bzip2 1.0.8-4
+    License (MSYS2 package field): custom
+    Text: engine/licenses/msys2/bzip2/
+    Files (engine/out): libbz2-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-bzip2-1.0.8-4.src.tar.zst
+
+cairo 1.18.6-2
+    License (MSYS2 package field): LGPL-2.1-or-later OR MPL-1.1
+    Text: engine/licenses/msys2/cairo/
+    Files (engine/out): libcairo-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-cairo-1.18.6-2.src.tar.zst
+
+dav1d 1.5.4-1
+    License (MSYS2 package field): BSD-2-Clause
+    Text: engine/licenses/msys2/dav1d/
+    Files (engine/out): libdav1d-7.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-dav1d-1.5.4-1.src.tar.zst
+
+expat 2.9.0-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/expat/
+    Files (engine/out): libexpat-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-expat-2.9.0-1.src.tar.zst
+
+ffmpeg 9.0.2-1
+    License (MSYS2 package field): GPL-3.0-or-later
+    Text: engine/licenses/msys2/ffmpeg/
+    Files (engine/out): avcodec-63.dll avformat-63.dll avutil-61.dll swresample-7.dll swscale-10.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-ffmpeg-9.0.2-1.src.tar.zst
+
+fontconfig 2.18.3-1
+    License (MSYS2 package field): custom
+    Text: engine/licenses/msys2/fontconfig/
+    Files (engine/out): libfontconfig-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-fontconfig-2.18.3-1.src.tar.zst
+
+freetype 2.14.3-1
+    License (MSYS2 package field): GPL-2.0-or-later OR FTL
+    Text: engine/licenses/msys2/freetype/
+    Files (engine/out): libfreetype-6.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-freetype-2.14.3-1.src.tar.zst
+
+fribidi 1.0.17-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/fribidi/
+    Files (engine/out): libfribidi-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-fribidi-1.0.17-1.src.tar.zst
+
+gdk-pixbuf2 2.44.8-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/gdk-pixbuf2/
+    Files (engine/out): libgdk_pixbuf-2.0-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-gdk-pixbuf2-2.44.8-1.src.tar.zst
+
+gettext-runtime 1.0-1
+    License (MSYS2 package field): GPL-3.0-or-later AND LGPL-2.1-or-later
+    Text: engine/licenses/msys2/gettext-runtime/
+    Files (engine/out): libintl-8.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-gettext-1.0-1.src.tar.zst
+
+glib2 2.90.1-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/glib2/
+    Files (engine/out): libgio-2.0-0.dll libglib-2.0-0.dll libgmodule-2.0-0.dll libgobject-2.0-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-glib2-2.90.1-1.src.tar.zst
+
+gmp 6.3.0-2
+    License (MSYS2 package field): LGPL3 GPL
+    Text: engine/licenses/msys2/gmp/
+    Files (engine/out): libgmp-10.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-gmp-6.3.0-2.src.tar.zst
+
+gnutls 3.8.13-3
+    License (MSYS2 package field): GPL-3.0-or-later LGPL-2.1-or-later
+    Text: engine/licenses/msys2/gnutls/
+    Files (engine/out): libgnutls-30.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-gnutls-3.8.13-3.src.tar.zst
+
+graphite2 1.3.15-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/graphite2/
+    Files (engine/out): libgraphite2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-graphite2-1.3.15-1.src.tar.zst
+
+gsm 1.0.24-1
+    License (MSYS2 package field): custom
+    Text: engine/licenses/msys2/gsm/
+    Files (engine/out): libgsm.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-gsm-1.0.24-1.src.tar.zst
+
+harfbuzz 14.6.0-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/harfbuzz/
+    Files (engine/out): libharfbuzz-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-harfbuzz-14.6.0-1.src.tar.zst
+
+highway 1.4.0-3
+    License (MSYS2 package field): Apache-2.0
+    Text: engine/licenses/msys2/highway/
+    Files (engine/out): libhwy.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-highway-1.4.0-3.src.tar.zst
+
+jbigkit 2.1-6
+    License (MSYS2 package field): GPL-2.0
+    Text: engine/licenses/msys2/jbigkit/
+    Files (engine/out): libjbig-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-jbigkit-2.1-6.src.tar.zst
+
+lame 3.100-3
+    License (MSYS2 package field): LGPL
+    Text: engine/licenses/msys2/lame/
+    Files (engine/out): libmp3lame-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-lame-3.100-3.src.tar.zst
+
+lcms2 2.19.1-1
+    License (MSYS2 package field): MIT AND GPL-3.0-or-later
+    Text: engine/licenses/msys2/lcms2/
+    Files (engine/out): liblcms2-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-lcms2-2.19.1-1.src.tar.zst
+
+lerc 4.1.1-1
+    License (MSYS2 package field): Apache-2.0
+    Text: engine/licenses/msys2/lerc/
+    Files (engine/out): libLerc.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-lerc-4.1.1-1.src.tar.zst
+
+libbluray 1.5.0-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/libbluray/
+    Files (engine/out): libbluray-4.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libbluray-1.5.0-1.src.tar.zst
+
+libc++ 23.1.3-1
+    License (MSYS2 package field): Apache-2.0 WITH LLVM-exception
+    Text: engine/licenses/msys2/libc++/
+    Files (engine/out): libc++.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libc++-23.1.3-1.src.tar.zst
+
+libdatrie 0.2.14-1
+    License (MSYS2 package field): LGPL
+    Text: engine/licenses/msys2/libdatrie/
+    Files (engine/out): libdatrie-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libdatrie-0.2.14-1.src.tar.zst
+
+libdeflate 1.26-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/libdeflate/
+    Files (engine/out): libdeflate.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libdeflate-1.26-1.src.tar.zst
+
+libffi 3.8.0-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/libffi/
+    Files (engine/out): libffi-8.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libffi-3.8.0-1.src.tar.zst
+
+libgme 0.6.5-2
+    License (MSYS2 package field): LGPL
+    Text: engine/licenses/msys2/libgme/
+    Files (engine/out): libgme.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libgme-0.6.5-2.src.tar.zst
+
+libiconv 1.19-1
+    License (MSYS2 package field): LGPL-2.1-or-later documentation:GPL-3.0-or-later
+    Text: engine/licenses/msys2/libiconv/
+    Files (engine/out): libiconv-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libiconv-1.19-1.src.tar.zst
+
+libidn2 2.3.8-4
+    License (MSYS2 package field): GPL-2.0-or-later LGPL-3.0-or-later
+    Text: engine/licenses/msys2/libidn2/
+    Files (engine/out): libidn2-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libidn2-2.3.8-4.src.tar.zst
+
+libjpeg-turbo 3.2.0-1
+    License (MSYS2 package field): custom:BSD-like
+    Text: engine/licenses/msys2/libjpeg-turbo/
+    Files (engine/out): libjpeg-8.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libjpeg-turbo-3.2.0-1.src.tar.zst
+
+libjxl 0.12.0-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/libjxl/
+    Files (engine/out): libjxl.dll libjxl_cms.dll libjxl_threads.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libjxl-0.12.0-1.src.tar.zst
+
+liblc3 1.1.3-1
+    License (MSYS2 package field): Apache-2.0
+    Text: engine/licenses/msys2/liblc3/
+    Files (engine/out): liblc3-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-liblc3-1.1.3-1.src.tar.zst
+
+libmodplug 0.8.9.0-5
+    License (MSYS2 package field): PublicDomain
+    Text: engine/licenses/msys2/libmodplug/
+    Files (engine/out): libmodplug-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libmodplug-0.8.9.0-5.src.tar.zst
+
+libogg 1.3.6-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/libogg/
+    Files (engine/out): libogg-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libogg-1.3.6-1.src.tar.zst
+
+libpng 1.6.59-1
+    License (MSYS2 package field): custom
+    Text: engine/licenses/msys2/libpng/
+    Files (engine/out): libpng16-16.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libpng-1.6.59-1.src.tar.zst
+
+librsvg 2.63.2-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/librsvg/
+    Files (engine/out): librsvg-2-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-librsvg-2.63.2-1.src.tar.zst
+
+libsoxr 0.1.3-6
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/libsoxr/
+    Files (engine/out): libsoxr.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libsoxr-0.1.3-6.src.tar.zst
+
+libssh 0.12.2-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/libssh/
+    Files (engine/out): libssh.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libssh-0.12.2-1.src.tar.zst
+
+libtasn1 4.21.0-1
+    License (MSYS2 package field): GPL3, LGPL
+    Text: engine/licenses/msys2/libtasn1/
+    Files (engine/out): libtasn1-6.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libtasn1-4.21.0-1.src.tar.zst
+
+libthai 0.1.30-1
+    License (MSYS2 package field): LGPL-2.1-or-later
+    Text: engine/licenses/msys2/libthai/
+    Files (engine/out): libthai-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libthai-0.1.30-1.src.tar.zst
+
+libtheora 1.2.0-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/libtheora/
+    Files (engine/out): libtheoradec-2.dll libtheoraenc-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libtheora-1.2.0-1.src.tar.zst
+
+libtiff 4.7.2-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/libtiff/
+    Files (engine/out): libtiff-6.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libtiff-4.7.2-1.src.tar.zst
+
+libunistring 1.4.2-1
+    License (MSYS2 package field): LGPL-3.0-or-later OR GPL-3.0-or-later
+    Text: engine/licenses/msys2/libunistring/
+    Files (engine/out): libunistring-5.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libunistring-1.4.2-1.src.tar.zst
+
+libunwind 23.1.3-1
+    License (MSYS2 package field): Apache-2.0 WITH LLVM-exception
+    Text: engine/licenses/msys2/libunwind/
+    Files (engine/out): libunwind.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libc++-23.1.3-1.src.tar.zst
+
+libva 2.24.1-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/libva/
+    Files (engine/out): libva.dll libva_win32.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libva-2.24.1-1.src.tar.zst
+
+libvorbis 1.3.7-3
+    License (MSYS2 package field): custom
+    Text: engine/licenses/msys2/libvorbis/
+    Files (engine/out): libvorbis-0.dll libvorbisenc-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libvorbis-1.3.7-3.src.tar.zst
+
+libvpl 2.17.0-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/libvpl/
+    Files (engine/out): libvpl-2.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libvpl-2.17.0-1.src.tar.zst
+
+libvpx 1.17.0-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/libvpx/
+    Files (engine/out): libvpx-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libvpx-1.17.0-1.src.tar.zst
+
+libwebp 1.6.0-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/libwebp/
+    Files (engine/out): libsharpyuv-0.dll libwebp-7.dll libwebpmux-3.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libwebp-1.6.0-1.src.tar.zst
+
+libwinpthread 14.0.0.r426.g4564ee4b5-1
+    License (MSYS2 package field): MIT AND BSD-3-Clause-Clear
+    Text: engine/licenses/msys2/libwinpthread/
+    Files (engine/out): libwinpthread-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-winpthreads-14.0.0.r426.g4564ee4b5-1.src.tar.zst
+
+libx264 0.165.r3222.b35605a-3
+    License (MSYS2 package field): custom
+    Text: engine/licenses/msys2/x264/
+    Files (engine/out): libx264-165.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-x264-0.165.r3222.b35605a-3.src.tar.zst
+
+libxml2 2.15.4-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/libxml2/
+    Files (engine/out): libxml2-16.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-libxml2-2.15.4-1.src.tar.zst
+
+llvm-openmp 23.1.3-2
+    License (MSYS2 package field): Apache-2.0 WITH LLVM-exception
+    Text: engine/licenses/msys2/openmp/
+    Files (engine/out): libomp.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-llvm-openmp-23.1.3-2.src.tar.zst
+
+nettle 4.0-1
+    License (MSYS2 package field): GPL-2.0-or-later LGPL-3.0-or-later
+    Text: engine/licenses/msys2/nettle/
+    Files (engine/out): libhogweed-7.dll libnettle-9.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-nettle-4.0-1.src.tar.zst
+
+opencore-amr 0.1.6-1
+    License (MSYS2 package field): Apache
+    Text: engine/licenses/msys2/opencore-amr/
+    Files (engine/out): libopencore-amrnb-0.dll libopencore-amrwb-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-opencore-amr-0.1.6-1.src.tar.zst
+
+openjpeg2 2.5.4-2
+    License (MSYS2 package field): BSD-2-Clause
+    Text: engine/licenses/msys2/openjpeg/
+    Files (engine/out): libopenjp2-7.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-openjpeg2-2.5.4-2.src.tar.zst
+
+openssl 3.6.5-1
+    License (MSYS2 package field): Apache-2.0
+    Text: engine/licenses/msys2/openssl/
+    Files (engine/out): libcrypto-3-x64.dll libssl-3-x64.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-openssl-3.6.5-1.src.tar.zst
+
+opus 1.6.1-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/opus/
+    Files (engine/out): libopus-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-opus-1.6.1-1.src.tar.zst
+
+p11-kit 0.26.5-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/p11-kit/
+    Files (engine/out): libp11-kit-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-p11-kit-0.26.5-1.src.tar.zst
+
+pango 1.58.2-1
+    License (MSYS2 package field): LGPL-2.1
+    Text: engine/licenses/msys2/pango/
+    Files (engine/out): libpango-1.0-0.dll libpangocairo-1.0-0.dll libpangoft2-1.0-0.dll libpangowin32-1.0-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-pango-1.58.2-1.src.tar.zst
+
+pcre2 10.49-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/pcre2/
+    Files (engine/out): libpcre2-8-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-pcre2-10.49-1.src.tar.zst
+
+pixman 0.46.4-3
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/pixman/
+    Files (engine/out): libpixman-1-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-pixman-0.46.4-3.src.tar.zst
+
+protobuf 36.2-1
+    License (MSYS2 package field): BSD-3-Clause
+    Text: engine/licenses/msys2/protobuf/
+    Files (engine/out): libprotobuf.dll libutf8_validity.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-protobuf-36.2-1.src.tar.zst
+
+rav1e 0.8.1-1
+    License (MSYS2 package field): BSD-2-Clause
+    Text: engine/licenses/msys2/rav1e/
+    Files (engine/out): librav1e.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-rav1e-0.8.1-1.src.tar.zst
+
+rtmpdump 2.6-2
+    License (MSYS2 package field): GPL-2.0-or-later LGPL-2.1-or-later
+    Text: engine/licenses/msys2/rtmpdump/
+    Files (engine/out): librtmp-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-rtmpdump-2.6-2.src.tar.zst
+
+sdl3 3.4.18-1
+    License (MSYS2 package field): Zlib
+    Text: engine/licenses/msys2/SDL3/
+    Files (engine/out): SDL3.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-sdl3-3.4.18-1.src.tar.zst
+
+speex 1.2.1-1
+    License (MSYS2 package field): BSD
+    Text: engine/licenses/msys2/speex/
+    Files (engine/out): libspeex-1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-speex-1.2.1-1.src.tar.zst
+
+srt 1.5.7-1
+    License (MSYS2 package field): MPL-2.0
+    Text: engine/licenses/msys2/srt/
+    Files (engine/out): libsrt.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-srt-1.5.7-1.src.tar.zst
+
+svt-av1 4.2.0-1
+    License (MSYS2 package field): BSD-3-Clause-Clear
+    Text: engine/licenses/msys2/svt-av1/
+    Files (engine/out): libSvtAv1Enc-4.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-svt-av1-4.2.0-1.src.tar.zst
+
+x265 4.3-1
+    License (MSYS2 package field): GPL
+    Text: engine/licenses/msys2/x265/
+    Files (engine/out): libx265-217.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-x265-4.3-1.src.tar.zst
+
+xvidcore 1.3.7-5
+    License (MSYS2 package field): GPL
+    Text: engine/licenses/msys2/xvidcore/
+    Files (engine/out): xvidcore.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-xvidcore-1.3.7-5.src.tar.zst
+
+xxhash 0.8.4-1
+    License (MSYS2 package field): BSD-2-Clause AND GPL-2.0-or-later
+    Text: engine/licenses/msys2/xxhash/
+    Files (engine/out): libxxhash.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-xxhash-0.8.4-1.src.tar.zst
+
+xz 5.8.4-1
+    License (MSYS2 package field): 0BSD AND LGPL-2.1-or-later AND GPL-2.0-or-later
+    Text: engine/licenses/msys2/xz/
+    Files (engine/out): liblzma-5.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-xz-5.8.4-1.src.tar.zst
+
+zlib 1.3.2-2
+    License (MSYS2 package field): Zlib
+    Text: engine/licenses/msys2/zlib/
+    Files (engine/out): zlib1.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-zlib-1.3.2-2.src.tar.zst
+
+zstd 1.5.7-2
+    License (MSYS2 package field): BSD-3-Clause OR GPL-2.0-or-later
+    Text: engine/licenses/msys2/zstd/
+    Files (engine/out): libzstd.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-zstd-1.5.7-2.src.tar.zst
+
+zvbi 0.2.45-1
+    License (MSYS2 package field):  GPL-2.0-or-later AND BSD-2-Clause AND LGPL-2.1-or-later AND MIT
+    Text: engine/licenses/msys2/zvbi/
+    Files (engine/out): libzvbi-0.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-zvbi-0.2.45-1.src.tar.zst
+
+zydis 4.1.1-1
+    License (MSYS2 package field): MIT
+    Text: engine/licenses/msys2/zydis/
+    Files (engine/out): libZydis.dll
+    Source: https://repo.msys2.org/mingw/sources/mingw-w64-zydis-4.1.1-1.src.tar.zst
+
+
+2. NVIDIA and AMD runtime libraries
+-----------------------------------
+
+NVIDIA DLSS 310.9.16.0 (engine/out/nvngx_dlss.dll, engine/out/nvngx_dlssg.dll)
+    License: NVIDIA RTX SDKs license
+    Text: engine/licenses/nvngx_dlss.license.txt
+
+NVIDIA Streamline 2.14.16.0 (engine/out/sl.common.dll, sl.dlss_g.dll, sl.interposer.dll,
+sl.pcl.dll, sl.reflex.dll)
+    License: MIT
+    Text: engine/licenses/LICENSE-Streamline.txt
+
+NVIDIA Reflex low latency for Vulkan (engine/out/NvLowLatencyVk.dll; the DLL carries no version
+resource)
+    License: NVIDIA SDK license agreement
+    Text: engine/licenses/reflex.license.txt
+
+AMD FSR SDK 2.4.0, signed binaries (engine/fsr_sdk/amd_fidelityfx_loader_vk.dll 1.0.2.4555,
+amd_fidelityfx_upscaler_vk.dll 4.1.2.4555, amd_fidelityfx_framegeneration_vk.dll 4.0.2.4555)
+    License: AMD FSR SDK binary redistribution license
+    Text: engine/fsr_sdk/LICENSE-AMD-FSR-SDK.md (source: engine/fsr_sdk/SOURCE.txt)
+
+fsr4vk v0.4.3 with one patch (engine/fsr4vk/amd_fidelityfx_upscaler_vk.dll)
+    License: GPL-3.0 (provider), MIT (AMD FidelityFX data), BSD (Zstandard)
+    Text: engine/fsr4vk/LICENSES/ (source and patch: engine/fsr4vk/SOURCE.txt, PATCH.md)
+
+
+3. Components built into Lantern Engine's programs
+--------------------------------------------------
+
+Dear ImGui 1.92.9b (engine/out programs)
+    License: MIT
+    Text: engine/licenses/IMGUI.txt
+
+Roboto Medium, version 2.001152 (Roboto-Medium.ttf from Dear ImGui's misc/fonts, embedded for
+keyboard key caps)
+    License: Apache-2.0
+    Text: engine/licenses/roboto/LICENSE
+
+DejaVu Sans 2.37 (DejaVuSans.ttf, embedded)
+    License: Bitstream Vera / Arev fonts license, DejaVu changes public domain
+    Text: engine/licenses/DEJAVU-FONTS.txt
+
+LanternMenuSC (LanternMenuSC.ttf, embedded; a renamed subset of Noto Sans SC, Google Fonts revision
+a85815a42757630ce188fdad368c2dfc444d4773)
+    License: SIL Open Font License 1.1
+    Text: engine/licenses/LanternMenuSC-OFL.txt
+
+half 1.12.0 (half-precision floating point library)
+    License: MIT
+    Text: engine/licenses/HALF.txt
+
+sirit (SPIR-V generator, copy in engine/gpu/third_party/sirit)
+    License: BSD-3-Clause
+    Text: engine/licenses/SIRIT.txt
+
+SPIRV-Headers (copy in sirit/externals/SPIRV-Headers)
+    License: Khronos MIT-style license
+    Text: engine/licenses/SPIRV-HEADERS.txt
+
+LibAtrac9 (copy in engine/third_party/LibAtrac9)
+    License: MIT
+    Text: engine/licenses/LIBATRAC9.txt
+
+FSR-Vulkan (copy in engine/gpu/third_party/fsr-vulkan)
+    License: MIT
+    Text: engine/licenses/FSR-VULKAN.txt
+
+AMD FidelityFX SDK 1.1.4 (FSR-Vulkan's baseline)
+    License: MIT
+    Text: engine/licenses/FIDELITYFX-SDK-1.1.4.txt
+
+AMD GCN register and PM4 opcode headers (si_ci_vi_merged_offset.h,
+si_ci_vi_merged_pm4_it_opcodes.h, from AMD PAL)
+    License: MIT
+    Text: engine/licenses/amd-gcn-headers/LICENSE.txt
+
+cpp-httplib 0.45.0
+    License: MIT
+    Text: engine/licenses/CPPHTTPLIB.txt
+
+wepoll (copy in engine/gpu/bbnet/third_party/wepoll)
+    License: BSD-2-Clause
+    Text: engine/licenses/WEPOLL.txt
+
+bbhost code ported into the online backend
+    Text: engine/licenses/BBHOST-PORTS.md
+
+shadPS4 code (engine/gpu/shadps4 and the parts NOTICE names)
+    License: GPL-2.0-or-later
+    Text: engine/licenses/GPL-2.0.txt
+
+
+4. The old-CPU scanner (engine/out/bb-isa-scan.exe)
+---------------------------------------------------
+
+bb-isa-scan is GPL-2.0-only (engine/licenses/GPL-2.0.txt) and is built with these Rust crates
+(versions from its Cargo.lock):
+
+iced-x86 1.21.0          MIT                    engine/licenses/rust/iced-x86/LICENSE.txt
+block-buffer 0.10.4      MIT OR Apache-2.0      engine/licenses/rust/block-buffer/LICENSE-MIT
+cfg-if 1.0.5             MIT OR Apache-2.0      engine/licenses/rust/cfg-if/LICENSE-MIT
+cpufeatures 0.2.17       MIT OR Apache-2.0      engine/licenses/rust/cpufeatures/LICENSE-MIT
+crypto-common 0.1.7      MIT OR Apache-2.0      engine/licenses/rust/crypto-common/LICENSE-MIT
+digest 0.10.7            MIT OR Apache-2.0      engine/licenses/rust/digest/LICENSE-MIT
+generic-array 0.14.7     MIT                    engine/licenses/rust/generic-array/LICENSE
+lazy_static 1.5.1        MIT OR Apache-2.0      engine/licenses/rust/lazy_static/LICENSE-MIT
+sha2 0.10.9              MIT OR Apache-2.0      engine/licenses/rust/sha2/LICENSE-MIT
+typenum 1.20.1           MIT OR Apache-2.0      engine/licenses/rust/typenum/LICENSE-MIT
+
+The crates offered under MIT OR Apache-2.0 are used under MIT.
+
+
+5. Launcher (Lantern Engine.exe)
+--------------------------------
+
+WPF-UI 4.3.0 (NuGet package wpf-ui)
+    License: MIT, with the notices of the components it includes
+    Text: engine/licenses/wpf-ui/LICENSE.md, engine/licenses/wpf-ui/ThirdPartyNotices.txt
+
+
+6. Data
+-------
+
+SDL_GameControllerDB mappings (engine/gamecontrollerdb.txt, for pads SDL does not know by itself)
+    License: zlib
+    Text: engine/licenses/sdl-gamecontrollerdb/LICENSE
+
+Lamp2Lamp by Disschorde (engine/lamp2lamp.bin, engine/lamp2lamp-bosses.bin)
+    https://www.nexusmods.com/bloodborne/mods/455 ; credited in NOTICE
+
+Real-ESRGAN (realesrgan-ncnn-vulkan and the realesrgan-x4plus model) is not in this package: the
+launcher downloads it when the 4K menus are made. Its terms: engine/licenses/REAL-ESRGAN.txt.

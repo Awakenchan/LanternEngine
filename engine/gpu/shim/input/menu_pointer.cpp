@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "menu_pointer.h"
+#include "../engine/hook_entries.h"
 #include "input.h"
 #include "pad.h"
 #include "../bbport_settings.h"
@@ -20,8 +21,7 @@ using BbEngine::Call;
 
 constexpr std::size_t kListUpdate = 0x1acff30;
 
-constexpr std::uint8_t kListUpdateEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                             0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x98, 0x00, 0x00, 0x00};
+constexpr const auto& kListUpdateEntry = BbEngine::HookEntries::kMenuPointerListUpdateEntry;
 constexpr std::size_t kSetCursor = 0x1acf6b0, kScrollBy = 0x1ad0dd0, kHideCursors = 0x1acf0e0;
 constexpr std::size_t kChildClip = 0x1adb220, kCursorClipName = 0x4934044;
 constexpr std::size_t kStageMatrix = 0x2040;
@@ -416,7 +416,7 @@ void PointerStep(std::uint8_t* list, const std::uint8_t* focus) {
     if (now != was) CursorMoved(list, now);
 }
 
-std::int64_t __attribute__((sysv_abi)) OnListUpdate(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnListUpdate(std::uint64_t, std::uint64_t* saved) noexcept {
     auto* list = reinterpret_cast<std::uint8_t*>(saved[5]);
     const auto* focus = reinterpret_cast<const std::uint8_t*>(saved[4]);
     PointerStep(list, focus);
@@ -430,11 +430,14 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const char* log = std::getenv("BB_POINTER_LOG");
     g_log = log && log[0] == '1';
     BbEngine::Hook hook;
-    if (!BbEngine::Prepare(hook, image, size, kListUpdate, kListUpdateEntry, OnListUpdate)) {
+    if (!BbEngine::Prepare(hook, image, size, kListUpdate, BbEngine::SiteKind::Entry, kListUpdateEntry, OnListUpdate)) {
         host_log("pointer: off, the menus' list update is not 1.09's");
         return false;
     }
-    BbEngine::Commit(std::span(&hook, 1));
+    if (const BbEngine::WriteResult result = BbEngine::Commit(std::span(&hook, 1)); result != BbEngine::WriteResult::Applied) {
+        host_log("pointer: off, the menus' list update could not be written (%s)", BbEngine::Describe(result));
+        return false;
+    }
     host_log("pointer: the menus' lists follow the mouse");
     return true;
 }

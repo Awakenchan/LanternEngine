@@ -2,20 +2,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <ranges>
 #include <string>
 #include <unordered_set>
 
 #include "engine/gx_records.h"
+#include "lantern_switches.h"
 #include "bbport_sections.h"
 #include "common/hash.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "lifter/bridge.h"
@@ -27,22 +32,56 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/cache_file.h"
+#include "video_core/renderer_vulkan/driver_cache_save.h"
 #include "video_core/renderer_vulkan/pipeline_cache_blob.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_effect_shaders.h"
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
+#include "sys/process_alive.h"
+
 namespace Vulkan {
 
 namespace {
+size_t SavedPermutationIndex(const Program::ModuleList& modules, u64 hash,
+                             const Shader::StageSpecialization& spec) {
+    auto& database = Storage::DataBase::Instance();
+    if (!database.IsOpened()) {
+        return modules.size();
+    }
+    for (size_t index = 0; index < 4096; ++index) {
+        if (index < modules.size() && modules[index].module) {
+            continue;
+        }
+        std::vector<u8> blob;
+        database.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", HashCombine(hash, index)),
+                      blob);
+        if (blob.empty()) {
+            return index;
+        }
+        Shader::StageSpecialization saved{};
+        size_t saved_index{};
+        if (!ReadShaderMetaSpec(std::move(blob), saved, saved_index) || saved_index != index) {
+            return index;
+        }
+        saved.info = spec.info;
+        if (saved == spec) {
+            return index;
+        }
+    }
+    return modules.size();
+}
+
 struct CacheRegistry {
     std::mutex mutex;
     std::vector<PipelineCache*> caches;
+    std::mutex driver_cache_save_mutex;
 };
 
 CacheRegistry& Registry() {
@@ -62,6 +101,60 @@ DriverCache::Identity DriverIdentity(const Instance& instance) {
 std::filesystem::path DriverCachePath() {
     return Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
            (std::string{Common::ElfInfo::Instance().GameSerial()} + ".vkcache");
+}
+
+u64 SteadyNowNs() {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+}
+
+u64 OwnProcessId() {
+#ifdef _WIN32
+    return GetCurrentProcessId();
+#else
+    return u64(getpid());
+#endif
+}
+
+bool ProcessAlive(u64 pid) {
+    return lantern_process_alive(pid) != 0;
+}
+
+std::string NameBytes(const std::filesystem::path& path) {
+    const auto name = path.filename().u8string();
+    return std::string(name.begin(), name.end());
+}
+
+void RemoveStaleDriverCacheTemporaries() {
+    const auto target = DriverCachePath();
+    const auto target_name = NameBytes(target);
+    const u64 own = OwnProcessId();
+    u32 removed = 0, kept = 0, failed = 0;
+    std::error_code error;
+    std::filesystem::directory_iterator it{target.parent_path(), error};
+    for (; !error && it != std::filesystem::directory_iterator{}; it.increment(error)) {
+        const auto owner = DriverCacheSave::TemporaryOwner(NameBytes(it->path()), target_name);
+        if (!owner) {
+            continue;
+        }
+        if (!DriverCacheSave::RemoveTemporary(*owner, own, *owner != own && ProcessAlive(*owner))) {
+            ++kept;
+            continue;
+        }
+        std::error_code remove_error;
+        if (std::filesystem::remove(it->path(), remove_error)) {
+            ++removed;
+        } else {
+            ++failed;
+        }
+    }
+    if (removed || failed) {
+        std::printf("GPU cache: removed %u unfinished driver cache files of ended runs (%u could not be "
+                    "removed, %u of running ones kept)\n",
+                    removed, failed, kept);
+        std::fflush(stdout);
+    }
 }
 } // namespace
 
@@ -84,6 +177,7 @@ void PipelineCache::CreateNativeCache() {
     std::vector<u8> file_data;
     std::span<const u8> initial_data;
     if (EmulatorSettings.IsPipelineCacheEnabled()) {
+        RemoveStaleDriverCacheTemporaries();
         const Common::FS::IOFile file{DriverCachePath(), Common::FS::FileAccessMode::Read};
         const auto size = file.IsOpen() ? file.GetSize() : 0;
         if (size >= DriverCache::HeaderBytes && size <= DriverCache::MaxBytes + DriverCache::HeaderBytes) {
@@ -101,44 +195,234 @@ void PipelineCache::CreateNativeCache() {
         .pInitialData = initial_data.empty() ? nullptr : initial_data.data(),
     };
     auto [result, cache] = instance.GetDevice().createPipelineCacheUnique(info);
+    bool loaded = !initial_data.empty();
     if (result != vk::Result::eSuccess && !initial_data.empty()) {
         LOG_WARNING(Render_Vulkan, "Driver rejected its pipeline cache: {}", vk::to_string(result));
         auto [retry_result, retry_cache] = instance.GetDevice().createPipelineCacheUnique({});
         result = retry_result;
         cache = std::move(retry_cache);
+        loaded = false;
     }
     ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(result));
     pipeline_cache = std::move(cache);
+    driver_cache_loaded = loaded;
+}
+
+std::mutex& PipelineCache::DriverCacheSaveMutex() {
+    return Registry().driver_cache_save_mutex;
+}
+
+PipelineCache::DriverCacheSnapshot PipelineCache::SnapshotDriverCache() {
+    DriverCacheSnapshot snapshot;
+    if (!pipeline_cache || !EmulatorSettings.IsPipelineCacheEnabled()) {
+        return snapshot;
+    }
+    snapshot.status = DriverCacheRead::Failed;
+    size_t size{};
+    const auto device = instance.GetDevice();
+    snapshot.result = device.getPipelineCacheData(*pipeline_cache, &size, nullptr);
+    if (snapshot.result != vk::Result::eSuccess) {
+        return snapshot;
+    }
+    size = std::min(size, DriverCache::MaxBytes);
+    snapshot.payload.resize(size);
+    snapshot.result = device.getPipelineCacheData(*pipeline_cache, &size, snapshot.payload.data());
+    // Vulkan explicitly guarantees that even VK_INCOMPLETE data is a usable cache blob.
+    // Bounding the snapshot avoids unbounded disk/allocation growth on long sessions.
+    if (snapshot.result != vk::Result::eSuccess && snapshot.result != vk::Result::eIncomplete) {
+        snapshot.payload.clear();
+        return snapshot;
+    }
+    snapshot.payload.resize(size);
+    snapshot.status = DriverCacheRead::Read;
+    return snapshot;
 }
 
 void PipelineCache::SaveNativeCache() {
-    if (!pipeline_cache || !EmulatorSettings.IsPipelineCacheEnabled()) {
+    if (!driver_cache_saves.closed) {
+        driver_cache_saves.closed = true;
+        ReportDriverCacheSaves();
+    }
+    if (!DriverCacheSave::ExitSaveNeeded(driver_cache_save_in_play && driver_cache_saves.failed == 0 &&
+                                             driver_cache_saves.saved != 0,
+                                         driver_cache_created.load(std::memory_order_acquire) -
+                                             driver_cache_saves.saved_through,
+                                         PipelineJobsUnfinished())) {
+        std::printf("GPU cache: nothing new since the last driver cache save during play; the save at "
+                    "the window's close is skipped\n");
+        std::fflush(stdout);
         return;
     }
-    // Caller holds native_cache_mutex. No queue/GPU wait is needed: this is host cache data.
-    size_t size{};
-    const auto device = instance.GetDevice();
-    if (device.getPipelineCacheData(*pipeline_cache, &size, nullptr) != vk::Result::eSuccess) {
+    const auto snapshot = SnapshotDriverCache();
+    if (snapshot.status == DriverCacheRead::Off) {
         return;
     }
-    size = std::min(size, DriverCache::MaxBytes);
-    std::vector<u8> payload(size);
-    const auto result = device.getPipelineCacheData(*pipeline_cache, &size, payload.data());
-    // Vulkan explicitly guarantees that even VK_INCOMPLETE data is a usable cache blob.
-    // Bounding the snapshot avoids unbounded disk/allocation growth on long sessions.
-    if (result != vk::Result::eSuccess && result != vk::Result::eIncomplete) {
-        LOG_WARNING(Render_Vulkan, "Cannot read Vulkan driver cache: {}", vk::to_string(result));
+    if (snapshot.status == DriverCacheRead::Failed) {
+        LOG_WARNING(Render_Vulkan, "Cannot read Vulkan driver cache: {}", vk::to_string(snapshot.result));
         return;
     }
-    payload.resize(size);
-    const auto file_data = DriverCache::Encode(payload, DriverIdentity(instance));
+    const auto file_data = DriverCache::Encode(snapshot.payload, DriverIdentity(instance));
     if (!file_data.empty() && !Storage::ReplaceCacheFile(DriverCachePath(), file_data)) {
         LOG_WARNING(Render_Vulkan, "Cannot save Vulkan driver cache; keeping the previous file");
     }
 }
 
+void PipelineCache::NoteDriverCachePipeline() noexcept {
+    driver_cache_created.fetch_add(1, std::memory_order_release);
+    driver_cache_last_new_ns.store(SteadyNowNs(), std::memory_order_relaxed);
+}
+
+void PipelineCache::StartDriverCacheSaver() {
+    const char* env = std::getenv("LANTERN_DRIVER_CACHE_SAVE");
+    if (!(env && env[0] == '1') || !pipeline_cache || !EmulatorSettings.IsPipelineCacheEnabled()) {
+        return;
+    }
+    const u64 now = SteadyNowNs();
+    {
+        std::scoped_lock lock{DriverCacheSaveMutex()};
+        driver_cache_saves.last_save_ns = now;
+    }
+    if (!driver_cache_loaded) {
+        driver_cache_created.fetch_add(GetPrecacheProgress().loaded, std::memory_order_relaxed);
+        driver_cache_last_new_ns.store(now, std::memory_order_relaxed);
+    }
+    driver_cache_save_in_play = true;
+    driver_cache_saver = std::jthread{[this](std::stop_token stop) { RunDriverCacheSaver(stop); }};
+    std::printf("GPU cache: the driver cache is also saved during play (LANTERN_DRIVER_CACHE_SAVE=1): "
+                "at most every %llu s, after %llu new pipelines and %llu s without one\n",
+                static_cast<unsigned long long>(DriverCacheSave::MinIntervalNs / DriverCacheSave::NsPerSecond),
+                static_cast<unsigned long long>(DriverCacheSave::MinNewPipelines),
+                static_cast<unsigned long long>(DriverCacheSave::CompileQuietNs / DriverCacheSave::NsPerSecond));
+    std::fflush(stdout);
+}
+
+void PipelineCache::StopDriverCacheSaver() {
+    if (driver_cache_saver.joinable()) {
+        driver_cache_saver.request_stop();
+        driver_cache_saver.join();
+    }
+}
+
+void PipelineCache::RunDriverCacheSaver(std::stop_token stop) {
+    Common::SetCurrentThreadName("bb:DriverCache");
+    const auto poll = std::chrono::nanoseconds(DriverCacheSave::PollIntervalNs);
+    while (!stop.stop_requested()) {
+        {
+            std::unique_lock lock{driver_cache_wake_mutex};
+            driver_cache_wake.wait_for(lock, stop, poll, [] { return false; });
+        }
+        if (stop.stop_requested()) {
+            return;
+        }
+        if (TrySaveDriverCache() == DriverCacheSave::Step::Stop) {
+            std::printf("GPU cache: the GPU device was lost; no more driver cache saves during play\n");
+            std::fflush(stdout);
+            return;
+        }
+    }
+}
+
+DriverCacheSave::Step PipelineCache::TrySaveDriverCache() {
+    struct Host {
+        PipelineCache& cache;
+        u64 through = 0;
+        struct Data {
+            DriverCacheSnapshot snapshot;
+            std::vector<u8> file_data;
+        };
+        std::mutex& SaveMutex() { return DriverCacheSaveMutex(); }
+        bool DeviceLost() { return Breadcrumbs::DeviceLost(); }
+        bool Closed() { return cache.driver_cache_saves.closed; }
+        bool ShuttingDown() { return cache.driver_cache_shutdown.load(std::memory_order_acquire); }
+        DriverCacheSave::Inputs Read() {
+            const auto& saves = cache.driver_cache_saves;
+            through = cache.driver_cache_created.load(std::memory_order_acquire);
+            return {
+                .now_ns = SteadyNowNs(),
+                .last_save_ns = saves.last_save_ns,
+                .last_new_pipeline_ns = cache.driver_cache_last_new_ns.load(std::memory_order_relaxed),
+                .new_pipelines = through - saves.saved_through,
+                .compiles_unfinished = PipelineJobsUnfinished(),
+                .closed = saves.closed || saves.failed != 0 || ShuttingDown(),
+            };
+        }
+        void Skipped(DriverCacheSave::Verdict verdict) {
+            auto& saves = cache.driver_cache_saves;
+            switch (verdict) {
+            case DriverCacheSave::Verdict::TooFew:
+                ++saves.too_few;
+                break;
+            case DriverCacheSave::Verdict::TooSoon:
+                ++saves.too_soon;
+                break;
+            case DriverCacheSave::Verdict::Compiling:
+                ++saves.compiling;
+                break;
+            default:
+                break;
+            }
+        }
+        Data Snapshot() {
+            Data data{.snapshot = cache.SnapshotDriverCache()};
+            if (data.snapshot.status == DriverCacheRead::Read) {
+                data.file_data = DriverCache::Encode(data.snapshot.payload, DriverIdentity(cache.instance));
+            }
+            return data;
+        }
+        void Dropped() { ++cache.driver_cache_saves.dropped; }
+        bool Write(const Data& data) {
+            return !data.file_data.empty() && Storage::ReplaceCacheFile(DriverCachePath(), data.file_data);
+        }
+        void Record(DriverCacheSave::Step step, const DriverCacheSave::Inputs& inputs) {
+            auto& saves = cache.driver_cache_saves;
+            if (step == DriverCacheSave::Step::Failed) {
+                ++saves.failed;
+                return;
+            }
+            saves.saved_through = through;
+            saves.last_save_ns = inputs.now_ns;
+            ++saves.saved;
+        }
+        void Report(DriverCacheSave::Step step, const DriverCacheSave::Inputs& inputs, const Data& data) {
+            if (step == DriverCacheSave::Step::Failed) {
+                const std::string reason = data.snapshot.status != DriverCacheRead::Read
+                                               ? vk::to_string(data.snapshot.result)
+                                               : data.file_data.empty() ? "the driver's data has another header"
+                                                                        : "the file could not be replaced";
+                std::printf("GPU cache: the driver cache could not be saved during play (%s); no more saves "
+                            "during play, the save at the window's close still runs\n",
+                            reason.c_str());
+            } else {
+                std::printf("GPU cache: driver cache saved during play (%llu new pipelines, %.1f MB, %.0f ms)\n",
+                            static_cast<unsigned long long>(inputs.new_pipelines),
+                            double(data.file_data.size()) / 1e6, double(SteadyNowNs() - inputs.now_ns) / 1e6);
+            }
+            std::fflush(stdout);
+        }
+    } host{*this};
+    return DriverCacheSave::PlaySave(host);
+}
+
+void PipelineCache::ReportDriverCacheSaves() const {
+    if (!driver_cache_save_in_play) {
+        return;
+    }
+    const auto& saves = driver_cache_saves;
+    std::printf("GPU cache: driver cache saves during play: %llu saved, %llu failed, %llu dropped at the "
+                "exit; skipped %llu times with too few new pipelines, %llu within the interval, %llu "
+                "while pipelines compiled\n",
+                static_cast<unsigned long long>(saves.saved),
+                static_cast<unsigned long long>(saves.failed),
+                static_cast<unsigned long long>(saves.dropped),
+                static_cast<unsigned long long>(saves.too_few),
+                static_cast<unsigned long long>(saves.too_soon),
+                static_cast<unsigned long long>(saves.compiling));
+    std::fflush(stdout);
+}
+
 PipelineCache::~PipelineCache() {
+    StopDriverCacheSaver();
     std::scoped_lock lock{Registry().mutex};
     std::erase(Registry().caches, this);
     Sync();
@@ -536,8 +820,21 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                     ? "; inputs interpolated by GCN's formula (BB_INTERP_HW=0)"
                     : "; inputs interpolated by the GPU unless a shader needs GCN's exact formula "
                       "(BB_INTERP_HW)");
+    fresh_flats_on = [] {
+        const char* env = std::getenv("LANTERN_FRESH_FLATS");
+        return !(env && env[0] == '0');
+    }();
+    memo_mode = BbEngine::Batch::Switch("LANTERN_PIPELINE_MEMO");
+    if (memo_mode == BbEngine::Batch::Compare) {
+        memo_step = BbEngine::Batch::Register("pipeline memo (stage A)", memo_mode);
+    }
+    if (memo_mode != BbEngine::Batch::Off) {
+        std::printf("Pipeline memo: %s (LANTERN_PIPELINE_MEMO), the registers' pipeline is still used\n",
+                    memo_mode == BbEngine::Batch::Compare ? "probed and compared" : "probed");
+    }
     CreateNativeCache();
     WarmUp();
+    StartDriverCacheSaver();
     std::scoped_lock lock{Registry().mutex};
     Registry().caches.push_back(this);
 }
@@ -571,9 +868,16 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
     return RefreshGraphicsKey(worker_sel) && !worker_sel.worker->failed;
 }
 
-const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& prepared) {
-    if (prepared.state.load(std::memory_order_acquire) != PreparedDraw::Ready ||
-        prepared.reg_checksum != liverpool->gfx_reg_checksum) {
+const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& prepared,
+                                                           BbEngine::PipelineMemo::Prepared& reason) {
+    namespace Memo = BbEngine::PipelineMemo;
+    const u32 state = prepared.state.load(std::memory_order_acquire);
+    if (state != PreparedDraw::Ready) {
+        reason = state == PreparedDraw::Pending ? Memo::Pending : Memo::Unavailable;
+        return nullptr;
+    }
+    if (prepared.reg_checksum != liverpool->gfx_reg_checksum) {
+        reason = Memo::Checksum;
         return nullptr;
     }
     // Same registers; the stage programs and their flattened user data (which also covers
@@ -584,30 +888,41 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         const auto& stage = prepared.stages[i];
         const auto* pgm = regs.ProgramForStage(static_cast<u32>(stage.hw_stage));
         if (!pgm || !pgm->Address<u32*>()) {
+            reason = Memo::Program;
             return nullptr;
         }
         const auto params = AmdGpu::GetParams(*pgm);
         if (params.hash != stage.hash) {
+            reason = Memo::Program;
             return nullptr;
         }
         auto& info = const_cast<Program*>(stage.program)->info;
         info.pgm_base = params.Base();
         info.user_data = params.user_data;
+        fresh_flats.Forget(&info);
         {
             BbSections::ScopeA tables_scope{BbSections::ATables};
             info.RefreshFlatBuf();
         }
+        fresh_flats.Note(&info, info.pgm_base, info.user_data.data(), info.user_data.size());
         if (info.pgm_base != stage.pgm_base || info.flattened_ud_buf.size() != stage.flat_size ||
             std::memcmp(info.flattened_ud_buf.data(), stage.flat,
                         stage.flat_size * sizeof(u32)) != 0) {
+            reason = Memo::Flat;
             return nullptr;
         }
     }
-    const auto it = graphics_pipelines.find(prepared.key);
-    return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+    const auto it = graphics_pipelines.find(prepared.key, prepared.key_hash);
+    if (it == graphics_pipelines.end()) {
+        reason = Memo::NoPipeline;
+        return nullptr;
+    }
+    reason = Memo::Used;
+    return it->second.get();
 }
 
 bool PipelineCache::RestoreGxPipeline(const GxPipeline& memo, bool from_record) {
+    fresh_flats.Reset();
     const auto& regs = liverpool->regs;
     if (regs.stage_enable.raw != AmdGpu::ShaderStageEnable::VgtStages::Vs) {
         return false;
@@ -648,15 +963,140 @@ void PipelineCache::NoteGxRecords() {
     std::fflush(stdout);
 }
 
+bool PipelineCache::MemoKey(const DrawIndirectParams& params, u64& key) {
+    const auto& regs = liverpool->regs;
+    auto& k = memo_key;
+    k.Clear();
+    u32 stages = 0;
+    if (regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs) {
+        stages = 2;
+    } else if (regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::EsGs) {
+        stages = 4;
+    } else {
+        return false;
+    }
+    k.Add(regs.stage_enable);
+    k.Add(regs.primitive_type);
+    k.Add(u64(params.vertex_sgpr_offset) << 32 | params.instance_sgpr_offset);
+    const auto& db = regs.depth_buffer;
+    k.Add(u32(db.DepthValid()) | u32(db.StencilValid()) << 1);
+    k.Add(db.z_info);
+    k.Add(db.stencil_info);
+    k.Add(regs.depth_render_override);
+    k.Add(regs.depth_shader_control);
+    k.Add(regs.clipper_control);
+    k.Add(regs.polygon_control);
+    k.Add(regs.ls_hs_config);
+    k.Add(regs.tess_config);
+    k.Add(regs.color_control);
+    k.Add(regs.color_shader_mask);
+    k.Add(regs.color_target_mask);
+    k.Add(regs.color_export_format);
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        const auto& col_buf = regs.color_buffers[cb];
+        k.Add(u32(bool(col_buf)));
+        k.Add(col_buf.info);
+        k.Add(col_buf.attrib);
+        k.Add(regs.blend_control[cb]);
+    }
+    k.Add(regs.vs_output_control);
+    k.Add(regs.vgt_gs_mode);
+    k.Add(regs.vgt_strmout_config);
+    k.Add(regs.vgt_gs_instance_cnt);
+    k.Add(regs.vgt_gs_out_prim_type);
+    k.Add(regs.vgt_esgs_ring_itemsize);
+    k.Add(regs.vgt_gs_vert_itemsize[0]);
+    k.Add(u32(regs.vgt_gs_max_vert_out));
+    k.Add(regs.ps_input_ena);
+    k.Add(regs.ps_input_addr);
+    k.Add(u32(regs.num_interp));
+    k.Add(regs.barycentric_control);
+    k.Add(regs.aa_config);
+    k.Add(regs.z_export_format);
+    k.Add(regs.vgt_instance_step_rate_0);
+    k.Add(regs.vgt_instance_step_rate_1);
+    for (u32 i = 0; i < regs.num_interp && i < regs.ps_inputs.size(); ++i) {
+        k.Add(regs.ps_inputs[i]);
+    }
+    for (u32 stage = 0; stage < stages; ++stage) {
+        const auto* pgm = regs.ProgramForStage(stage);
+        if (!pgm || !pgm->Address<u32*>()) {
+            k.Add(u64(stage) << 56);
+            continue;
+        }
+        k.Add(pgm->settings);
+        k.Add(AmdGpu::GetParams(*pgm).hash);
+    }
+    if (k.Overflow()) {
+        return false;
+    }
+    key = k.Hash();
+    return true;
+}
+
+void PipelineCache::NoteMemo() {
+    const bool stats = Lantern::Switches::Get().frame_stats;
+    if (!stats || (memo_draws & 1023) != 0) {
+        return;
+    }
+    static auto window = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    char line[512];
+    BbEngine::PipelineMemo::FormatStats(memo.TakeStats(), memo_mode == BbEngine::Batch::Compare,
+                                        memo.Size(), line, sizeof(line));
+    std::printf("%s\n", line);
+}
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared,
                                                            u64 gx_record) {
+    fresh_flats.Reset();
+    if (memo_mode == BbEngine::Batch::Off) {
+        return SelectGraphicsPipeline(params, prepared, gx_record);
+    }
+    using Clock = std::chrono::steady_clock;
+    const bool timed = (++memo_draws & 63) == 0;
+    const auto start = timed ? Clock::now() : Clock::time_point{};
+    u64 key = 0;
+    const bool keyable = MemoKey(params, key);
+    const void* remembered = memo.Probe(keyable, key);
+    const auto keyed = timed ? Clock::now() : Clock::time_point{};
+    const GraphicsPipeline* pipeline = SelectGraphicsPipeline(params, prepared, gx_record);
+    if (timed) {
+        const auto end = Clock::now();
+        memo.Time(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(keyed - start).count()),
+                  u64(std::chrono::duration_cast<std::chrono::nanoseconds>(end - keyed).count()));
+    }
+    if (pipeline && remembered && memo_mode == BbEngine::Batch::Compare) {
+        const bool same = memo.Compare(remembered, pipeline);
+        if (memo_step) {
+            BbEngine::Batch::Note(memo_step, same);
+        }
+    }
+    if (pipeline && keyable) {
+        memo.Remember(key, pipeline);
+    }
+    NoteMemo();
+    return pipeline;
+}
+
+const GraphicsPipeline* PipelineCache::SelectGraphicsPipeline(const DrawIndirectParams params,
+                                                              const PreparedDraw* prepared,
+                                                              u64 gx_record) {
+    namespace Memo = BbEngine::PipelineMemo;
     used_prepared = nullptr;
     gx_unfilled = 0;
+    prepared_reason = Memo::Rejected;
     const bool gx_use = BbEngine::GxRecords::Used() && gx_record && gx_pipelines.contains(gx_record);
-    if (prepared && !gx_use) {
+    if (prepared && gx_use) {
+        prepared_reason = Memo::Records;
+    } else if (prepared) {
         BbSections::ScopeA prepared_scope{BbSections::APrepared};
-        if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
+        if (const auto* pipeline = TryPreparedPipeline(*prepared, prepared_reason)) {
             used_prepared = prepared;
             return pipeline;
         }
@@ -715,6 +1155,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 
         RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
+        NoteDriverCachePipeline();
 
         if (EmulatorSettings.IsShaderCollect()) {
             for (auto stage = 0; stage < MaxShaderStages; ++stage) {
@@ -730,6 +1171,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
+    fresh_flats.Reset();
     if (!RefreshComputeKey()) {
         return nullptr;
     }
@@ -746,6 +1188,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
                                                        sel.modules[0], sdata, false);
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
+        NoteDriverCachePipeline();
 
         if (EmulatorSettings.IsShaderCollect()) {
             auto& m = sel.modules[0];
@@ -1123,14 +1566,14 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
-
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
         DebugState.CollectShader(name, info.sw_stage, module, spv, code,
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
+
+    RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     return module;
 }
 
@@ -1215,7 +1658,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
-    info.RefreshFlatBuf();
+    if (!fresh_flats_on ||
+        !fresh_flats.Fresh(&info, info.pgm_base, info.user_data.data(), info.user_data.size())) {
+        fresh_flats.Forget(&info);
+        info.RefreshFlatBuf();
+        fresh_flats.Note(&info, info.pgm_base, info.user_data.data(), info.user_data.size());
+    }
     if (Shader::Native::CaptureEnabled()) Shader::Native::Capture(info, runtime_info, params.code, profile);
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
@@ -1234,12 +1682,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         if (!std::atomic_ref<bool>(it->state_stored).load(std::memory_order_relaxed) && Shader::Native::StatesEnabled()) { Shader::Native::StoreState(info, runtime_info, params.code, program->last_used); std::atomic_ref<bool>(it->state_stored).store(true, std::memory_order_relaxed); }
     }
     if (it == program->modules.end()) {
+        perm_idx = SavedPermutationIndex(program->modules, params.hash, spec);
+        perm_hash = HashCombine(params.hash, perm_idx);
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         std::unique_lock lk{programs_mutex};
-        program->AddPermut(module, std::move(spec));
+        program->InsertPermut(module, std::move(spec), perm_idx);
     } else {
         info.AddBindings(binding);
         module = it->module;

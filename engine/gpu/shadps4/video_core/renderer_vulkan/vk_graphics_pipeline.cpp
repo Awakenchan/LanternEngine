@@ -129,6 +129,10 @@ u32 PipelineCompileThreads() {
     return PipelineCompiler::Get().threads;
 }
 
+std::uint64_t PipelineJobsUnfinished() {
+    return PipelineCompiler::Get().queue.Unfinished();
+}
+
 static constexpr std::array LogicalStageToStageBit = {
     vk::ShaderStageFlagBits::eFragment,
     vk::ShaderStageFlagBits::eTessellationControl,

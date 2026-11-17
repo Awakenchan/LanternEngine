@@ -2,15 +2,39 @@
 #include "room_link.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 
 #include <nlohmann/json.hpp>
-#include <openssl/rand.h>
 
 namespace BbRoom {
 
-constexpr int kLossyTarget = 0x80;
-constexpr std::size_t kMostGameBacklog = 128 * 1024;
+constexpr std::size_t kMostGameBacklog = 32 * 1024;
+constexpr std::size_t kMemberTokenLen = 16;
+
+namespace {
+
+void TellSealFailedOnce() {
+    static std::atomic<bool> told{false};
+    if (told.exchange(true, std::memory_order_relaxed)) return;
+    static_cast<void>(
+        std::printf("Seamless: a frame could not be sealed (no random nonce or cipher error), so it was not sent\n"));
+    static_cast<void>(std::fflush(stdout));
+}
+
+std::vector<std::uint8_t> RoutedFrame(const Key& key, int slot, int route, const std::uint8_t* data, std::size_t size) {
+    auto sealed = Seal(key, static_cast<std::uint8_t>(slot), data, size);
+    if (sealed.empty()) {
+        TellSealFailedOnce();
+        return sealed;
+    }
+    sealed.insert(sealed.begin(), static_cast<std::uint8_t>(route));
+    return sealed;
+}
+
+} // namespace
 
 std::string RoomUrl(const std::string& server, const std::string& room_id, const std::string& path) {
     std::string base = server;
@@ -31,10 +55,20 @@ Link::~Link() { Stop(); }
 
 bool Link::Start(const std::string& server, const std::string& name, const std::string& password, const std::string& path) {
     Stop();
+    SetError({});
     if (server.empty() || name.empty()) return false;
-    secret_ = Derive(name, password);
-    std::uint8_t token[16];
-    RAND_bytes(token, sizeof token);
+    auto secret = Derive(name, password);
+    if (!secret) {
+        SetError("the room key could not be derived");
+        return false;
+    }
+    secret_ = std::move(*secret);
+    WipeKey(secret->key);
+    std::array<std::uint8_t, kMemberTokenLen> token{};
+    if (!RandomBytes(token)) {
+        SetError("no random member token");
+        return false;
+    }
     static const char digits[] = "0123456789abcdef";
     std::string member;
     for (const std::uint8_t byte : token) {
@@ -43,9 +77,14 @@ bool Link::Start(const std::string& server, const std::string& name, const std::
     }
     url_ = RoomUrl(server, secret_.room_id, path) + "/" + member;
     if (visitor_ && path == "room") url_ += "?visitor=1";
+    if (!WebSocket::SandboxAllows(url_, "room link")) {
+        SetError("refused by the test sandbox");
+        return false;
+    }
     name_ = name;
     password_ = password;
     stop_ = false;
+    welcomed_once_ = false;
     thread_ = std::thread([this] { Run(); });
     return true;
 }
@@ -71,72 +110,68 @@ void Link::Stop() {
     visitors_.clear();
 }
 
-bool Link::Send(int target, const std::uint8_t* data, std::size_t size) {
+std::shared_ptr<WebSocket> Link::CurrentSocket() {
+    std::lock_guard lock(socket_mutex_);
+    return socket_;
+}
+
+bool Link::SendFrame(int target, int most_target, bool lossy_route, Delivery delivery, std::size_t most_backlog,
+                     const std::uint8_t* data, std::size_t size) {
     const int slot = slot_.load();
-    if (!connected_ || !slot || target == slot || target < 0 || target > 255) return false;
-    auto sealed = Seal(secret_.key, static_cast<std::uint8_t>(slot), data, size);
-    if (sealed.empty()) return false;
-    sealed.insert(sealed.begin(), static_cast<std::uint8_t>(target));
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
+    if (!connected_ || !slot) return Counted(NetCounts::Kind::Offline, size);
+    if (target == slot || target < 0 || target > most_target) return Counted(NetCounts::Kind::SendFailed, size);
+    const auto sealed = RoutedFrame(secret_.key, slot, RouteByte(target, lossy_route), data, size);
+    if (sealed.empty()) return Counted(NetCounts::Kind::SendFailed, size);
+    const auto socket = CurrentSocket();
+    if (!socket) return Counted(NetCounts::Kind::Offline, size);
+    bool sent = false;
+    switch (delivery) {
+    case Delivery::Reliable:
+        sent = socket->Send(sealed.data(), sealed.size(), true);
+        break;
+    case Delivery::Lossy:
+        sent = socket->SendLossy(sealed.data(), sealed.size(), most_backlog);
+        break;
+    case Delivery::Paced:
+        sent = socket->SendPaced(sealed.data(), sealed.size());
+        break;
     }
-    return socket && socket->Send(sealed.data(), sealed.size(), true);
+    if (auto* counters = counters_.load(std::memory_order_relaxed)) counters->Backlog(socket->Backlog());
+    if (sent) return true;
+    if (!socket->Open()) return Counted(NetCounts::Kind::Offline, size);
+    const bool full = delivery == Delivery::Lossy && socket->Backlog() >= most_backlog;
+    return Counted(full ? NetCounts::Kind::BacklogRefused : NetCounts::Kind::SendFailed, size);
+}
+
+bool Link::Counted(NetCounts::Kind kind, std::size_t bytes) {
+    if (auto* counters = counters_.load(std::memory_order_relaxed)) counters->Add(kind, bytes);
+    return false;
+}
+
+bool Link::SendText(const std::string& text) {
+    const auto socket = CurrentSocket();
+    return socket && connected_ && socket->Send(text.data(), text.size(), false);
+}
+
+bool Link::Send(int target, const std::uint8_t* data, std::size_t size) {
+    return SendFrame(target, kMostRoute, false, Delivery::Reliable, 0, data, size);
 }
 
 bool Link::SendLossy(int target, const std::uint8_t* data, std::size_t size, std::size_t most_backlog) {
-    const int slot = slot_.load();
-    if (!connected_ || !slot || target == slot || target < 0 || target > 255) return false;
-    auto sealed = Seal(secret_.key, static_cast<std::uint8_t>(slot), data, size);
-    if (sealed.empty()) return false;
-    sealed.insert(sealed.begin(), static_cast<std::uint8_t>(target));
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
-    }
-    return socket && socket->SendLossy(sealed.data(), sealed.size(), most_backlog);
+    return SendFrame(target, kMostRoute, false, Delivery::Lossy, most_backlog, data, size);
 }
 
 bool Link::SendGame(int target, const std::uint8_t* data, std::size_t size) {
-    const int slot = slot_.load();
-    if (!connected_ || !slot || target == slot || target < 0 || target > 127) return false;
-    auto sealed = Seal(secret_.key, static_cast<std::uint8_t>(slot), data, size);
-    if (sealed.empty()) return false;
-    const int flagged = lossy_targets_.load() ? target | kLossyTarget : target;
-    sealed.insert(sealed.begin(), static_cast<std::uint8_t>(flagged));
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
-    }
-    return socket && socket->SendLossy(sealed.data(), sealed.size(), kMostGameBacklog);
+    return SendFrame(target, kMostGameTarget, lossy_targets_.load(), Delivery::Lossy, kMostGameBacklog, data, size);
 }
 
 bool Link::SendPaced(int target, const std::uint8_t* data, std::size_t size) {
-    const int slot = slot_.load();
-    if (!connected_ || !slot || target == slot || target < 0 || target > 127) return false;
-    auto sealed = Seal(secret_.key, static_cast<std::uint8_t>(slot), data, size);
-    if (sealed.empty()) return false;
-    sealed.insert(sealed.begin(), static_cast<std::uint8_t>(target));
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
-    }
-    return socket && socket->SendPaced(sealed.data(), sealed.size());
+    return SendFrame(target, kMostGameTarget, false, Delivery::Paced, 0, data, size);
 }
 
 void Link::SetHost(bool host) {
     want_host_ = host;
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
-    }
-    const std::string text = host ? R"({"t":"host"})" : R"({"t":"unhost"})";
-    if (socket && connected_) socket->Send(text.data(), text.size(), false);
+    SendText(host ? R"({"t":"host"})" : R"({"t":"unhost"})");
 }
 
 void Link::SendOpen(WebSocket& socket) {
@@ -149,23 +184,11 @@ void Link::SendOpen(WebSocket& socket) {
 void Link::SetOpen(bool open) {
     if (want_open_.exchange(open) == open) return;
     if (!open) open_listed_ = false;
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
-    }
+    const auto socket = CurrentSocket();
     if (socket && connected_) SendOpen(*socket);
 }
 
-void Link::SendAway(int slot) {
-    std::shared_ptr<WebSocket> socket;
-    {
-        std::lock_guard lock(socket_mutex_);
-        socket = socket_;
-    }
-    const std::string text = nlohmann::json{{"t", "away"}, {"slot", slot}}.dump();
-    if (socket && connected_) socket->Send(text.data(), text.size(), false);
-}
+void Link::SendAway(int slot) { SendText(nlohmann::json{{"t", "away"}, {"slot", slot}}.dump()); }
 
 bool Link::IsVisitor(int slot) const {
     std::lock_guard lock(mutex_);
@@ -183,6 +206,16 @@ bool Link::WaitEvent(int timeout_ms) {
     std::unique_lock lock(mutex_);
     return cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !events_.empty() || stop_; }) &&
            !events_.empty();
+}
+
+std::string Link::LastError() const {
+    std::lock_guard lock(mutex_);
+    return last_error_;
+}
+
+void Link::SetError(std::string error) {
+    std::lock_guard lock(mutex_);
+    last_error_ = std::move(error);
 }
 
 std::vector<int> Link::Members() const {
@@ -223,7 +256,8 @@ bool Link::Session() {
     std::string error;
     const bool opened = socket->Connect(url_, 10, error);
     if (!opened) {
-        last_error_ = error;
+        Counted(NetCounts::Kind::OpenFailed, 0);
+        SetError(error);
         if (socket->VersionRefused() && !stop_) Push({Event::Kind::Refused, 0, {error.begin(), error.end()}});
         return false;
     }
@@ -241,6 +275,8 @@ bool Link::Session() {
             Handle(message);
             if (!was && connected_) {
                 welcomed = true;
+                if (welcomed_once_) Counted(NetCounts::Kind::Reconnect, 0);
+                welcomed_once_ = true;
                 if (lossy_targets_.load()) socket->WatchClosely();
                 if (want_host_) {
                     const std::string text = R"({"t":"host"})";
@@ -250,10 +286,16 @@ bool Link::Session() {
             }
             return;
         }
-        if (message.size() < 1 + kSealOverhead) return;
+        if (message.size() < 1 + kSealOverhead) {
+            Counted(NetCounts::Kind::Undecryptable, message.size());
+            return;
+        }
         const auto sender = static_cast<std::uint8_t>(message[0]);
         auto plain = Open(secret_.key, sender, reinterpret_cast<const std::uint8_t*>(message.data()) + 1, message.size() - 1);
-        if (!plain) return;
+        if (!plain) {
+            Counted(NetCounts::Kind::Undecryptable, message.size());
+            return;
+        }
         Push({Event::Kind::Data, sender, std::move(*plain)});
     });
     {

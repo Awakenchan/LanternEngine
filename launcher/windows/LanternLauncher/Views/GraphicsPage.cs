@@ -9,6 +9,7 @@ namespace BloodborneLauncher.Views
     {
         private readonly TextBlock _upscalerHint, _dlssHint, _frameGenHint;
         private TextBlock? _motionBlurHint;
+        private readonly SettingRow _glowSizeCard;
         private readonly SettingRow _presetCard, _renderScaleCard, _sharpenCard, _sharpnessCard, _mipBiasCard;
         private readonly SettingRow _frameGenFramesCard, _frameGenDynamicCard, _reflexCard, _frameGenCapCard;
 
@@ -61,7 +62,7 @@ namespace BloodborneLauncher.Views
             Group(L.T("Frame generation"));
             IniCombo(SymbolRegular.FastForward24, L.T("Frame generation"),
                 L.T("Extra frames between the game's own: smoother motion, a little more input lag. Needs an upscaler. Off by default"),
-                windows ? Choices.FrameGeneration : Choices.FrameGeneration.Where(c => c.Value != "dlss").ToArray(), "frame_gen", changed: UpdateUpscaler);
+                windows ? Choices.FrameGeneration : Choices.FrameGeneration.Where(c => c.Value is not ("dlss" or "fsr")).ToArray(), "frame_gen", changed: UpdateUpscaler);
             _frameGenHint = (TextBlock)((SettingRow)Body.Children[^1]).Tag!;
             IniCombo(SymbolRegular.Layer24, L.T("DLSS generated frames"),
                 L.T("Frames shown per frame the game renders. More than 2x needs an RTX 50 GPU; the engine keeps to what the GPU allows"),
@@ -81,12 +82,12 @@ namespace BloodborneLauncher.Views
                 L.T("Lower input lag on AMD drivers that offer it; does nothing on other GPUs. Turns itself off until the next start if the driver holds the game too long"),
                 "anti_lag");
             IniToggle(SymbolRegular.Timer24, L.T("Frame generation: even pacing (Uncapped)"),
-                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. The fixed rates (30 to 144) are left as they are"), "frame_gen_even_pacing");
+                L.T("With the Uncapped frame rate: the game at the refresh rate divided by the frames shown per game frame, so every generated frame reaches the screen. A fixed rate (30 to 144) always gets this cap when it is 20 FPS or more, so this switch only changes Uncapped"), "frame_gen_even_pacing");
             _frameGenCapCard = (SettingRow)Body.Children[^1];
 
             Group(L.T("Picture"));
             var picture = new StackPanel();
-            IniToggle(SymbolRegular.Color24, L.T("Picture tuning"), L.T("Turns the settings below on, live. Also in the game's System menu (PC Graphics, PC Effects, PC Colour) and the Insert menu"), "graphics_controls");
+            IniToggle(SymbolRegular.Color24, L.T("Picture tuning"), L.T("Turns the settings below on. Changes here apply when the game next starts; in a running game use the game's System menu (PC Graphics, PC Effects, PC Colour) or the Insert menu"), "graphics_controls");
             IniToggle(SymbolRegular.CircleHalfFill24, L.T("Vignette"), null, "graphics_vignette", picture);
             IniSlider(SymbolRegular.DarkTheme24, L.T("Ambient occlusion strength"), 0, 3, "graphics_ao_strength", picture);
             IniSlider(SymbolRegular.WeatherSunny24, L.T("Shadow distance"), 0.5, 4, "graphics_shadow_scale", picture);
@@ -95,7 +96,7 @@ namespace BloodborneLauncher.Views
             IniSlider(SymbolRegular.BrightnessHigh24, L.T("Brightness"), 0, 3, "graphics_brightness", picture);
             IniSlider(SymbolRegular.DarkTheme24, L.T("Contrast"), 0.8, 1.2, "graphics_contrast", picture, step: 0.01);
             IniSlider(SymbolRegular.Color24, L.T("Hue"), -180, 180, "graphics_hue", picture, step: 1, fallback: 0);
-            IniSlider(SymbolRegular.WeatherFog24, L.T("Fog"), 0, 3, "graphics_fog", picture);
+            IniSlider(SymbolRegular.WeatherFog24, L.T("Fog"), 0, 3, "graphics_fog", picture, snapToOne: true);
             Body.Children.Add(picture);
 
             Group(L.T("Menus"));
@@ -149,6 +150,13 @@ namespace BloodborneLauncher.Views
             IniSlider(SymbolRegular.Lightbulb24, L.T("Reflection strength"), 0, 3, "graphics_ssr_intensity");
             IniSlider(SymbolRegular.Lightbulb24, L.T("Volumetric sunlight strength"), 0, 3, "graphics_volumetric_intensity");
             IniSlider(SymbolRegular.Lightbulb24, L.T("Lamp fog strength"), 0, 3, "graphics_point_fog_intensity");
+            ComboRow(SymbolRegular.Lightbulb24, L.T("Lamp fog falloff"), L.T("Classic is the original lamp fog. Inverse-square gives a bright, tight glow at each flame that falls off fast, and costs more GPU time than classic. Needs Fog around lamps."),
+                Choices.PointFogFalloff, () => Ini.Get("graphics_point_fog_falloff", "0"), v => Ini.Set("graphics_point_fog_falloff", v),
+                changed: UpdateGlowSize);
+            SliderRow(SymbolRegular.Lightbulb24, L.T("Lamp fog glow size"), L.T("Used by the inverse-square falloff"), 0.03, 0.2, 0.01,
+                () => ParseDouble(Ini.Get("graphics_point_fog_glow_size", Fmt(0.08)), 0.08), v => Ini.Set("graphics_point_fog_glow_size", Fmt(v)));
+            _glowSizeCard = (SettingRow)Body.Children[^1];
+            UpdateGlowSize();
 
             Ws.PortChanged += UpdateUpscaler;
         }
@@ -230,8 +238,8 @@ namespace BloodborneLauncher.Views
         }
 
         private void IniSlider(SymbolRegular icon, string title, double min, double max, string key, Panel? into = null,
-            double step = 0.05, double fallback = 1.0) =>
-            SliderRow(icon, title, null, min, max, step, () => ParseDouble(Ini.Get(key, Fmt(fallback)), fallback), v => Ini.Set(key, Fmt(v)), into: into);
+            double step = 0.05, double fallback = 1.0, bool snapToOne = false) =>
+            SliderRow(icon, title, null, min, max, step, () => ParseDouble(Ini.Get(key, Fmt(fallback)), fallback), v => Ini.Set(key, Fmt(snapToOne ? Looks.SnapToOne(v) : v)), into: into);
 
         private static bool DlssFrameGenGpu() =>
             Hardware.Detect() is { Rtx: true } hardware &&
@@ -249,6 +257,8 @@ namespace BloodborneLauncher.Views
         };
 
         public override void OnShown() => UpdateUpscaler();
+
+        private void UpdateGlowSize() => _glowSizeCard.IsEnabled = Ini.Get("graphics_point_fog_falloff", "0") == "1";
 
         private static bool DlssFound() => Paths.DlssRuntime != null;
 
@@ -295,13 +305,16 @@ namespace BloodborneLauncher.Views
             _frameGenFramesCard.IsEnabled = frameGen == "dlss";
             _frameGenDynamicCard.IsEnabled = frameGen == "dlss";
             _reflexCard.IsEnabled = frameGen == "dlss";
-            _frameGenCapCard.IsEnabled = frameGen != "off";
+            _frameGenCapCard.IsEnabled = frameGen != "off" && frameGen != "fsr3";
             SetHint(_frameGenHint, frameGen switch
             {
                 "dlss" when !StreamlineFound() => L.T("NVIDIA Streamline (sl.interposer.dll, sl.dlss_g.dll) is missing from the engine folder: the game uses no frame generation"),
                 "dlss" when !DlssFrameGenGpu() => L.T("Needs an NVIDIA RTX 40 or 50 GPU with Hardware-accelerated GPU scheduling on; other GPUs: choose FSR 3.1"),
                 "dlss" => L.T("RTX 40: 2x; RTX 50: up to 6x. Loaded when the game starts; in game you can switch it off and on (Insert or L3 + R3)"),
                 "fsr3" => L.T("Any GPU. Not in menus, movies or with HDR output"),
+                "fsr" when !FsrFrameGenFound() => L.T("amd_fidelityfx_framegeneration_vk.dll is missing from the engine's fsr_sdk folder: the game uses the built-in FSR 3.1 frame generation"),
+                "fsr" when Amd() => L.T("Radeon RX 9000 on Windows 11: FSR 4 (ML) frame generation; older Radeons: FSR 3.1. Applies when the game starts (while it runs, after a restart); not in menus, movies, loading screens or with HDR output"),
+                "fsr" => L.T("FSR 3.1 frame generation from the AMD FSR SDK on this GPU (FSR 4 frame generation needs a Radeon RX 9000). Applies when the game starts (while it runs, after a restart); not in menus, movies, loading screens or with HDR output"),
                 _ => null,
             });
             if (frameGen != "off" && value == "off")
@@ -328,6 +341,10 @@ namespace BloodborneLauncher.Views
         private static bool FsrSdkFound() =>
             File.Exists(Path.Combine(Paths.EngineDir, "fsr_sdk", "amd_fidelityfx_loader_vk.dll")) &&
             File.Exists(Path.Combine(Paths.EngineDir, "fsr_sdk", "amd_fidelityfx_upscaler_vk.dll"));
+
+        private static bool FsrFrameGenFound() =>
+            File.Exists(Path.Combine(Paths.EngineDir, "fsr_sdk", "amd_fidelityfx_loader_vk.dll")) &&
+            File.Exists(Path.Combine(Paths.EngineDir, "fsr_sdk", "amd_fidelityfx_framegeneration_vk.dll"));
 
         private static bool Amd() => Hardware.Detect().Vendor == "AMD";
 

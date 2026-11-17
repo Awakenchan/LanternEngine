@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gpu/shim/engine/party_death.h"
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 
 namespace {
 int failures = 0;
+bool quiet = false;
 void Check(bool ok, const char* what) {
-    if (!ok) { std::printf("FAIL: %s\n", what); ++failures; }
+    if (ok) return;
+    if (!quiet) std::printf("FAIL: %s\n", what);
+    ++failures;
 }
 
 struct FakeClock {
@@ -15,7 +20,35 @@ struct FakeClock {
 };
 }
 
-int main() {
+float SpectateYaw(bool fixed, float stick, float rate, float dt, float seconds) {
+    float yaw = 0.0f;
+    const int frames = static_cast<int>(std::lround(seconds / dt));
+    for (int i = 0; i < frames; ++i) {
+        const std::uint32_t flag = fixed ? BbEngine::PartyDeath::SpectateCameraInput(1, true) : 1u;
+        yaw += ((flag & 0xffu) ? stick : 0.0f) * rate * dt;
+    }
+    return yaw;
+}
+
+void TestSpectateCamera() {
+    using BbEngine::PartyDeath::SpectateCameraInput;
+    Check(SpectateCameraInput(1, true) == 0, "watching another hunter turns the camera's stick input off");
+    Check(SpectateCameraInput(0, true) == 0, "input already off stays off while watching");
+    Check(SpectateCameraInput(1, false) == 1, "the own camera keeps the game's input flag");
+    Check(SpectateCameraInput(0, false) == 0, "the own camera keeps a menu's input off");
+    Check(SpectateCameraInput(0x101, false) == 0x101, "the own camera leaves the whole slot as the game wrote it");
+
+    constexpr float kStick = 0.5f, kRate = 2.0f, kSeconds = 10.0f;
+    const float drift = kStick * kRate * kSeconds;
+    for (const float dt : {1.0f / 60.0f, 1.0f / 30.0f}) {
+        Check(std::fabs(SpectateYaw(false, kStick, kRate, dt, kSeconds) - drift) < 1e-3f,
+              "before the fix a remote stick spins the view at the same speed at any frame rate");
+        Check(SpectateYaw(true, kStick, kRate, dt, kSeconds) == 0.0f, "after the fix the view stays put");
+    }
+}
+
+int RunSuite() {
+    failures = 0;
     using namespace BbEngine::PartyDeath;
     using std::chrono::milliseconds;
     using std::chrono::seconds;
@@ -103,7 +136,35 @@ int main() {
         Check(view.Update({{1, "a"}}, false) == 1, "the followed hunter leaving wraps to who is left");
         Check(view.Update({}, false) == -1 && view.Name().empty(), "the last one falling clears it");
     }
-    if (failures) return 1;
+    TestSpectateCamera();
+    return failures;
+}
+
+int main() {
+#ifdef LANTERN_PARTY_DEATH_MUTANTS
+    int survivors = 0;
+    quiet = true;
+    for (int m = 0; m <= BbEngine::PartyDeath::kMutants; ++m) {
+        BbEngine::PartyDeath::g_mutant = m;
+        const int found = RunSuite();
+        if (m == 0) {
+            if (found) {
+                std::printf("party death mutants: the unmutated run failed %d checks\n", found);
+                return 1;
+            }
+        } else if (!found) {
+            std::printf("party death mutants: mutant %d survived\n", m);
+            ++survivors;
+        } else {
+            std::printf("party death mutants: mutant %d caught by %d checks\n", m, found);
+        }
+    }
+    if (survivors) return 1;
+    std::printf("party death mutants: every mutant caught\n");
+    return 0;
+#else
+    if (RunSuite()) return 1;
     std::printf("party death: all passed\n");
     return 0;
+#endif
 }

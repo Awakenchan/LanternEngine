@@ -17,20 +17,20 @@ using namespace BbRoom;
 namespace {
 
 void TestDerive() {
-    const auto a = Derive("hunters", "blood", 1000);
-    const auto b = Derive("hunters", "blood", 1000);
-    const auto c = Derive("hunters", "bloods", 1000);
-    const auto d = Derive("hunter", "sblood", 1000);
+    const auto a = *Derive("hunters", "blood", 1000);
+    const auto b = *Derive("hunters", "blood", 1000);
+    const auto c = *Derive("hunters", "bloods", 1000);
+    const auto d = *Derive("hunter", "sblood", 1000);
     assert(a.room_id.size() == 64);
     assert(a.room_id == b.room_id && a.key == b.key);
     assert(a.room_id != c.room_id && a.key != c.key);
     assert(a.room_id != d.room_id);
     for (const char ch : a.room_id) assert((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'));
-    assert(Derive("hunters", "blood").room_id == "4344e16951b4fdc22c6d41ddc47bd7e6dd67aa9fe320abe75e253f081bd62f56");
+    assert(Derive("hunters", "blood")->room_id == "4344e16951b4fdc22c6d41ddc47bd7e6dd67aa9fe320abe75e253f081bd62f56");
 }
 
 void TestSeal() {
-    const auto secret = Derive("room", "pass", 1000);
+    const auto secret = *Derive("room", "pass", 1000);
     const std::vector<std::uint8_t> payload{1, 2, 3, 4, 5};
     const auto sealed = Seal(secret.key, 2, payload.data(), payload.size());
     assert(sealed.size() == payload.size() + kSealOverhead);
@@ -40,7 +40,7 @@ void TestSeal() {
     auto tampered = sealed;
     tampered[kNonceLen + 2] ^= 1;
     assert(!Open(secret.key, 2, tampered.data(), tampered.size()));
-    const auto other = Derive("room", "other", 1000);
+    const auto other = *Derive("room", "other", 1000);
     assert(!Open(other.key, 2, sealed.data(), sealed.size()));
     const auto empty = Seal(secret.key, 1, nullptr, 0);
     const auto opened_empty = Open(secret.key, 1, empty.data(), empty.size());
@@ -238,5 +238,6 @@ int main() {
         std::printf("room live: %s\n", live ? "FAILED" : "ok");
         return live;
     }
+    std::printf("room live: SKIPPED: needs BB_ROOM_TEST_SERVER\n");
     return 0;
 }
