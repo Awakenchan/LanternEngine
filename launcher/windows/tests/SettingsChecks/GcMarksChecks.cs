@@ -47,9 +47,9 @@ static class GcMarksChecks
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
         {
-            var candidate = Path.Combine(dir.FullName, "launcher", "BloodborneLauncher", "Core", "GameEnvironment.cs");
+            var candidate = Path.Combine(dir.FullName, "launcher", "windows", "BloodborneLauncher", "Core", "GameEnvironment.cs");
             if (File.Exists(candidate)) return candidate;
         }
-        throw new InvalidOperationException("launcher/BloodborneLauncher/Core/GameEnvironment.cs not found above " + AppContext.BaseDirectory);
+        throw new InvalidOperationException("launcher/windows/BloodborneLauncher/Core/GameEnvironment.cs not found above " + AppContext.BaseDirectory);
     }
 }

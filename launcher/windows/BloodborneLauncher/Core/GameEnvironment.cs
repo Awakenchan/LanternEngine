@@ -121,6 +121,8 @@ namespace BloodborneLauncher.Core
                 ["BB_CONFIG"] = Paths.IniPath,
                 ["BB_GAME_DIR"] = GameDir(s),
                 ["BB_USER_DIR"] = UserDir(s),
+                ["BB_SAVE_BACKUPS"] = s.Bool("save_backups") ? "1" : "0",
+                ["BB_SAVE_BACKUP_DIR"] = SaveBackups.Folder(s),
                 ["BB_MODS_DIR"] = ModsDir(s),
                 ["BB_MODS_CONFIG"] = Path.Combine(Paths.DataDir, "mods.json"),
                 ["BB_MODS_ENABLED"] = s.Bool("mods_enabled") ? "1" : "0",

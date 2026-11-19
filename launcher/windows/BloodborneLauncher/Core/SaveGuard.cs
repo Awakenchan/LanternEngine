@@ -138,6 +138,8 @@ namespace BloodborneLauncher.Core
                     {
                         var source = SaveData(root, profile);
                         var folder = Path.Combine(place, PlayerProfiles.SafeName(profile));
+                        Directory.CreateDirectory(folder);
+                        using var vaultGuard = new FileStream(Path.Combine(folder, ".vault.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                         var print = SaveBackups.Fingerprint(source);
                         var copies = Copies(folder);
                         if (copies.FirstOrDefault() is { } newest && Read(Path.Combine(newest, FingerprintFile)) == print) continue;

@@ -7,10 +7,10 @@ static class SeamlessPlacementChecks
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
         {
-            var candidate = Path.Combine(dir.FullName, "launcher", "BloodborneLauncher", "Views", "OnlinePage.cs");
-            if (File.Exists(candidate)) return Path.Combine(dir.FullName, "launcher");
+            var candidate = Path.Combine(dir.FullName, "launcher", "windows", "BloodborneLauncher", "Views", "OnlinePage.cs");
+            if (File.Exists(candidate)) return Path.Combine(dir.FullName, "launcher", "windows");
         }
-        throw new InvalidOperationException("launcher/BloodborneLauncher/Views/OnlinePage.cs not found above " + AppContext.BaseDirectory);
+        throw new InvalidOperationException("launcher/windows/BloodborneLauncher/Views/OnlinePage.cs not found above " + AppContext.BaseDirectory);
     }
 
     private static string GroupBody(string source, string group)

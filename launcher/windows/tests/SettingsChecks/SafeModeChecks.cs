@@ -24,7 +24,7 @@ static class SafeModeChecks
     {
         for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
         {
-            var path = Path.Combine(dir.FullName, "launcher", "BloodborneLauncher", "Core", "GameEnvironment.cs");
+            var path = Path.Combine(dir.FullName, "launcher", "windows", "BloodborneLauncher", "Core", "GameEnvironment.cs");
             if (File.Exists(path)) return path;
         }
         throw new FileNotFoundException("GameEnvironment.cs");
