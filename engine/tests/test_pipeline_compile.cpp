@@ -26,13 +26,19 @@ void TestJobQueue() {
     queue.Push(&b, [&] { order.push_back('b'); });
     queue.Push(&c, [&] { order.push_back('c'); });
     assert(queue.Size() == 3);
+    assert(queue.Unfinished() == 3);
     auto job = queue.Take(&b);
     assert(job);
+    assert(queue.Unfinished() == 3);
     job();
+    assert(queue.Unfinished() == 2);
     assert(!queue.Take(&b));
     assert(queue.Size() == 2);
+    auto popped = queue.Pop();
+    assert(queue.Unfinished() == 2);
+    popped();
     queue.Pop()();
-    queue.Pop()();
+    assert(queue.Unfinished() == 0);
     assert((order == std::vector<char>{'b', 'a', 'c'}));
     assert(!queue.Take(&a) && queue.Size() == 0);
 
@@ -59,6 +65,7 @@ void TestJobQueue() {
     queue.Push(nullptr, [&] { stop.store(true); });
     worker.join();
     assert(queue.Size() == 0);
+    assert(queue.Unfinished() == 0);
     for (int i = 0; i < Jobs; ++i) {
         assert(runs[i].load() == 1);
     }

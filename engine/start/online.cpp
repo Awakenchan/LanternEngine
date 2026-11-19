@@ -12,11 +12,10 @@ const char* const kHuntersDream = "https://thehuntersdream.com";
 const char* const kPlayLogHosts[] = {"bb-playlog-prod.s3.amazonaws.com", "bb-playlog-test.s3.amazonaws.com"};
 constexpr int kGameApiPort = 18671;
 const char* const kShadnetHost = "srv.shadps4.net";
-constexpr int kShadnetPort = 31313;
 constexpr int kDefaultP2p = 3658;
 constexpr int kDefaultSignTimeout = 30;
 const char* const kThdEnv[] = {"BB_NET_BACKEND", "BB_THD_SERVER", "BB_THD_AUTH", "BB_THD_TOKEN", "BB_THD_ONLINE_ID",
-                               "BB_THD_RULESET"};
+                               "BB_THD_RULESET", "BB_THD_REFUSED"};
 const char* const kSeamlessServer = "https://185-244-28-175.sslip.io";
 const char* const kDirectPort = "38765";
 const char* const kRoomEnv[] = {"BB_ROOM_SERVER", "BB_ROOM_NAME", "BB_ROOM_PLAYER", "BB_ROOM_HOST", "BB_ROOM_HTTP_PORT", "BB_ROOM_LOCAL_PORT", "BB_ROOM_VISITOR"};
@@ -229,52 +228,15 @@ bool ConfigureOnline(const std::map<std::string, std::string>& settings, const f
         return ConfigureHuntersDream(settings, data);
     const bool paused = Env("BB_ONLINE_PAUSED", "0") == "1";
     if (paused && get("online_enabled") == "1")
-        Log("Online: paused in this version while we rework the connection together with the shadNet and The Hunter's "
-            "Dream teams; the game starts offline");
-    if (paused || get("online_enabled") != "1" || get("online_connected", "1") != "1") {
-        for (const char* key : kOnlineEnv) UnsetEnv(key);
-        for (const char* key : kThdEnv) UnsetEnv(key);
-        SetEnv("BB_ONLINE", "0");
-        return false;
-    }
+        Log("Online: paused in this version while we rework the connection together with The Hunter's Dream "
+            "team; the game starts offline");
+    else if (get("online_enabled") == "1" && get("online_connected", "1") == "1")
+        Log("Online: no The Hunter's Dream sign-in or seamless room is chosen on the launcher's Online page; the "
+            "game starts offline");
+    for (const char* key : kOnlineEnv) UnsetEnv(key);
     for (const char* key : kThdEnv) UnsetEnv(key);
-    std::string host = Trim(get("online_host"));
-    while (!host.empty() && (host.front() == '[' || host.front() == ']')) host.erase(0, 1);
-    while (!host.empty() && (host.back() == '[' || host.back() == ']')) host.pop_back();
-    if (host.empty()) host = kShadnetHost;
-    if (std::any_of(host.begin(), host.end(),
-                    [](char c) { return std::isspace(std::uint8_t(c)) || std::uint8_t(c) < 32 || std::strchr("/@?#:", c); }))
-        throw Error("Enter a shadNet server name without a scheme, path or port");
-    int port = kShadnetPort;
-    if (const std::string p = get("online_port"); !p.empty()) port = std::stoi(p);
-    if (port < 1 || port > 65535) throw Error("shadNet TCP port must be between 1 and 65535");
-    const std::string default_webapi = "http://" + host + ":31315";
-    const std::string typed_webapi = Trim(get("online_webapi"));
-    const std::string webapi = HttpBase(typed_webapi.empty() ? default_webapi : typed_webapi);
-    const std::string game_api = HttpBase(GameServer(get("online_game_api")));
-    const std::string webapi_path = Parse(webapi).path, game_path = Parse(game_api).path;
-    if ((!webapi_path.empty() && webapi_path != "/") || (!game_path.empty() && game_path != "/"))
-        throw Error("WebAPI and game API require a server origin without an extra path");
-    const std::string username = get("online_username");
-    if (username.empty() || username.size() > 16 ||
-        std::any_of(username.begin(), username.end(), [](char c) { return std::isspace(std::uint8_t(c)) || std::uint8_t(c) < 32; }))
-        throw Error("Enter the shadNet account name (up to 16 characters)");
-    if (Env("BB_SHADNET_PASSWORD", "").empty()) throw Error("Sign in with the account password in the launcher");
-    const std::string p2p = P2pPort(settings);
-    const Url api = Parse(game_api);
-    nlohmann::ordered_json overrides;
-    overrides[kGameStatusOrigin] = game_api;
-    for (const char* h : kPlayLogHosts) overrides[h] = api.scheme + "://" + api.host + ":" + std::to_string(kGameApiPort);
-    const fs::path destination = WriteOverrides(data, overrides);
-    SetEnv("BB_ONLINE", "1");
-    SetEnv("BB_SHADNET_SERVER", host + ":" + std::to_string(port));
-    SetEnv("BB_SHADNET_WEBAPI", webapi);
-    SetEnv("BB_SHADNET_NPID", username);
-    SetEnv("BB_UPNP", get("online_upnp") == "0" ? "0" : "1");
-    SetEnv("BB_P2P_PORT", p2p);
-    SetEnv("SHADPS4_HTTP_HOST_OVERRIDES_JSON", Utf8(destination));
-    SetSignTimeout(settings);
-    return true;
+    SetEnv("BB_ONLINE", "0");
+    return false;
 }
 
 } // namespace start

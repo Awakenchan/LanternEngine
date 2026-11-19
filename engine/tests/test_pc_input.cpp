@@ -14,6 +14,8 @@
 void host_log(const char*, ...) {}
 std::uint32_t menu_confirm_button() { return PadBits::kCross; }
 std::uint32_t menu_back_button() { return PadBits::kCircle; }
+bool g_in_menu = false;
+bool menu_pointer_in_menu() { return g_in_menu; }
 
 namespace {
 struct Keyboard {
@@ -77,6 +79,10 @@ void Buttons() {
     p = Pad({kBindFirearm});
     assert(p.buttons == PadBits::kL2 && p.l2 == 255);
     p = Pad({kBindConfirm, kBindBack});
+    assert(p.buttons == 0);
+    g_in_menu = true;
+    p = Pad({kBindConfirm, kBindBack});
+    g_in_menu = false;
     assert(p.buttons == (PadBits::kCross | PadBits::kCircle));
     p = Pad({kBindLookL, kBindLookD});
     assert(p.rx == kStickLow && p.ry == kStickHigh);
@@ -190,6 +196,120 @@ void Rebinding() {
     host_bindings_load_defaults();
 }
 
+std::uint64_t g_now = 1000;
+int g_failed = 0;
+
+void Check(bool ok, int line) {
+    if (ok) return;
+    std::fprintf(stderr, "pad actions: check at line %d failed\n", line);
+    ++g_failed;
+}
+#define CHECK(condition) Check(condition, __LINE__)
+
+struct Step {
+    PadState pad;
+    bool at_once;
+};
+
+Step Frame(std::uint8_t actions, bool menu = false, std::uint64_t ms = 20) {
+    g_now += ms;
+    Step s{};
+    s.pad.lx = kStickHigh;
+    s.pad.ly = kStickLow;
+    host_bindings_pad_actions(actions);
+    s.at_once = host_bindings_dodge(g_now, menu, s.pad);
+    return s;
+}
+
+bool Circle(const Step& s) { return (s.pad.buttons & PadBits::kCircle) != 0; }
+
+void Settle() {
+    for (int i = 0; i < 12; ++i) Frame(0, i < 2);
+}
+
+int PadActions() {
+    g_failed = 0;
+    host_bindings_load_defaults();
+    Settle();
+
+    Step s = Frame(4);
+    CHECK(Circle(s) && s.at_once);
+    s = Frame(0, false, 100);
+    CHECK(!Circle(s) && s.at_once);
+    s = Frame(0, false, 100);
+    CHECK(!Circle(s) && !s.at_once);
+    Settle();
+
+    s = Frame(1);
+    CHECK(Circle(s) && !s.at_once && s.pad.lx == kStickHigh && s.pad.ly == kStickLow);
+    s = Frame(1);
+    CHECK(Circle(s));
+    s = Frame(1);
+    CHECK(!Circle(s));
+    s = Frame(1);
+    CHECK(!Circle(s));
+    s = Frame(0);
+    s = Frame(1);
+    CHECK(Circle(s));
+    Settle();
+
+    s = Frame(2);
+    CHECK(Circle(s) && s.pad.lx == kStickRest && s.pad.ly == kStickRest);
+    s = Frame(0);
+    CHECK(Circle(s) && s.pad.lx == kStickRest);
+    s = Frame(0);
+    CHECK(!Circle(s) && s.pad.lx == kStickRest);
+    s = Frame(0);
+    s = Frame(0);
+    CHECK(!Circle(s) && s.pad.lx == kStickHigh);
+    Settle();
+
+    s = Frame(4);
+    CHECK(Circle(s));
+    s = Frame(4 | 1);
+    CHECK(!Circle(s) && s.at_once);
+    s = Frame(4 | 1);
+    CHECK(!Circle(s));
+    s = Frame(4 | 1);
+    CHECK(Circle(s));
+    s = Frame(4 | 1);
+    CHECK(!Circle(s));
+    s = Frame(4 | 1);
+    CHECK(Circle(s) && s.at_once);
+    Settle();
+
+    for (std::uint8_t a : {1, 2, 4}) {
+        s = Frame(a, true);
+        CHECK(!Circle(s) && !s.at_once && s.pad.lx == kStickHigh);
+        s = Frame(a, true);
+        CHECK(!Circle(s) && !s.at_once);
+        s = Frame(0, true);
+    }
+    s = Frame(0);
+    CHECK(!Circle(s) && !s.at_once);
+    Settle();
+
+    CHECK(host_bindings_parse("sprint", "B"));
+    CHECK(host_bindings_parse("dodge", "N"));
+    Keyboard k;
+    k.Down(SDL_SCANCODE_B);
+    s = Step{};
+    host_bindings_apply(k.held, false, s.pad);
+    g_now += 20;
+    s.at_once = host_bindings_dodge(g_now, false, s.pad);
+    CHECK(Circle(s) && s.at_once);
+    k.Down(SDL_SCANCODE_B, false).Down(SDL_SCANCODE_N);
+    s = Step{};
+    host_bindings_apply(k.held, false, s.pad);
+    g_now += 20;
+    host_bindings_dodge(g_now, false, s.pad);
+    CHECK(Circle(s));
+    k.Down(SDL_SCANCODE_N, false);
+    host_bindings_load_defaults();
+    Settle();
+    return g_failed;
+}
+
 void MouseCameraTurn() {
     using MouseTurn::DegreesPerCount;
     assert(std::abs(DegreesPerCount(5) - 0.25f) < 1e-6f && std::abs(DegreesPerCount(0) - 0.1f) < 1e-6f);
@@ -219,6 +339,25 @@ void MouseCameraTurn() {
 }
 
 int main() {
+#ifdef LANTERN_PAD_ACTIONS_MUTANTS
+    int survivors = 0;
+    for (int m = 0; m <= kPadActionsMutants; ++m) {
+        g_pad_actions_mutant = m;
+        const int found = PadActions();
+        if (m == 0 && found) {
+            std::printf("pad actions mutants: the unmutated run failed %d checks\n", found);
+            return 1;
+        }
+        if (m > 0 && !found) {
+            std::printf("pad actions mutants: mutant %d survived\n", m);
+            ++survivors;
+        }
+        if (m > 0 && found) std::printf("pad actions mutants: mutant %d caught by %d checks\n", m, found);
+    }
+    if (survivors) return 1;
+    std::puts("pad actions mutants: every mutant caught");
+    return 0;
+#endif
     Defaults();
     Movement();
     Buttons();
@@ -226,6 +365,7 @@ int main() {
     Modifiers();
     Rebinding();
     MouseCameraTurn();
+    assert(PadActions() == 0);
     std::puts("PC input: PASS (defaults, movement and walking, buttons and touchpad, lantern.ini values, modifiers, "
-              "rebinding, the mouse camera's turn)");
+              "rebinding, the mouse camera's turn, controller dodge/backstep/sprint)");
 }

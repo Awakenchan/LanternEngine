@@ -15,7 +15,10 @@
 #include <algorithm>
 #include <stdexcept>
 #include "bbport_threads.h"
+#include "bbport_settings.h"
 #include "core/emulator_settings.h"
+#include "engine/cache_settings.h"
+#include "lifter/bridge.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "video_core/cache_storage.h"
@@ -384,6 +387,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar, bool legacy
     if (sel.graphics_key.stage_hashes[u32(Shader::SwStage::Fragment)] && fs_runtime.hw.fs.motion_vectors &&
         !(sel.graphics_key.stage_hashes[u32(Shader::SwStage::Vertex)] &&
           vs_runtime.hw_stage == Shader::HwStage::Vertex && vs_runtime.hw.vs.motion_vectors)) {
+        warmup_stale_key = 1;
         return false;
     }
     static const bool motion_layout_guard = [] {
@@ -393,15 +397,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar, bool legacy
     if (motion_layout_guard && !sel.graphics_key.motion_vectors &&
         sel.graphics_key.stage_hashes[u32(Shader::SwStage::Vertex)] &&
         vs_runtime.hw_stage == Shader::HwStage::Vertex && vs_runtime.hw.vs.motion_vectors) {
-        static std::atomic<u32> left_out{0};
-        const u32 count = left_out.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (count <= 20) {
-            std::printf("GPU cache: pipeline key %u left out, a motion vertex shader without motion in "
-                        "its key: vs 0x%016llx, fs 0x%016llx (BB_WARMUP_MOTION_GUARD=0: built)\n",
-                        count,
-                        (unsigned long long)sel.graphics_key.stage_hashes[u32(Shader::SwStage::Vertex)],
-                        (unsigned long long)sel.graphics_key.stage_hashes[u32(Shader::SwStage::Fragment)]);
-        }
+        warmup_stale_key = 2;
         return false;
     }
 
@@ -506,6 +502,24 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     return true;
 }
 
+namespace {
+BbEngine::CacheSettings::Values StoredOutputSettings() {
+    namespace C = BbEngine::CacheSettings;
+    const auto lifter = Lifter::GetMode();
+    const auto& effects = BbSettings::Get().startup_effects;
+    return C::Make(C::LifterValue(lifter == Lifter::Mode::On, lifter == Lifter::Mode::Compare),
+                   EmulatorSettings.IsDirectMemoryAccessEnabled(), effects[BbSettings::EffectModernSsr],
+                   effects[BbSettings::EffectPomCavity]);
+}
+
+std::vector<u8> ProfileBlob(const Shader::Profile& profile, const BbEngine::CacheSettings::Values& settings) {
+    std::vector<u8> blob(sizeof(profile));
+    std::memcpy(blob.data(), &profile, sizeof(profile));
+    BbEngine::CacheSettings::Append(blob, settings);
+    return blob;
+}
+}
+
 void PipelineCache::WarmUp() {
     {
         std::scoped_lock lock{progress_mutex};
@@ -533,43 +547,66 @@ void PipelineCache::WarmUp() {
         precache_progress.total = static_cast<u32>(names.size());
     }
 
-    // Check if cache is compatible
+    namespace C = BbEngine::CacheSettings;
     std::vector<u8> profile_data{};
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
-    if (profile_data.empty()) {
-        // Without a profile the remaining records have no proven shader-feature compatibility.
-        Storage::DataBase::Instance().Clear();
-        Storage::DataBase::Instance().FinishPreload();
-
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
-        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                           std::move(profile_data));
+    database.Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
+    const auto settings = StoredOutputSettings();
+    auto opened = C::Open(profile_data, sizeof(Shader::Profile), settings);
+    if (opened.verdict == C::Verdict::Drop && !database.IsFolder()) {
+        opened.verdict = C::Verdict::Rebuild;
+    }
+    const auto start_fresh = [&] {
+        database.Clear();
+        database.FinishPreload();
+        database.Save(Storage::BlobType::ShaderProfile, "profile", ProfileBlob(profile, settings));
         complete();
+    };
+    if (opened.verdict == C::Verdict::Fresh) {
+        start_fresh();
         return;
     }
-    if (profile_data.size() != sizeof(Shader::Profile)) {
-        LOG_WARNING(Render, "Pipeline cache profile has unexpected size ({} != {})",
-                    profile_data.size(), sizeof(Shader::Profile));
+    if (opened.verdict == C::Verdict::Rebuild) {
+        const int field = C::FirstDifference(opened.stored, settings);
+        if (opened.read == C::Read::ForeignSize) {
+            std::printf("GPU cache: the saved profile has an unexpected size (%zu, this engine writes %zu or %zu); "
+                        "rebuilding the cache\n",
+                        profile_data.size(), sizeof(Shader::Profile), sizeof(Shader::Profile) + C::kRecordBytes);
+        } else {
+            std::printf("GPU cache: the saved shaders were built with other shader settings (%s); rebuilding the cache\n",
+                        opened.read == C::Read::Valid && field >= 0 ? C::kFieldNames[field] : "no readable settings record");
+        }
+        std::fflush(stdout);
+        start_fresh();
+        return;
     }
     Shader::Profile cached_profile{};
-    if (profile_data.size() == sizeof(Shader::Profile)) {
-        std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
-    }
-    if (profile_data.size() != sizeof(Shader::Profile) || cached_profile != profile) {
+    std::memcpy(&cached_profile, opened.profile.data(), sizeof(cached_profile));
+    if (cached_profile != profile) {
         // bbport: upstream closed the cache for the session here, so it was never rewritten
         // and every later session compiled every shader again (stutters on each new area).
         // Start a fresh cache for this build and GPU instead.
         LOG_WARNING(Render, "Pipeline cache isn't compatible with current system: rebuilding it");
-        Storage::DataBase::Instance().Clear();
-        Storage::DataBase::Instance().FinishPreload();
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
-        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                           std::move(profile_data));
-        complete();
+        start_fresh();
         return;
     }
+    if (opened.verdict == C::Verdict::Drop) {
+        const bool ssr_was = opened.stored.field[C::ModernSsr], pom_was = opened.stored.field[C::PomCavity];
+        const bool ssr_now = settings.field[C::ModernSsr], pom_now = settings.field[C::PomCavity];
+        u32 dropped = 0;
+        for (const auto& binary : database.ListBlobs(Storage::BlobType::ShaderBinary)) {
+            const u64 hash = std::strtoull(binary.c_str(), nullptr, 16);
+            if (EffectShaders::KeepRecompiledHash(hash, ssr_was, pom_was) !=
+                EffectShaders::KeepRecompiledHash(hash, ssr_now, pom_now)) {
+                database.Remove(Storage::BlobType::ShaderBinary, binary);
+                ++dropped;
+            }
+        }
+        const int field = C::FirstDifference(opened.stored, settings);
+        std::printf("GPU cache: %s changed; %u saved shaders that follow it compile again, the rest of the cache is kept\n",
+                    field >= 0 ? C::kFieldNames[field] : "a shader setting", dropped);
+        std::fflush(stdout);
+    }
+    const bool restamp = opened.verdict == C::Verdict::Adopt || opened.verdict == C::Verdict::Drop;
 
     const auto* regs = sel.regs;
     u32 damaged = 0;
@@ -640,6 +677,9 @@ void PipelineCache::WarmUp() {
                         off_id.c_str());
             std::fflush(stdout);
             database.FinishPreload();
+            if (restamp) {
+                database.Save(Storage::BlobType::ShaderProfile, "profile", ProfileBlob(profile, settings));
+            }
             complete();
             return;
         }
@@ -676,6 +716,7 @@ void PipelineCache::WarmUp() {
     // its cache cold, after every compiler or driver change) is collected (WarmupJobs) and runs
     // on BB_WARMUP_THREADS threads below; the game starts once all are there, as before.
     WarmupJobs batch;
+    std::array<u32, 3> stale_keys{};
     std::vector<const std::string*> job_names;
     warmup_jobs = &batch;
     for (const auto& name : names) {
@@ -698,8 +739,13 @@ void PipelineCache::WarmUp() {
             reader.Read(version);
             reader.Read(is_compute);
             if ((version == 5 || version == Serialization::PipelineKeyVersion) && is_compute <= 1) {
+                warmup_stale_key = 0;
                 loaded = is_compute ? LoadComputePipeline(ar)
                                     : LoadGraphicsPipeline(ar, version == 5);
+                if (warmup_stale_key) {
+                    database.Remove(Storage::BlobType::PipelineKey, name);
+                    ++stale_keys[warmup_stale_key];
+                }
             }
         } catch (const std::exception& error) {
             ++damaged;
@@ -775,9 +821,7 @@ void PipelineCache::WarmUp() {
         program_cache.clear();
         database.Clear();
         database.FinishPreload();
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
-        database.Save(Storage::BlobType::ShaderProfile, "profile", std::move(profile_data));
+        database.Save(Storage::BlobType::ShaderProfile, "profile", ProfileBlob(profile, settings));
         std::scoped_lock lock{progress_mutex};
         precache_progress.loaded = 0;
     }
@@ -790,12 +834,27 @@ void PipelineCache::WarmUp() {
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - warmup_start).count(),
                 status.rejected, std::chrono::duration<double>(rebuilt_at - warmup_start).count(),
                 threads);
+    if (stale_keys[1] + stale_keys[2]) {
+        std::printf("GPU cache: %u pipeline records removed, saved by an older engine when a new shader "
+                    "variant could take another variant's saved index: the vertex shader index they name "
+                    "now holds another variant (%u with motion in a record without it, %u without motion "
+                    "for a fragment shader that reads it); the variant they were built with is no longer "
+                    "saved, so they cannot be built here; a draw that still uses one compiles it once in "
+                    "play and is saved again (BB_WARMUP_MOTION_GUARD=0 builds the first kind anyway)\n",
+                    stale_keys[1] + stale_keys[2], stale_keys[2], stale_keys[1]);
+    }
     std::fflush(stdout);
     database.FinishPreload();
+    if (restamp) {
+        database.Save(Storage::BlobType::ShaderProfile, "profile", ProfileBlob(profile, settings));
+    }
     complete();
 }
 
 void PipelineCache::Sync() {
+    driver_cache_shutdown.store(true, std::memory_order_release);
+    StopDriverCacheSaver();
+    std::scoped_lock save_lock{DriverCacheSaveMutex()};
     std::scoped_lock lock{native_cache_mutex};
     try {
         SaveNativeCache();

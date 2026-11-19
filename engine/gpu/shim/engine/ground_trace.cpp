@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ground_trace.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include "bbport_platform.h"
@@ -13,8 +14,7 @@
 namespace BbEngine::GroundTrace {
 namespace {
 constexpr std::size_t kGroundProbe = 0x1a4a730;
-const std::uint8_t kGroundProbePrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                             0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0xe8, 0x09, 0x00, 0x00};
+constexpr const auto& kGroundProbePrologue = HookEntries::kGroundTraceGroundProbePrologue;
 constexpr std::size_t kWorldChrMan = 0x553e878;
 constexpr std::uint32_t kMaxLines = 40000;
 
@@ -30,7 +30,7 @@ template <typename T> T Read(std::uint64_t at, T fallback = T{}) {
                                                                                                      : fallback;
 }
 
-std::int64_t __attribute__((sysv_abi)) OnGroundProbe(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnGroundProbe(std::uint64_t, std::uint64_t* saved) noexcept {
     const std::uint64_t proxy = saved[5];
     const std::uint64_t step = saved[4];
     const std::uint64_t local = Read<std::uint64_t>(Read<std::uint64_t>(g_image + kWorldChrMan) + 0x60);
@@ -70,12 +70,15 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const char* on = std::getenv("BB_GROUND_TRACE");
     if (!on || on[0] != '1') return false;
     Hook hook;
-    if (!Prepare(hook, image, size, kGroundProbe, kGroundProbePrologue, OnGroundProbe)) {
+    if (!Prepare(hook, image, size, kGroundProbe, SiteKind::Entry, kGroundProbePrologue, OnGroundProbe)) {
         host_log("Ground trace off: the ground probe differs from 1.09");
         return false;
     }
     g_image = reinterpret_cast<std::uint64_t>(image);
-    Commit(std::span{&hook, 1});
+    if (const WriteResult result = Commit(std::span{&hook, 1}); result != WriteResult::Applied) {
+        host_log("Ground trace off: the ground probe could not be written (%s)", Describe(result));
+        return false;
+    }
     host_log("Ground trace: on (BB_GROUND_TRACE), a line for each frame the hunter moves, at most %u", kMaxLines);
     return true;
 }

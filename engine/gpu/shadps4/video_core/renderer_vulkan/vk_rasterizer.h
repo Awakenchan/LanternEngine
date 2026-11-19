@@ -12,6 +12,13 @@
 #include "common/recursive_lock.h"
 #include "engine/ring_constants.h"
 #include "engine/batch.h"
+#include "engine/gx_whole_census.h"
+#include "engine/gx_whole_stageb.h"
+#include "engine/gx_whole_targets.h"
+#include "engine/gx_whole_binds.h"
+#include "engine/gx_whole_owed_blocks.h"
+#include "engine/texset_static.h"
+#include "engine/stageb_counts.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
@@ -322,6 +329,11 @@ public:
     }
 
     std::thread::id GetGpuCommandProcessorThread();
+    BbEngine::GxWholeCensus::Verdict TakeGxWholeVerdict() {
+        const BbEngine::GxWholeCensus::Verdict verdict = gx_whole_verdict;
+        gx_whole_verdict = {};
+        return verdict;
+    }
 #ifdef __linux__
     u32 GetGpuCommandProcessorThreadId();
 #endif
@@ -425,6 +437,67 @@ private:
     std::array<GxRegister, 160> gx_registers{};
     u32 num_gx_registers = 0;
     const void* gx_state = nullptr;
+    BbEngine::GxWholeCensus::Verdict gx_whole_verdict;
+    static constexpr u8 WholeNotCounted = 0xff;
+    u8 whole_cover = WholeNotCounted;
+    BbEngine::GxWholeStageB::Carried whole_carried{};
+    struct WholeStageB {
+        BbEngine::GxWholeStageB::Counts counts{};
+        BbEngine::GxWholeStageB::Counts shown{};
+        std::array<BbEngine::GxWholeStageB::Saved, BbEngine::GxWholeStageB::kMaxValues> saved{};
+        std::array<bool, BbEngine::GxWhole::kFields> logged{};
+        std::array<bool, BbEngine::GxWhole::kUnusedClasses> unused_logged{};
+        std::thread::id writer{};
+        u64 covered_index = 0;
+        u64 next_report_frame = 0;
+        bool take_off = false;
+        const BbEngine::GxWholeStageB::Carried* draw_carried = nullptr;
+        BbEngine::GxWholeStageB::Action draw_action = BbEngine::GxWholeStageB::Action::Register;
+    };
+    WholeStageB whole_b;
+    struct WholeTargetsState {
+        BbEngine::GxWholeTargets::Chain chain{};
+        BbEngine::GxWholeTargets::Counts counts{};
+        BbEngine::GxWholeTargets::Counts shown{};
+        bool hit = false;
+        u64 report_tsc = 0;
+        std::chrono::steady_clock::time_point report_time{};
+    };
+    WholeTargetsState whole_t;
+    struct WholeBindsState {
+        BbEngine::GxWholeBinds::VertexKey key{};
+        BbEngine::GxWholeBinds::VertexChain chain{};
+        u64 motion_geometry = 0;
+        bool index_valid = false;
+        BbEngine::GxWholeBinds::IndexKey index_key{};
+        const VideoCore::Buffer* index_buffer = nullptr;
+        u64 index_offset = 0;
+        bool index_in_place = false;
+        BbEngine::GxWholeBinds::SealCache index_seals{};
+        BbEngine::GxWholeBinds::Counts counts{};
+        BbEngine::GxWholeBinds::Counts shown{};
+    };
+    WholeBindsState whole_v;
+    void ResolveVertexBuffersRegister(const GraphicsPipeline* pipeline, const PreparedDraw* prepared);
+    void WholeVertexBinds(const GraphicsPipeline* pipeline, const PreparedDraw* prepared);
+    void WholeIndexBind(VAddr address, u32 bytes, vk::IndexType type);
+    BbEngine::GxWholeBinds::Miss WholeTakeMiss(std::span<const BbEngine::GxWholeBinds::Stream> streams,
+                                               std::span<const BbEngine::GxWholeBinds::Range> ranges,
+                                               BbEngine::GxWholeBinds::SealCache& seals);
+    void FindTargets(const GraphicsPipeline* pipeline);
+    void WholeTargets(const GraphicsPipeline* pipeline);
+    bool WholeBeginFast(const GraphicsPipeline* pipeline);
+    bool BeginScalarsSame(const GraphicsPipeline* pipeline) const;
+    void WholeTakeOff(const char* what);
+    u8 CarryWhole(u64 gx_record);
+    u32 WholeBefore(AmdGpu::Regs& regs, u8 cover, const BbEngine::GxWholeStageB::Carried* carried, bool is_indexed,
+                    u8 withheld);
+    void FlushOwedBlocks();
+    void WholeVerifyWithheld(const AmdGpu::Regs& regs, const AmdGpu::Regs& live, const AmdGpu::Regs& sent,
+                             const BbEngine::GxWholeStageB::Carried& carried, bool is_indexed, const u8* gx_list,
+                             u32 gx_count);
+    void WholeAfter(AmdGpu::Regs& regs, u32 overlaid);
+    void WholeReport(BbEngine::GxWhole::Mode mode);
     void ApplyGxRecord(const GraphicsPipeline* pipeline, const PreparedDraw*& used_prepared, u64 gx_record,
                        bool is_indexed_draw);
     static void SwapGxRegisters(AmdGpu::Regs& regs, GxRegister* list, u32 count);
@@ -467,6 +540,7 @@ private:
     struct RingBinding;
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
+    void CompareRingCopy(VAddr address, u64 size);
     void PrintPipeStats();
     struct RunCensus {
         enum Cut : u32 {
@@ -561,6 +635,7 @@ private:
         std::array<u64, MaxImages> hashes{};
         std::array<TextureSetEntry, MaxImages> entries{};
         std::array<u64, MaxImages> found_uids{}; ///< image uids of entries[].found
+        std::uint16_t held_mask = 0;
     };
     std::array<TextureSet, 32768> texture_sets{};
     u64 texture_set_hits = 0, texture_set_misses = 0;
@@ -572,6 +647,11 @@ private:
     /// (ImageDescCacheEntry) outside them.
     u64 texture_set_revalidated = 0, texture_lookups_revalidated = 0;
     bool RevalidateTextureSet(TextureSet& set, u64 generation);
+    BbEngine::TexsetStatic::Tally texset_static{};
+    u32 texset_static_frame = 0;
+    std::thread::id texset_static_writer{};
+    void CountStaticSet(const TextureSet& set, u32 moved_mask);
+    std::uint16_t HeldMask(const TextureSet& set);
     /// Returns true when the stage's images were bound from the memo.
     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                              u32 first_image_idx, bool& barrier, TextureSet*& slot);
@@ -690,6 +770,7 @@ private:
         u64 copied = 0;
     } ubo_stats;
     void ReportUboStats();
+    void ReportSealedBinds();
 
 
     // bbport: bindings point at their description instead of copying it (a hot spot): into
@@ -817,6 +898,17 @@ private:
     static inline thread_local const AmdGpu::ComputeProgram* stage_cs = nullptr;
     AmdGpu::Regs pipe_regs{};
     bool pipe_synced = false;
+    std::unique_ptr<AmdGpu::Regs> whole_sent;
+    std::unique_ptr<BbEngine::GxWholeOwedBlocks::Coverage> whole_coverage;
+    std::unique_ptr<BbEngine::GxWholeOwedBlocks::Coverage> whole_verify_coverage;
+    std::array<u32, AmdGpu::RegDirty::NumBlocks> whole_withheld_blocks{};
+    u32 whole_withheld_count = 0;
+    u64 whole_judged = 0;
+    BbEngine::GxWholeOwedBlocks::Counts whole_owed{};
+    std::atomic<bool> whole_withhold_off{false};
+    u64 whole_takeoff_limit = 0;
+    u64 whole_late_withheld = 0;
+    u32 whole_verify_reports = 0;
     /// Stage A: small read-only guest buffers copied into the constant ring for a packet.
     struct RingBinding {
         u32 index;  ///< buffer resource of the stage
@@ -910,7 +1002,10 @@ private:
     bool const_census = false;
     std::uint8_t ring_constants = 0;
     BbEngine::RingConstants::Ring gx_ring;
-    std::deque<BbEngine::RingConstants::QueuedWrite> ring_writes;
+    bool ring_watch = false;
+    bool ring_counting = false;
+    BbEngine::RingConstants::Tally ring_tally;
+    std::unique_ptr<BbEngine::RingConstants::QueuedWrites<BbEngine::RingConstants::kQueuedWrites>> ring_writes;
     PendingReads pending_write_table; ///< the same per granule for GPU writes queued (NotePendingGpuWrite)
     u64 untracked_reads_packet = 0; ///< newest packet reading guest memory it does not list
     u64 constram_waits_skipped = 0; ///< statistics: CPU writes that did not have to wait
@@ -957,12 +1052,26 @@ private:
         u64 layout = 0;
         const VideoCore::Buffer* buffer = nullptr;
         u64 offset = 0;
+        bool in_place = false;
+        bool streamed = false;
     };
     std::array<SealedBind, 4096> sealed_binds{};
     BbEngine::Batch::Mode own_buffers_mode = BbEngine::Batch::Off;
     BbEngine::Batch::Step* own_buffers_step = nullptr;
     BbEngine::Batch::Step* own_buffers_share = nullptr;
-    u64 sealed_hits = 0, sealed_misses = 0, sealed_draws = 0, unsealed_draws = 0;
+    BbEngine::Batch::Step* own_streams_share = nullptr;
+    u64 sealed_not_clean = 0, sealed_split_draws = 0, sealed_streamed = 0;
+    std::atomic<u64> torn_vsharps{0};
+    u64 sealed_hits = 0, sealed_misses = 0, sealed_past_end = 0, sealed_draws = 0, unsealed_draws = 0;
+    bool stageb_counts = false;
+    bool readbacks_precise = false;
+    BbEngine::StageBCounts::Report stageb_report;
+    const void* GuestHashSource(VAddr address, u64 size);
+    std::unique_ptr<BbEngine::StageBCounts::ShareTable> const_share_a;
+    void NoteConstUpload(BbEngine::StageBCounts::ShareTable& table,
+                         std::atomic<u64> (&to)[BbEngine::StageBCounts::kShareCounters], const void* source,
+                         u64 size, u64 copy_cycles);
+    void NoteDrawBinds(vk::Pipeline handle, bool is_indexed);
     bool SealedLookup(VAddr base, u64 size, const VideoCore::Buffer*& buffer, u64& offset);
     static constexpr u64 RangeBindKey = 0x52414e4745ull;
     u64 range_binds = 0, range_hits = 0, range_checked = 0, range_differ = 0;
@@ -1000,6 +1109,9 @@ private:
         VertexBinds vertex_binds;
         IndexBind index_bind{};
         DrawInputs draw_inputs{};
+        std::unique_ptr<BbEngine::StageBCounts::ShareTable> const_share;
+        BbEngine::StageBCounts::BindState bind_counts;
+        BbEngine::StageBCounts::BindSample bind_sample;
     };
     std::unique_ptr<DrawContext> main_context = std::make_unique<DrawContext>();
     static inline thread_local DrawContext* thread_context = nullptr;

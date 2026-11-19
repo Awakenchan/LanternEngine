@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "engine/pipeline_memo.h"
 #include "video_core/amdgpu/regs.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 
@@ -81,6 +82,7 @@ struct PreparedDraw {
     std::atomic<u32> state{Pending};
     u64 reg_checksum{};
     GraphicsPipelineKey key{};
+    u64 key_hash{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};
     PreparedVertexInputs vertex{};
@@ -114,7 +116,7 @@ public:
     const PreparedDraw* NextDraw();
 
     /// GPU thread: counts whether a prepared draw was used; prints every 5 s (BB_FRAME_STATS).
-    void Count(bool used);
+    void Count(BbEngine::PipelineMemo::Prepared reason);
 
     struct Submission {
         u64 seq{};
@@ -127,6 +129,7 @@ public:
         std::atomic<bool> scanned{false};
         std::atomic<bool> claimed{false};
         std::atomic<bool> gpu_done{false};
+        bool marked{};
     };
 
 private:
@@ -160,7 +163,7 @@ public:
 
 private:
     u32 current_draw = 0;
-    u64 used = 0, unused = 0;
+    BbEngine::PipelineMemo::PreparedTally tally;
     u32 worker_count = 0; ///< fixed before the worker threads start
     std::jthread scanner;
     std::vector<std::jthread> workers;

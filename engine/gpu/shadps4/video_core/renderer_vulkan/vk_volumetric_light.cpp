@@ -18,6 +18,7 @@
 #include "video_core/host_shaders/volumetric_light_composite_comp.h"
 #include "video_core/host_shaders/volumetric_light_filter_comp.h"
 #include "video_core/host_shaders/point_volumetric_comp.h"
+#include "video_core/host_shaders/point_volumetric_falloff_comp.h"
 #include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -107,6 +108,13 @@ bool VolumetricLight::Ready() {
         failed = true;
         std::printf("Volumetric lighting: off - this GPU cannot run the passes\n");
         return false;
+    }
+    point_falloff_ready =
+        CreatePass(point_falloff,
+                   {eStorageBuffer, eStorageBuffer, eCombinedImageSampler, eStorageImage},
+                   POINT_VOLUMETRIC_FALLOFF_COMP, 3 * sizeof(u32), "Point volumetric falloff");
+    if (!point_falloff_ready) {
+        std::printf("Lamp fog: the inverse-square falloff cannot run on this GPU; classic is used\n");
     }
     tint_state = std::make_unique<VideoCore::Buffer>(
         instance, 0, 16, VideoCore::MemoryType::DeviceLocal, "Volumetric sky colour");
@@ -412,8 +420,8 @@ void VolumetricLight::AddPointLights(const u32* constants, const u32* lights, u3
 }
 
 void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights, u32 w, u32 h) {
-    const float intensity = BbSettings::Get().graphics_point_fog_intensity.load(
-        std::memory_order_relaxed);
+    const auto& settings = BbSettings::Get();
+    const float intensity = settings.graphics_point_fog_intensity.load(std::memory_order_relaxed);
     if (lights.empty() || !(intensity > 0.0f) || !std::isfinite(intensity)) {
         return;
     }
@@ -422,11 +430,16 @@ void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights,
     for (u32 i = 0; i < lights.size(); ++i) {
         std::copy(lights[i].begin(), lights[i].end(), data.begin() + FogLightsAt / 4 + i * 16);
     }
-    struct PointParams {
-        u32 count;
-        float intensity;
-    };
-    const PointParams params{u32(lights.size()), std::clamp(intensity, 0.0f, 3.0f)};
+    const bool falloff =
+        point_falloff_ready &&
+        settings.graphics_point_fog_falloff.load(std::memory_order_relaxed) ==
+            BbSettings::PointFogFalloffInverseSquare;
+    const float glow = settings.graphics_point_fog_glow_size.load(std::memory_order_relaxed);
+    const std::array<u32, 3> params{
+        u32(lights.size()), std::bit_cast<u32>(std::clamp(intensity, 0.0f, 3.0f)),
+        std::bit_cast<u32>(BbSettings::PointFogGlowSize(glow))};
+    const u32 params_size = falloff ? 3 * sizeof(u32) : 2 * sizeof(u32);
+    const Pass& pass = falloff ? point_falloff : point;
     const vk::Buffer buffer = fog_data->Handle();
     const vk::DescriptorBufferInfo constants{buffer, 0, 64};
     const vk::DescriptorBufferInfo records{buffer, FogLightsAt, lights.size() * 64};
@@ -435,8 +448,8 @@ void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights,
     EffectPass::Mark(9, "lamp fog");
     scheduler.RecordCrumb(
         {.name = "Lamp fog"},
-        [params, constants, records, depth, out, buffer, data = std::move(data), w, h,
-         pipeline = *point.pipeline, layout = *point.layout](vk::CommandBuffer cmd) {
+        [params, params_size, constants, records, depth, out, buffer, data = std::move(data), w, h,
+         pipeline = *pass.pipeline, layout = *pass.layout](vk::CommandBuffer cmd) {
             const vk::MemoryBarrier2 to_transfer{
                 .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
                 .srcAccessMask = vk::AccessFlagBits2::eMemoryRead,
@@ -457,7 +470,7 @@ void VolumetricLight::RecordLampFog(std::span<const std::array<u32, 16>> lights,
             }};
             cmd.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
             cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
-            cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(params), &params);
+            cmd.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, params_size, params.data());
             cmd.dispatch((w + 7) / 8, (h + 7) / 8, 1);
             After(cmd);
         });
@@ -477,15 +490,20 @@ void VolumetricLight::Composite(VideoCore::ImageId fallback, const char* where) 
     const auto seen_lights = fog_lights.Lights();
     Reset();
     if (!has_result || !Enabled() || !color_id) return;
+    const auto skip = [this](const char* why) {
+        ++skipped_frames;
+        if (skipped_frames == 1 || skipped_frames % 1000 == 0) {
+            std::printf("Volumetric lighting: frame skipped, %s (%llu so far); volumetric lighting stays on\n", why,
+                        static_cast<unsigned long long>(skipped_frames));
+        }
+    };
     if (!has_tint) {
-        failed = true;
-        std::printf("Volumetric lighting: directional tint draw missing; off\n");
+        skip("directional tint draw missing");
         return;
     }
     auto* color_ptr = texture_cache.TryGetImage(color_id, uid);
     if (!color_ptr) {
-        failed = true;
-        std::printf("Volumetric lighting: HDR scene expired before composite; off\n");
+        skip("HDR scene expired before composite");
         return;
     }
     auto& color = *color_ptr;
@@ -527,8 +545,10 @@ void VolumetricLight::Composite(VideoCore::ImageId fallback, const char* where) 
         runtime.FlushBarriers();
     }
     if (w != depth_width || h != depth_height) {
-        failed = true;
-        std::printf("Volumetric lighting: scene and shadow viewport sizes differ; off\n");
+        if (skipped_frames == 0 || (skipped_frames + 1) % 1000 == 0) {
+            std::printf("Volumetric lighting: scene %ux%u, shadow viewport %ux%u\n", w, h, depth_width, depth_height);
+        }
+        skip("scene and shadow viewport sizes differ");
         return;
     }
     // bbport: BB_POINT_FOG_STEADY=0 draws the original fog (the first lights the game lists); on

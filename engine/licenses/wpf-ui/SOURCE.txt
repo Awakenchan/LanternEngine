@@ -1,0 +1,1 @@
+LICENSE.md and ThirdPartyNotices.txt: the NuGet package wpf-ui 4.3.0 (%USERPROFILE%\.nuget\packages\wpf-ui\4.3.0), which Lantern Engine.exe is built with

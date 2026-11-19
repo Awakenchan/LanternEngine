@@ -3,10 +3,14 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_present_policy.h"
 
 namespace Frontend {
 class WindowSDL;
@@ -16,11 +20,12 @@ namespace Vulkan {
 
 class Instance;
 class Scheduler;
+class FsrFrameGen;
 
-class Swapchain {
+class Swapchain : private PresentPolicy::SwapchainProbe {
 public:
     explicit Swapchain(const Instance& instance, const Frontend::WindowSDL& window);
-    ~Swapchain();
+    ~Swapchain() override;
 
     /// Creates (or recreates) the swapchain with a given size.
     void Create(u32 width, u32 height);
@@ -29,7 +34,7 @@ public:
     void Recreate(u32 width, u32 height);
 
     /// Acquires the next image in the swapchain.
-    bool AcquireNextImage();
+    PresentPolicy::AcquireStep AcquireNextImage();
 
     /// Presents the current image and move to the next one
     bool Present();
@@ -128,9 +133,34 @@ public:
     /// the display's peak, the brightest content (MaxCLL) and the frame average (MaxFALL).
     void SetHdrMetadata(float max_nits, float content_nits, float frame_average_nits);
 
+    PresentPolicy::State& Policy() {
+        return policy;
+    }
+
+    PresentPolicy::PresentMode PacingPresentMode() const {
+        return pacing_mode.load(std::memory_order_relaxed);
+    }
+
+    FsrFrameGen* GetFsrFrameGen() const {
+        return fsr_fg.get();
+    }
+
+    bool UsesFsrFrameGen() const {
+        return fsr_fg_swapchain.load(std::memory_order_acquire);
+    }
+
 private:
+    [[nodiscard]] PresentPolicy::SurfaceResult AcquireImage(u64 timeout_ns, u32& index) override;
+    [[nodiscard]] std::optional<PresentPolicy::SurfaceState> CurrentSurface() const override;
+
+    bool HdrFormatWatched() const;
+    PresentPolicy::SurfaceState BuiltSurface() const;
+    vk::Result QueryCapabilities(vk::SurfaceCapabilitiesKHR& capabilities) const;
+    vk::Extent2D ExtentFor(const vk::SurfaceCapabilitiesKHR& capabilities, u32 width_,
+                           u32 height_) const;
+
     /// bbport: the surface's formats, queried with the full-screen-exclusive chain when enabled.
-    std::vector<vk::SurfaceFormatKHR> QuerySurfaceFormats() const;
+    std::vector<vk::SurfaceFormatKHR> QuerySurfaceFormats(vk::Result* quiet_result = nullptr) const;
 
     /// bbport: applies the HDR metadata to the current swapchain.
     void ApplyHdrMetadata();
@@ -147,6 +177,8 @@ private:
 
     /// bbport: vkDeviceWaitIdle under Scheduler::submit_mutex (the callers must not hold it).
     void WaitIdle();
+
+    void EndFsrSwapchain();
 
     /// bbport: destroys the swapchain and the lost surface, and creates a new surface.
     void RecreateSurface();
@@ -191,6 +223,11 @@ private:
     bool hdr_output = false;
     bool hdr_unavailable_logged = false;
     bool full_screen_exclusive = false; ///< VK_EXT_full_screen_exclusive: DISALLOWED chained
+    PresentPolicy::State policy;
+    std::unique_ptr<FsrFrameGen> fsr_fg;
+    std::atomic<bool> fsr_fg_swapchain{false};
+    std::atomic<PresentPolicy::PresentMode> pacing_mode{PresentPolicy::PresentMode::Unknown};
+    vk::Result last_acquire_result = vk::Result::eSuccess;
     float hdr_max_nits = 0.0f, hdr_content_nits = 0.0f,
           hdr_average_nits = 0.0f; ///< SetHdrMetadata; 0: not set
 };

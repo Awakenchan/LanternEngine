@@ -1,0 +1,1 @@
+LICENSE.txt: https://github.com/icedland/iced/blob/v1.21.0/LICENSE.txt (the crate's repository; the crates.io package iced-x86 1.21.0 carries no license file)

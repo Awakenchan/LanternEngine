@@ -110,7 +110,7 @@ namespace BloodborneLauncher.Core
             {
                 using var content = new StringContent(new JsonObject { ["Token"] = token }.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
                 using var response = await Http.PostAsync(Server + "/auth/whoami", content, cancel);
-                return OnlineStatus.ClassifyWhoAmI(await response.Content.ReadAsStringAsync(cancel));
+                return OnlineStatus.ClassifyWhoAmI((int)response.StatusCode, await response.Content.ReadAsStringAsync(cancel));
             }
             catch (Exception) when (!cancel.IsCancellationRequested)
             {

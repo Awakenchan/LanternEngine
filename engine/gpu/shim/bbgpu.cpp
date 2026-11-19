@@ -4,6 +4,8 @@
 #include "bbport_gnm_hooks.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
+#include "lantern_steps.h"
+#include "lantern_switches.h"
 #include "bbport_copy.h"
 #ifndef _WIN32
 #include <sys/resource.h>
@@ -15,6 +17,7 @@
 #include "bbport_toggles.h"
 #include "engine/engine_hooks.h"
 #include "engine/batch.h"
+#include "lantern_frame_report.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -283,6 +286,7 @@ long EnvMs(const char* name, long fallback) {
 }
 
 [[noreturn]] void TerminateNow(int code) {
+    BbSettings::FlushForExit();
     if (BbRoom::Active()) {
         auto done = std::make_shared<std::atomic<bool>>(false);
         std::thread([done] {
@@ -393,6 +397,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             saved = cache_saved.load(std::memory_order_acquire);
         }
         BbEngine::Batch::Report("exit");
+        LanternFrameReport::OnExit();
         std::printf("Exit: clean shutdown in %lld ms\n",
                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - exit_started)
@@ -418,6 +423,13 @@ extern "C" void bbgpu_start_online(void) {
     if (online && online[0] == '1') bbnet_initialize();
 }
 extern "C" void bbgpu_register_kernel(void) {
+    Lantern::Switches::Load();
+    Lantern::PrintSwitchesAtStart();
+    Lantern::Steps::StartOnce();
+    if (!Lantern::Diagnosis::PrepareFile()) {
+        Lantern::Log(Lantern::LogChannel::Always, "Diagnosis: the previous file stays as it is");
+    }
+    Lantern::Steps::StartCalibration();
     Core::Loader::SymbolsResolver resolver;
     lantern_av_decode_start();
     const char* online = std::getenv("BB_ONLINE");

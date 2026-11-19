@@ -1,0 +1,94 @@
+{
+  "tracked": [
+    "BB_ONLINE", "BB_NET_BACKEND", "BB_THD_SERVER", "BB_THD_AUTH", "BB_THD_TOKEN", "BB_THD_ONLINE_ID",
+    "BB_THD_RULESET", "BB_THD_TRACE", "BBHOST_NP_TRACE", "BB_SHADNET_SERVER", "BB_SHADNET_WEBAPI",
+    "BB_SHADNET_NPID", "BB_SHADNET_PASSWORD", "BB_SHADNET_TOKEN", "BB_UPNP", "BB_P2P_PORT",
+    "SHADPS4_HTTP_HOST_OVERRIDES_JSON", "BB_SIGN_TIMEOUT", "BB_ROOM_SERVER", "BB_ROOM_NAME", "BB_ROOM_PLAYER",
+    "BB_ROOM_HOST", "BB_ROOM_HTTP_PORT", "BB_ROOM_LOCAL_PORT", "BB_ROOM_VISITOR", "BB_ROOM_PASSWORD",
+    "BB_ROOM_HOST_PASSWORD", "BB_ONLINE_PAUSED", "UNRELATED"
+  ],
+  "inherited": {
+    "BB_SHADNET_SERVER": "inherited.example:1", "BB_SHADNET_WEBAPI": "http://inherited.example:2",
+    "BB_SHADNET_NPID": "inherited", "BB_SHADNET_PASSWORD": "inherited-password",
+    "BB_SHADNET_TOKEN": "inherited-token", "BB_UPNP": "1", "BB_ROOM_SERVER": "wss://inherited.example",
+    "BB_ROOM_NAME": "inherited-room", "BB_ROOM_LOCAL_PORT": "40000", "BB_ROOM_VISITOR": "1",
+    "BB_ONLINE_PAUSED": "0", "UNRELATED": "keep"
+  },
+  "cases": [
+    {
+      "name": "offline",
+      "settings": {"online_enabled": "0"},
+      "env": {}
+    },
+    {
+      "name": "thd-default",
+      "settings": {"online_enabled": "1", "online_connected": "1", "online_pool": "huntersdream"},
+      "env": {"BB_THD_TOKEN": "test-token-0123456789", "BB_THD_ONLINE_ID": "TestHunter"}
+    },
+    {
+      "name": "thd-custom",
+      "settings": {"online_enabled": "1", "online_connected": "1", "online_pool": "huntersdream",
+                   "online_game_api": "https://game.example:31443", "online_p2p_port": "32000",
+                   "online_sign_timeout": "9999", "online_thd_ruleset": "patch.lamp2lamp"},
+      "env": {"BB_THD_TOKEN": "test-token-0123456789", "BB_THD_ONLINE_ID": "TestHunter", "BB_THD_TRACE": "1"}
+    },
+    {
+      "name": "thd-lamp2lamp-patch",
+      "settings": {"online_enabled": "1", "online_connected": "1", "online_pool": "huntersdream",
+                   "online_sign_timeout": "45"},
+      "env": {"BB_THD_TOKEN": "test-token-0123456789", "BB_THD_ONLINE_ID": "TestHunter"},
+      "patches": ["Bloodborne.xml/Lamp2Lamp (warp between lamps)"]
+    },
+    {
+      "name": "thd-signed-out",
+      "settings": {"online_enabled": "1", "online_connected": "1", "online_pool": "huntersdream"},
+      "env": {}
+    },
+    {
+      "name": "seamless-host",
+      "settings": {"online_enabled": "1", "seamless_enabled": "1", "seamless_role": "host",
+                   "seamless_host_room": "host-room-code", "seamless_player": "  Lady  Maria \"of\" the Tower  "},
+      "env": {"BB_ROOM_HOST_PASSWORD": "room-pass", "BB_THD_TOKEN": "stale-token", "BB_THD_ONLINE_ID": "Stale"}
+    },
+    {
+      "name": "seamless-guest-visitor",
+      "settings": {"online_enabled": "1", "seamless_enabled": "1", "seamless_role": "guest",
+                   "seamless_room": "guest-room-code", "seamless_player": "Djura", "seamless_visitor": "1",
+                   "online_p2p_port": "65535", "online_sign_timeout": "0"},
+      "env": {}
+    },
+    {
+      "name": "seamless-direct-host",
+      "settings": {"online_enabled": "1", "seamless_enabled": "1", "seamless_role": "host",
+                   "seamless_host_room": "direct-room", "seamless_direct": "1", "seamless_direct_port": "39000",
+                   "seamless_server": "ws://ignored.example"},
+      "env": {"BB_ROOM_HOST_PASSWORD": "direct-pass"}
+    },
+    {
+      "name": "seamless-direct-guest",
+      "settings": {"online_enabled": "1", "seamless_enabled": "1", "seamless_role": "guest",
+                   "seamless_room": "direct-room", "seamless_direct": "1", "seamless_direct_host": "192.0.2.10",
+                   "seamless_visitor": "1"},
+      "env": {}
+    },
+    {
+      "name": "seamless-ws-server-falls-back",
+      "settings": {"online_enabled": "1", "seamless_enabled": "1", "seamless_role": "guest",
+                   "seamless_room": "relay-room", "seamless_server": "ws://lan.example:1234"},
+      "env": {}
+    },
+    {
+      "name": "shadnet-default",
+      "settings": {"online_enabled": "1", "online_connected": "1", "online_username": "Hunter"},
+      "env": {"BB_SHADNET_PASSWORD": "test-password"}
+    },
+    {
+      "name": "supermedo",
+      "settings": {"online_enabled": "1", "online_connected": "1", "online_server": "supermedo",
+                   "online_host": "game.supermedo.com", "online_port": "31313",
+                   "online_webapi": "http://game.supermedo.com:31315/", "online_game_api": "https://game.supermedo.com/",
+                   "online_username": "Hunter", "online_upnp": "1"},
+      "env": {"BB_SHADNET_PASSWORD": "test-password"}
+    }
+  ]
+}

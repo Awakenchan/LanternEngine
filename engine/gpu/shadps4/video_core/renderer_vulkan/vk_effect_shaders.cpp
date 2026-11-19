@@ -168,13 +168,17 @@ std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<cons
     return std::nullopt;
 }
 
+bool KeepRecompiledHash(u64 pgm_hash, bool modern_ssr, bool pom_cavity) {
+    return ((pgm_hash == SsrCompositeHash || pgm_hash == WaterHash) && modern_ssr) ||
+           (Pom::Targets(pgm_hash) && pom_cavity);
+}
+
+bool KeepRecompiled(const Shader::Info& info, bool modern_ssr, bool pom_cavity) {
+    return info.hw_stage == Shader::HwStage::Fragment && KeepRecompiledHash(info.pgm_hash, modern_ssr, pom_cavity);
+}
+
 bool KeepRecompiled(const Shader::Info& info) {
-    if (info.hw_stage != Shader::HwStage::Fragment) {
-        return false;
-    }
-    return ((info.pgm_hash == SsrCompositeHash || info.pgm_hash == WaterHash) &&
-            Wanted(BbSettings::EffectModernSsr)) ||
-           (Pom::Targets(info.pgm_hash) && Wanted(BbSettings::EffectPomCavity));
+    return KeepRecompiled(info, Wanted(BbSettings::EffectModernSsr), Wanted(BbSettings::EffectPomCavity));
 }
 
 bool GtaoActive() {

@@ -8,21 +8,19 @@
 #include <cstring>
 #include <memory>
 
+#include "lantern_steps.h"
+#include "lantern_switches.h"
+
 namespace BbNativeCalls {
 namespace {
 
 Mode ReadMode() {
-    const char* env = std::getenv("BB_NATIVE_CALLS");
-    if (!env || !env[0] || std::strcmp(env, "0") == 0) {
-        return Mode::Off;
+    Lantern::Steps::StartOnce();
+    switch (Lantern::Steps::Get(Lantern::StepId::direct_draw_calls)) {
+    case Lantern::Mode::Compare: return Mode::Verify;
+    case Lantern::Mode::On: return Mode::Native;
+    case Lantern::Mode::Off: break;
     }
-    if (std::strcmp(env, "verify") == 0) {
-        return Mode::Verify;
-    }
-    if (std::strcmp(env, "1") == 0) {
-        return Mode::Native;
-    }
-    std::printf("Native calls: BB_NATIVE_CALLS=%s not understood (verify or 1), off\n", env);
     return Mode::Off;
 }
 
@@ -118,6 +116,8 @@ bool Take(u64 address, DrawRecord& record) {
 void NoteVerified(bool ok) {
     ++verified;
     mismatches += !ok;
+    Lantern::Steps::Checked(Lantern::Steps::Slot(), Lantern::StepId::direct_draw_calls, ok,
+                            Lantern::Evidence{.what = "draw record vs the game's PM4 packet"}, 0);
 }
 
 void NoteUnrecorded() {
@@ -171,8 +171,7 @@ void NoteDecoded() {
 }
 
 bool TimingEnabled() {
-    static const bool on = std::getenv("BB_FRAME_STATS") != nullptr;
-    return on;
+    return Lantern::Switches::Get().frame_stats;
 }
 
 void AddPacketTicks(u64 ticks, bool is_draw) {

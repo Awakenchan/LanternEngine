@@ -17,6 +17,7 @@
 #include "bbport_timeline.h"
 #include "face_shot.h"
 #include "lantern_anti_lag.h"
+#include "video_core/renderer_vulkan/vk_fsr_framegen.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -216,6 +217,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
             device.createFence({.flags = vk::FenceCreateFlagBits::eSignaled}));
     }
     frame_gen = std::make_unique<FrameGenerator>(instance, draw_scheduler);
+    if (FsrFrameGen::SelectedAtStart() && !BbSettings::Get().fsr_fg_running.load() &&
+        !BbSettings::Get().fsr_fg_problem.load()) {
+        FsrFrameGen::Fallback("AMD's swapchain was not made");
+    }
     rasterizer->GetUpscaler().SetFrameGenerator(frame_gen.get());
     // bbport: DLSS Frame Generation (vk_streamline.h): a slot and a HUD-less frame per
     // presentation frame (images made at their first use).
@@ -265,7 +270,45 @@ void Presenter::ReportState() {
     }
 }
 
+namespace {
+
+void PrintPresentHealth(const PresentPolicy::State& policy) {
+    const PresentPolicy::PresentHealth& health = policy.health;
+    const auto read = [](const std::atomic<u64>& counter) {
+        return static_cast<unsigned long long>(counter.load(std::memory_order_relaxed));
+    };
+    std::printf("Display (%s=%d): acquire timeouts %llu, frame wait timeouts %llu (redraw %llu), "
+                "suboptimal reports %llu, rebuilds: surface changed %llu, surface unknown %llu, "
+                "once per episode %llu; sticky rechecks %llu (failed %llu)\n",
+                PresentPolicy::kPolicySwitch, policy.mode == PresentPolicy::PolicyMode::New ? 1 : 0,
+                read(health.acquire_timeouts), read(health.render_frame_wait_timeouts),
+                read(health.redraw_wait_timeouts), read(health.suboptimal_reports),
+                read(health.suboptimal_changed_rebuilds), read(health.suboptimal_unknown_rebuilds),
+                read(health.suboptimal_latch_rebuilds), read(health.suboptimal_rechecks),
+                read(health.suboptimal_recheck_failures));
+}
+
+bool WaitFrameFence(vk::Device device, vk::Fence fence, u64 timeout_ns, std::atomic<u64>& timeouts,
+                    const char* outcome) {
+    const vk::Result result = device.waitForFences(fence, false, timeout_ns);
+    if (result == vk::Result::eSuccess) {
+        return true;
+    }
+    if (result == vk::Result::eErrorDeviceLost) {
+        Breadcrumbs::ReportDeviceLost("waiting for a frame");
+    }
+    ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during waiting for a frame");
+    if (result == vk::Result::eTimeout && PresentPolicy::CountFirst(timeouts)) {
+        std::printf("Display: a presentation frame was not done within %llu ms; %s\n",
+                    static_cast<unsigned long long>(timeout_ns / 1'000'000ull), outcome);
+    }
+    return false;
+}
+
+} // namespace
+
 void Presenter::WaitForSubmittedWork(u64 timeout_ns) {
+    PrintPresentHealth(swapchain.Policy());
     // bbport: exit only. One deadline for the whole wait (it was timeout_ns per scheduler, up to
     // 3x). Every queue submission and present goes out under Scheduler::submit_mutex: taking it
     // (and never giving it back - the process is ending) stops the guest from queueing more
@@ -760,20 +803,14 @@ Frame* Presenter::PrepareLastFrame() {
 
     Frame* frame = last_submit_frame;
 
-    while (true) {
-        vk::Result result = instance.GetDevice().waitForFences(frame->present_done, false,
-                                                               std::numeric_limits<u64>::max());
-        if (result == vk::Result::eSuccess) {
-            break;
+    const PresentPolicy::PolicyMode policy_mode = swapchain.Policy().mode;
+    while (!WaitFrameFence(instance.GetDevice(), frame->present_done,
+                           PresentPolicy::RedrawWaitNs(policy_mode),
+                           swapchain.Policy().health.redraw_wait_timeouts,
+                           "the screen redraw is skipped")) {
+        if (PresentPolicy::RedrawGivesUp(policy_mode)) {
+            return nullptr;
         }
-        if (result == vk::Result::eTimeout) {
-            continue;
-        }
-        if (result == vk::Result::eErrorDeviceLost) {
-            Breadcrumbs::ReportDeviceLost("waiting for a frame");
-        }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
     }
 
     auto& scheduler = flip_scheduler;
@@ -954,13 +991,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->dlss = {};
     frame->dlss.index = dlss_fg->CurrentFrame();
     Frame* dlss_hudless = nullptr;
-    if (gen_job && gen_job->dlss && dlss_fg->Available()) {
+    FsrFrameGen* const fsr_fg =
+        gen_job && gen_job->sdk && swapchain.UsesFsrFrameGen() ? swapchain.GetFsrFrameGen() : nullptr;
+    if (gen_job && gen_job->dlss && (gen_job->sdk ? fsr_fg != nullptr : dlss_fg->Available())) {
         dlss_hudless = &dlss_hudless_frames[frame->id];
         if (dlss_hudless->width != frame->width || dlss_hudless->height != frame->height ||
             dlss_hudless->is_hdr != frame->is_hdr || !dlss_hudless->image) {
             RecreateFrame(dlss_hudless, frame->width, frame->height);
         }
-        dlss_fg->EnsureSlot(frame->id, gen_job->render_width, gen_job->render_height);
+        if (fsr_fg) {
+            fsr_fg->EnsureSlot(frame->id, gen_job->render_width, gen_job->render_height);
+        } else {
+            dlss_fg->EnsureSlot(frame->id, gen_job->render_width, gen_job->render_height);
+        }
         frame->dlss.inputs = true;
         frame->dlss.slot = frame->id;
         frame->dlss.render_width = gen_job->render_width;
@@ -981,7 +1024,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const u32 pp_crumb = crumbs ? Breadcrumbs::Note(stream, {.name = "presenter post process"}) : 0;
     draw_scheduler.Record([this, frame, image_view, image_size, frame_subresources, stream,
                            fsr_crumb, pp_crumb, fsr = fsr_settings, pp = pp_settings, generated,
-                           gen_job, dlss_hudless, dlss_srgb, dlss = dlss_fg.get(),
+                           gen_job, dlss_hudless, dlss_srgb, dlss = dlss_fg.get(), fsr_fg,
                            fg = frame_gen.get()](vk::CommandBuffer cmdbuf) {
         // Frames of different submissions may be recorded on two threads at once.
         std::scoped_lock lock{passes_mutex};
@@ -1016,8 +1059,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         // bbport: DLSS Frame Generation's inputs for this frame: copies of the captures, and the
         // frame without its UI through the same post process (its capture stays in General).
         if (dlss_hudless) {
-            dlss->RecordInputs(cmdbuf, frame->id, fg->DepthImage(), fg->MotionImage(),
-                               gen_job->render_width, gen_job->render_height);
+            if (fsr_fg) {
+                fsr_fg->RecordInputs(cmdbuf, frame->id, fg->DepthImage(), fg->MotionImage(),
+                                     gen_job->render_width, gen_job->render_height);
+            } else {
+                dlss->RecordInputs(cmdbuf, frame->id, fg->DepthImage(), fg->MotionImage(),
+                                   gen_job->render_width, gen_job->render_height);
+            }
             const auto hudless_barrier = [&](vk::ImageLayout from, vk::ImageLayout to) {
                 const vk::ImageMemoryBarrier2 barrier{
                     .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -1197,7 +1245,7 @@ Frame* Presenter::TakeGeneratedFrame() {
     return nullptr;
 }
 
-bool Presenter::PresentGenerated(Frame* frame, Frame* generated) {
+bool Presenter::PresentGenerated(Frame* frame, Frame* generated, bool& reached) {
     // Its commands went out with the real frame's submission.
     if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
         draw_scheduler.WaitSubmitted(frame->ready_tick);
@@ -1207,7 +1255,9 @@ bool Presenter::PresentGenerated(Frame* frame, Frame* generated) {
         frame_gen->ShouldPresentGenerated()) {
         const auto start = FrameGenerator::Clock::now();
         hdr_gain_source = frame; // HDR output: the real frame's gain map (PresentHdr)
-        Present(generated, true, false);
+        presenting_generated = true;
+        reached = Present(generated, true, false);
+        presenting_generated = false;
         hdr_gain_source = nullptr;
         shown = true;
         frame_gen->WaitForRealSlot(start);
@@ -1217,12 +1267,12 @@ bool Presenter::PresentGenerated(Frame* frame, Frame* generated) {
     return shown;
 }
 
-void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+bool Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
     // bbport: frame generation: one more swapchain image while it is on; the generated frame
     // goes first, the real one half a game frame later.
     const bool real_game_frame = !is_reusing_frame && is_game_frame;
     const auto present_start = FrameGenerator::Clock::now();
-    bool generated_made = false, generated_shown = false;
+    bool generated_made = false, generated_shown = false, generated_reached = false;
     if (real_game_frame) {
         if (swapchain.SetExtraImages(frame_gen->WantsExtraImage() ? 1 : 0) &&
             window.GetWidth() != 0 && window.GetHeight() != 0) {
@@ -1232,12 +1282,15 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
         if (Frame* generated = std::exchange(frame->generated, nullptr)) {
             generated_made = true;
-            generated_shown = PresentGenerated(frame, generated);
+            generated_shown = PresentGenerated(frame, generated, generated_reached);
         }
     }
+    const bool record = (real_game_frame || presenting_generated) && frame_gen->Recording();
     const auto note_real = [&] {
         if (real_game_frame && frame_gen->Enabled()) {
-            frame_gen->OnRealPresented(present_start, generated_shown, generated_made);
+            frame_gen->NoteSwapchain(swapchain.GetPresentMode(), swapchain.GetImageCount());
+            frame_gen->OnRealPresented(present_start, generated_shown, generated_made,
+                                       generated_reached);
         }
     };
 
@@ -1250,11 +1303,17 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             free_cv.notify_one();
         }
     };
+    const auto bail = [&] {
+        free_frame();
+        if (record) {
+            frame_gen->RecordPresent(presenting_generated, FrameGenerator::Clock::now(), 0, false);
+        }
+        return false;
+    };
 
     // bbport: nothing to present to while the window is minimised (a 0x0 surface, issue #31).
     if (window.GetWidth() == 0 || window.GetHeight() == 0) {
-        free_frame();
-        return;
+        return bail();
     }
     // Recreate the swapchain if the window was resized (or was minimised at the last try).
     if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight() ||
@@ -1262,21 +1321,31 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         dlss_fg->BeforeSwapchainChange();
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.IsPresentable()) {
-            free_frame();
-            return;
+            return bail();
         }
     }
 
-    if (!swapchain.AcquireNextImage()) {
+    using Vulkan::PresentPolicy::AcquireStep;
+    const auto acquire_start =
+        record ? FrameGenerator::Clock::now() : FrameGenerator::Clock::time_point{};
+    AcquireStep acquired = swapchain.AcquireNextImage();
+    if (acquired == AcquireStep::Rebuild) {
         dlss_fg->BeforeSwapchainChange();
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        if (!swapchain.AcquireNextImage()) {
+        acquired = swapchain.AcquireNextImage();
+        if (acquired == AcquireStep::Rebuild) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
-            free_frame();
-            return;
         }
     }
+    if (acquired != AcquireStep::Acquired) {
+        return bail();
+    }
+    const u32 acquire_wait_us =
+        record ? u32(std::chrono::duration_cast<std::chrono::microseconds>(
+                         FrameGenerator::Clock::now() - acquire_start)
+                         .count())
+               : 0;
 
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
@@ -1310,6 +1379,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         const vk::Extent2D extent = swapchain.GetExtent();
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
         PresentHdr(cmdbuf, frame, extent, real_game_frame && frame->dlss.inputs);
+        if (swapchain.UsesFsrFrameGen()) {
+            swapchain.GetFsrFrameGen()->RecordPresent(cmdbuf, nullptr, {}, {frame->width, frame->height},
+                                                      swapchain.GetSurfaceFormat().format, extent,
+                                                      {{0, 0}, extent}, BbOverlay::MenuOpen(), true);
+        }
     } else {
         const vk::Extent2D extent = swapchain.GetExtent();
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
@@ -1427,6 +1501,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    {frame->width, frame->height}, swapchain_image,
                                    swapchain.GetSurfaceFormat().format, extent, fit);
         }
+        if (swapchain.UsesFsrFrameGen()) {
+            const bool inputs = real_game_frame && frame->dlss.inputs;
+            swapchain.GetFsrFrameGen()->RecordPresent(
+                cmdbuf, inputs ? &frame->dlss : nullptr,
+                inputs ? dlss_hudless_frames[frame->id].image : vk::Image{}, {frame->width, frame->height},
+                swapchain.GetSurfaceFormat().format, extent, fit, BbOverlay::MenuOpen(), false);
+        }
     }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
@@ -1454,11 +1535,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         LanternAntiLag::BeforePresent();
     }
     bool presented;
-    {
+    if (swapchain.UsesFsrFrameGen()) {
+        presented = swapchain.Present();
+    } else {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         presented = swapchain.Present();
     }
     dlss_fg->AfterPresent(dlss_info);
+    if (swapchain.UsesFsrFrameGen()) {
+        swapchain.GetFsrFrameGen()->AfterPresent(real_game_frame);
+    }
     // bbport: recreated after the lock: its device wait takes it (Swapchain::WaitIdle).
     if (!presented) {
         dlss_fg->BeforeSwapchainChange();
@@ -1469,7 +1555,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
     }
+    if (record) {
+        frame_gen->RecordPresent(presenting_generated, FrameGenerator::Clock::now(),
+                                 acquire_wait_us, presented);
+    }
     note_real();
+    return presented;
 }
 
 Frame* Presenter::GetRenderFrame() {
@@ -1486,24 +1577,9 @@ Frame* Presenter::GetRenderFrame() {
     }
 
     const vk::Device device = instance.GetDevice();
-    vk::Result result{};
-
-    const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
-        return result;
-    };
-
-    // Wait for the presentation to be finished so all frame resources are free
-    while (wait() != vk::Result::eSuccess) {
-        if (result == vk::Result::eErrorDeviceLost) {
-            Breadcrumbs::ReportDeviceLost("waiting for a frame");
-        }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
-        // Retry if the waiting times out
-        if (result == vk::Result::eTimeout) {
-            continue;
-        }
+    while (!WaitFrameFence(device, frame->present_done, PresentPolicy::RenderFrameWaitNs(swapchain.Policy().mode),
+                           swapchain.Policy().health.render_frame_wait_timeouts,
+                           "still waiting, the frame is in use")) {
     }
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||

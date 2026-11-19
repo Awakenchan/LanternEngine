@@ -23,6 +23,8 @@ std::span<const u32> Replacement(const Shader::Info& info, const Shader::Profile
 std::optional<std::vector<u32>> Patched(const Shader::Info& info, std::span<const u32> spv);
 
 bool KeepRecompiled(const Shader::Info& info);
+bool KeepRecompiled(const Shader::Info& info, bool modern_ssr, bool pom_cavity);
+bool KeepRecompiledHash(u64 pgm_hash, bool modern_ssr, bool pom_cavity);
 
 bool GtaoActive();
 bool SsrActive();

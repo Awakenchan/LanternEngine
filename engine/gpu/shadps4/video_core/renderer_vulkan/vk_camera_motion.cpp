@@ -12,12 +12,14 @@
 #include "bbport_toggles.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
+#include "video_core/host_shaders/camera_motion_clean_comp.h"
 #include "video_core/host_shaders/camera_motion_debug_comp.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/upscaler_skips.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
@@ -121,6 +123,35 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
                     .layout = *motion_pipeline_layout,
                 }));
         device.destroyShaderModule(motion_module);
+        const std::array<vk::DescriptorSetLayoutBinding, 4> clean_bindings = {{
+            motion_bindings[0],
+            motion_bindings[1],
+            motion_bindings[2],
+            {.binding = 3,
+             .descriptorType = vk::DescriptorType::eStorageImage,
+             .descriptorCount = 1,
+             .stageFlags = vk::ShaderStageFlagBits::eCompute},
+        }};
+        clean_desc_layout = Check(device.createDescriptorSetLayoutUnique({
+            .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+            .bindingCount = static_cast<u32>(clean_bindings.size()),
+            .pBindings = clean_bindings.data(),
+        }));
+        clean_pipeline_layout = Check(device.createPipelineLayoutUnique({
+            .setLayoutCount = 1,
+            .pSetLayouts = &*clean_desc_layout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &range,
+        }));
+        const auto clean_module = CompileSPV(CAMERA_MOTION_CLEAN_COMP, device);
+        clean_pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                              .module = clean_module,
+                              .pName = "main"},
+                    .layout = *clean_pipeline_layout,
+                }));
+        device.destroyShaderModule(clean_module);
     }
     if (!debug_overlay) {
         return;
@@ -213,13 +244,21 @@ vk::ImageView CameraMotion::ObjectMotionView() const noexcept {
     return object_motion && object_motion->Enabled() ? object_motion->View() : vk::ImageView{};
 }
 
+CameraMotion::ObjectMotionTarget CameraMotion::ObjectMotionWritten(u32 width, u32 height) const noexcept {
+    if (!object_motion || !object_motion->Enabled()) {
+        return {};
+    }
+    const auto written = object_motion->WrittenTarget(width, height);
+    return {written.image, written.view, written.layout};
+}
+
 vk::Image CameraMotion::ObjectMotionImage(u32 width, u32 height) const noexcept {
     return object_motion && object_motion->Enabled() ? object_motion->Image(width, height)
                                                       : vk::Image{};
 }
 
 void CameraMotion::RecordMotion(vk::ImageView depth_view, vk::ImageView motion_view, u32 width,
-                                u32 height) {
+                                u32 height, vk::ImageView color_view) {
     CommitFrameCamera();
     bool object_valid = false;
     const vk::ImageView object_view = object_motion && object_motion->Enabled()
@@ -235,16 +274,20 @@ void CameraMotion::RecordMotion(vk::ImageView depth_view, vk::ImageView motion_v
     };
     // bbport: everything the pass reads is captured: it may be recorded on a recording thread
     // while this thread goes on with the next frame's camera.
-    scheduler.RecordCrumb({.name = "camera motion"}, [push, depth_view, motion_view, object_view, width, height,
-                      pipeline = *motion_pipeline,
-                      layout = *motion_pipeline_layout](vk::CommandBuffer cmdbuf) {
+    const bool clean = color_view && clean_pipeline;
+    scheduler.RecordCrumb({.name = "camera motion"}, [push, depth_view, motion_view, object_view, color_view, clean,
+                      width, height,
+                      pipeline = clean ? *clean_pipeline : *motion_pipeline,
+                      layout = clean ? *clean_pipeline_layout : *motion_pipeline_layout](vk::CommandBuffer cmdbuf) {
         const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                                  .imageLayout = vk::ImageLayout::eGeneral};
         const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
                                                   .imageLayout = vk::ImageLayout::eGeneral};
         const vk::DescriptorImageInfo object_info{.imageView = object_view,
                                                   .imageLayout = vk::ImageLayout::eGeneral};
-        const std::array<vk::WriteDescriptorSet, 3> writes = {{
+        const vk::DescriptorImageInfo color_info{.imageView = color_view,
+                                                 .imageLayout = vk::ImageLayout::eGeneral};
+        const std::array<vk::WriteDescriptorSet, 4> writes = {{
             {.dstBinding = 0,
              .descriptorCount = 1,
              .descriptorType = vk::DescriptorType::eSampledImage,
@@ -257,11 +300,25 @@ void CameraMotion::RecordMotion(vk::ImageView depth_view, vk::ImageView motion_v
              .descriptorCount = 1,
              .descriptorType = vk::DescriptorType::eSampledImage,
              .pImageInfo = &object_info},
+            {.dstBinding = 3,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eStorageImage,
+             .pImageInfo = &color_info},
         }};
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
-        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0,
+                                    vk::ArrayProxy<const vk::WriteDescriptorSet>(clean ? 4u : 3u, writes.data()));
         cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push), &push);
         cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        if (clean) {
+            const vk::MemoryBarrier2 written{
+                .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            };
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+        }
     });
 }
 
@@ -362,12 +419,48 @@ void CameraMotion::OnConstants(const float* data) {
 void CameraMotion::OnGBufferPass(VideoCore::ImageId depth, float x_sign, float y_sign) {
     if (depth != depth_id) {
         // Another depth target: another G-buffer pass, with its own camera.
+        if (depth_id) {
+            if (earlier_count == earlier_passes.size()) {
+                std::move(earlier_passes.begin() + 1, earlier_passes.end(), earlier_passes.begin());
+                --earlier_count;
+            }
+            earlier_passes[earlier_count++] = {depth_id, pass_camera, pass_has_camera};
+        }
         depth_id = depth;
         pass_has_camera = false;
         ++frame_gbuffer_passes;
     }
     gbuffer_x_sign = x_sign;
     gbuffer_y_sign = y_sign;
+}
+
+bool CameraMotion::RepickDepth(u32 width, u32 height) {
+    if (committed || !earlier_count || PreviewFrame()) {
+        return false;
+    }
+    std::array<Vulkan::UpscalerSkips::PassDepth, 4> sizes{};
+    for (u32 i = 0; i < earlier_count; ++i) {
+        const auto& image = texture_cache.GetImage(earlier_passes[i].depth);
+        sizes[i] = {image.info.size.width, image.info.size.height,
+                    earlier_passes[i].has_camera && earlier_passes[i].camera.valid};
+    }
+    const int picked = Vulkan::UpscalerSkips::PickDepth(sizes.data(), earlier_count, width, height);
+    if (picked < 0) {
+        return false;
+    }
+    const auto& pass = earlier_passes[picked];
+    static bool told = false;
+    if (!told) {
+        told = true;
+        const auto& last = texture_cache.GetImage(depth_id);
+        std::printf("Camera motion: the last G-buffer depth is %ux%u, the frame %ux%u: an earlier pass's depth "
+                    "and camera are used\n",
+                    last.info.size.width, last.info.size.height, width, height);
+    }
+    depth_id = pass.depth;
+    pass_camera = pass.camera;
+    pass_has_camera = true;
+    return true;
 }
 
 void CameraMotion::CommitFrameCamera() {
@@ -405,6 +498,7 @@ void CameraMotion::OnDisplayPass(VideoCore::ImageId frame) {
     // A pass whose camera is not seen next frame must not keep this frame's position.
     for (auto& position : pass_positions) position.fill(std::numeric_limits<float>::quiet_NaN());
     frame_gbuffer_passes = 0;
+    earlier_count = 0;
     depth_id = {};
 }
 

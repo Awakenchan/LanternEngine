@@ -37,6 +37,8 @@
             new("FSR 3.1 (2x)", "fsr3", L.T("Needs an upscaler. Not in menus, movies or with HDR output")),
             new("DLSS (NVIDIA RTX 40/50)", "dlss",
                 L.T("NVIDIA's frame generation with Reflex: 2x on RTX 40, up to 6x on RTX 50. Needs an upscaler and Hardware-accelerated GPU scheduling. Applied when the game starts")),
+            new("FSR Frame Generation (AMD)", "fsr",
+                L.T("AMD FSR SDK frame generation, 2x, paced by AMD's swapchain: FSR 4 (ML) on Radeon RX 9000 with Windows 11, FSR 3.1 on other GPUs. Needs an upscaler. Applies when the game starts: while it runs, after a restart")),
         };
 
         /// <summary>frame_gen_frames: DLSS generated frames per real one (more than one: RTX 50).</summary>
@@ -162,6 +164,12 @@
             new(L.T("High"), "1"),
         };
 
+        public static readonly Choice[] PointFogFalloff =
+        {
+            new(L.T("Classic"), "0"),
+            new(L.T("Inverse-square"), "1"),
+        };
+
         /// <summary>graphics_ao_quality: the GTAO replacement's quality (effect_gtao).</summary>
         public static readonly Choice[] AoQualities =
         {
@@ -195,13 +203,11 @@
         /// <summary>The DLSS model (BB_DLSS_PRESET): NVIDIA's render presets.</summary>
         public static readonly Choice[] DlssModels =
         {
-            new(L.T("Auto (per quality)"), "auto", L.T("NVIDIA's DLSS 4.5 pairing: K for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance")),
+            new(L.T("Auto (per quality)"), "auto", L.T("NVIDIA's DLSS 4.5 pairing: K for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance; K for all on RTX 20 and 30 cards")),
             new(L.T("Transformer (preset K)"), "k", L.T("The newer model: steadier thin and moving objects (a weapon on the back, railings)")),
             new(L.T("Transformer 2 (preset M)"), "m", L.T("DLSS 4.5's model for Performance: sharper, a little heavier")),
             new(L.T("Transformer 2 (preset L)"), "l", L.T("DLSS 4.5's model for Ultra Performance")),
             new(L.T("Transformer (preset J)"), "j", L.T("Like K, slightly less ghosting and a little more flicker")),
-            new(L.T("CNN (preset E)"), "e", L.T("The older model: a little faster on RTX 20 and 30 cards, softer and more ghosting in motion")),
-            new(L.T("CNN (preset F)"), "f", L.T("The older model for Ultra Performance and DLAA")),
             new(L.T("The DLL's default"), "default", L.T("Whatever the included DLSS version picks for each quality mode")),
         };
 
@@ -302,11 +308,6 @@
         public static readonly Choice[] HdrUiColor =
         {
             new(L.T("Exact (sRGB)"), "0"), new(L.T("In between"), "0.5"), new(L.T("Vivid (default)"), "1"),
-        };
-
-        public static readonly Choice[] OnlineServers =
-        {
-            new(L.T("The Hunter's Dream"), "huntersdream"), new("SuperMedo", SuperMedo.Id),
         };
 
         public static readonly Choice[] NamePlates =

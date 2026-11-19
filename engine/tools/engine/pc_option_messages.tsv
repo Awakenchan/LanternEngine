@@ -93,11 +93,14 @@
 127005	Sun Shadow Resolution	Higher needs more video memory. Requires a restart.	太阳阴影分辨率	越高需要越多显存。需要重启。	Разрешение теней от солнца	Чем выше, тем больше видеопамяти. Нужен перезапуск.
 127006	Lamp Shadow Resolution	Higher needs more video memory. Requires a restart.	灯光阴影分辨率	越高需要越多显存。需要重启。	Разрешение теней от ламп	Чем выше, тем больше видеопамяти. Нужен перезапуск.
 127007	Motion Blur Quality	Motion Blur must be on. Requires a restart.	动态模糊质量	需开启动态模糊。需要重启。	Качество размытия	Размытие в движении должно быть включено. Нужен перезапуск.
+127008	Lamp Fog Falloff	Classic is the original look. Inverse-square gives a bright, tight glow at each flame and costs more GPU time than classic. Needs Fog Around Lamps.	灯光雾衰减	经典为原版效果。平方反比在每个火焰处形成明亮集中的光晕，GPU 开销高于经典。需要灯光周围的雾。	Спад тумана от ламп	Классический — исходный вид. Обратный квадрат даёт яркое плотное свечение у каждого огня и нагружает GPU сильнее классического. Нужен туман вокруг ламп.
 127010	Game's Own		游戏自带		Как в игре
 127011	4096	
 127012	8192	
 127013	High		高		Высокое
 127014	Very High		很高		Очень высокое
+127015	Classic		经典		Классический
+127016	Inverse-Square		平方反比		Обратный квадрат
 110018	PC Looks	Lighting presets, including BB Remastered, and a way back to your settings.	PC 画面风格	光照预设（含 BB Remastered），并可恢复你的设置。	Образы (ПК)	Пресеты освещения, включая BB Remastered, и возврат к вашим настройкам.
 128020	PC Looks		PC 画面风格		Образы (ПК)
 128000	Look	Applies at once. Reflections, parallax and shadow sizes need a restart.	风格	立即应用。反射、视差和阴影尺寸需要重启。	Образ	Применяется сразу. Отражения, параллакс и размеры теней требуют перезапуска.

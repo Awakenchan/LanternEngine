@@ -3,6 +3,7 @@
 // the peer table, the event poller and the keepalive. Adapted from droogie/bbhost
 // src/net/{http,account,session}.cpp and src/engine/summon_invite.cpp (566184a).
 #include "httplib.h"
+#include "../../shim/test_sandbox.h"
 
 #include "thd.h"
 #include "thd_internal.h"
@@ -73,9 +74,6 @@ const Config& Cfg() {
         c.np_base = Env("BB_THD_SERVER");
         if (c.np_base.empty()) c.np_base = "https://thehuntersdream.com:18671";
         while (!c.np_base.empty() && c.np_base.back() == '/') c.np_base.pop_back();
-        c.auth_base = Env("BB_THD_AUTH");
-        if (c.auth_base.empty()) c.auth_base = "https://thehuntersdream.com";
-        while (!c.auth_base.empty() && c.auth_base.back() == '/') c.auth_base.pop_back();
         c.stun = Env("BB_THD_STUN");
         c.ruleset = Env("BB_THD_RULESET");
         if (c.ruleset.empty()) c.ruleset = "vanilla";
@@ -121,6 +119,9 @@ void LoadAccountLocked() {
     if (BbRoom::Active()) {
         g_name = BbRoom::NetworkId();
         g_token = g_name.empty() ? "" : "room";
+    } else if (!Env("BB_THD_REFUSED").empty()) {
+        g_refused = true;
+        g_token.clear();
     }
 }
 } // namespace
@@ -142,6 +143,7 @@ bool SignedIn() {
 }
 bool Refused() {
     std::lock_guard lk(g_account_mu);
+    LoadAccountLocked();
     return g_refused;
 }
 void MarkRefused(const std::string& reason) {
@@ -176,8 +178,6 @@ std::string OnlineId() {
     return name.empty() ? "Player" : name;
 }
 
-void SignInCheck();
-
 void Initialize() {
     const Config& c = Cfg();
     if (BbRoom::Active()) {
@@ -188,7 +188,10 @@ void Initialize() {
     if (SignedIn()) {
         Log("The Hunter's Dream as %s: session service %s, P2P port %d", AccountName().c_str(),
             c.np_base.c_str(), c.p2p_port);
-        std::thread(SignInCheck).detach();
+    } else if (Refused()) {
+        Log("The Hunter's Dream did not take this PC's sign-in before the start (%s): the game stays offline; "
+            "sign in again on the launcher's Online page",
+            Env("BB_THD_REFUSED").c_str());
     } else {
         Log("not signed in to The Hunter's Dream (the launcher's Online page): the game stays offline");
     }
@@ -229,61 +232,87 @@ struct HttpResult {
 std::mutex g_poll_client_mu;
 httplib::Client* g_poll_client = nullptr;
 std::atomic<bool> g_pollrun{false};
+std::atomic<unsigned> g_pollgen{0};
+thread_local unsigned t_pollgen = 0;
+
+bool PollerLive() {
+    return t_pollgen != 0 && g_pollrun.load() && g_pollgen.load() == t_pollgen;
+}
+
+thread_local bool t_poll_send = false;
+
+struct PollAbandoned {};
 
 HttpResult Perform(const std::string& base, const std::string& path, const std::string* post,
                    int timeout_ms) {
+    if (!LanternSandbox::AllowUrl(base, "THD request")) {
+        HttpResult refused;
+        refused.error = "refused by the test sandbox";
+        return refused;
+    }
     thread_local std::map<std::string, std::unique_ptr<httplib::Client>> clients;
-    auto& cli = clients[base];
+    const bool keep = path == "/np/events/poll" || path == "/np/events/ack";
+    std::unique_ptr<httplib::Client> once;
+    auto& cli = keep ? clients[base] : once;
     const auto timeout = std::chrono::milliseconds(timeout_ms);
-    auto open = [&] {
-        cli = std::make_unique<httplib::Client>(base);
-        cli->set_keep_alive(true);
-        cli->set_follow_location(false);
+    auto make = [&] {
+        auto c = std::make_unique<httplib::Client>(base);
+        c->set_keep_alive(keep);
+        c->set_follow_location(false);
+        c->set_socket_options([](socket_t sock) {
+            LanternSandbox::NoteSocket();
+            if (t_poll_send && !PollerLive()) {
+                httplib::detail::close_socket(sock);
+                throw PollAbandoned{};
+            }
+        });
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-        cli->enable_server_certificate_verification(Cfg().verify_tls);
-        if (Cfg().verify_tls) bbnet::TrustWindowsRoots(*cli, base);
+        c->enable_server_certificate_verification(Cfg().verify_tls);
+        if (Cfg().verify_tls) bbnet::TrustWindowsRoots(*c, base);
 #endif
+        return c;
     };
-    const bool reused = cli != nullptr;
-    if (!cli) open();
+    if (!cli) cli = make();
     httplib::Headers headers{{"Accept", "application/json"},
                              {"User-Agent", Cfg().client},
                              {"X-BBHost-Ruleset", Cfg().ruleset}};
     if (const std::string token = AccountToken(); !token.empty()) {
         headers.emplace("X-BB-Token", token);
     }
-    auto send = [&] {
+    const bool poll = path == "/np/events/poll";
+    auto send = [&]() -> httplib::Result {
         // Connecting stays at a few seconds; only the read waits as long as the request asks (a held poll).
         cli->set_connection_timeout(std::min(timeout, std::chrono::milliseconds(5000)));
         cli->set_read_timeout(timeout);
         cli->set_write_timeout(timeout);
-        return post ? cli->Post(path, headers, *post, "application/json") : cli->Get(path, headers);
+        t_poll_send = poll;
+        httplib::Result res;
+        try {
+            res = post ? cli->Post(path, headers, *post, "application/json") : cli->Get(path, headers);
+        } catch (const PollAbandoned&) {
+            res = httplib::Result{nullptr, httplib::Error::Canceled};
+        }
+        t_poll_send = false;
+        if (poll) {
+            std::lock_guard lk(g_poll_client_mu);
+            g_poll_client = nullptr;
+        }
+        return res;
     };
     HttpResult r;
-    const bool poll = path == "/np/events/poll";
     if (poll) {
         std::lock_guard lk(g_poll_client_mu);
+        if (!PollerLive()) {
+            r.error = httplib::to_string(httplib::Error::Canceled);
+            return r;
+        }
         g_poll_client = cli.get();
     }
-    const auto sent_at = std::chrono::steady_clock::now();
     httplib::Result res = send();
-    if (poll) {
-        std::lock_guard lk(g_poll_client_mu);
-        g_poll_client = nullptr;
-    }
-    const bool quick = std::chrono::steady_clock::now() - sent_at < std::chrono::milliseconds(1000);
-    // A kept-alive connection the server closed meanwhile fails on its first read or write
-    // ("Failed to read connection"): once more on a new one, as bbhost's fresh request would.
-    // A read that ran into its timeout is not that: the server had the request.
-    const bool kept = path == "/np/events/poll" || path == "/np/events/ack";
-    if (!res && kept && reused && quick && (!poll || g_pollrun.load()) &&
-        (res.error() == httplib::Error::Read || res.error() == httplib::Error::Write)) {
-        open();
-        res = send();
-    }
     if (!res) {
         r.error = httplib::to_string(res.error());
-        cli.reset(); // a fresh connection next time
+        std::lock_guard lk(g_poll_client_mu);
+        cli.reset();
         return r;
     }
     r.status = res->status;
@@ -320,12 +349,20 @@ std::string NpBase() {
 bool NpPost(const std::string& path, const Json& body, Json& out, std::string& error,
             int timeout_ms) {
     if (BbRoom::Active()) return BbRoom::Call(path, body, out, error, timeout_ms);
+    if (Refused()) {
+        error = "signed out";
+        return false;
+    }
     const std::string text = body.dump();
     return ParseReply("POST " + path, Perform(Cfg().np_base, path, &text, timeout_ms), out, error);
 }
 
 bool NpGet(const std::string& path, Json& out, std::string& error, int timeout_ms) {
     if (BbRoom::Active()) return BbRoom::Call(path, Json::object(), out, error, timeout_ms);
+    if (Refused()) {
+        error = "signed out";
+        return false;
+    }
     return ParseReply("GET " + path, Perform(Cfg().np_base, path, nullptr, timeout_ms), out, error);
 }
 
@@ -608,6 +645,7 @@ void StunServer(std::string* host, std::uint16_t* port) {
 
 // At context_start, then when the answer is over two minutes old (the keepalive asks every 15 s).
 void MappedRefresh(bool force) {
+    if (Refused()) return;
     {
         std::lock_guard lk(g_mapped.mu);
         if (!force && g_mapped.asked && NowMs() - g_mapped.at_ms < 120000) return;
@@ -689,41 +727,6 @@ bool ServerSignalingResolve(const std::string& id, std::uint32_t* addr, std::uin
     return true;
 }
 
-void SignInCheck() {
-    static std::atomic<bool> checked{false};
-    if (checked.exchange(true)) return;
-    const std::string token = AccountToken();
-    if (token.empty() || AccountName().empty()) return;
-    const std::string body = Json{{"Token", token}}.dump();
-    const HttpResult r = Perform(Cfg().auth_base, "/auth/whoami", &body, 5000);
-    const long status = r.error.empty() ? r.status : 0;
-    if (!r.error.empty() || status <= 0) {
-        Log("account: the sign-in could not be checked: %s", r.error.empty() ? "no answer" : r.error.c_str());
-        return;
-    }
-    const Json v = Json::parse(r.body, nullptr, false);
-    const auto kind = v.is_object() ? v.find("ResKind") : v.end();
-    if (!v.is_object() || kind == v.end() || !kind->is_number()) {
-        Log("account: the sign-in could not be checked: HTTP %ld without ResKind", status);
-        return;
-    }
-    if (kind->get<double>() != 0) {
-        if (status != 200 && status != 401) {
-            Log("account: the sign-in could not be checked: HTTP %ld", status);
-            return;
-        }
-        const std::string why = StrOf(v, "Message");
-        MarkRefused(why.empty() ? "refused" : why);
-        return;
-    }
-    const std::string id = StrOf(v, "OnlineId");
-    if (status < 200 || status >= 300 || id.empty()) {
-        Log("account: the sign-in could not be checked: HTTP %ld without OnlineId", status);
-        return;
-    }
-    Log("account: sign-in checked: the server knows this PC as %s", id.c_str());
-}
-
 bool ServerContextStart(Json& reply, std::string& error) {
     BbOnlineGate::MarkLive("The Hunter's Dream");
     MappedRefresh(true);
@@ -731,6 +734,8 @@ bool ServerContextStart(Json& reply, std::string& error) {
     body["OnlineId"] = OnlineId();
     body["SignalingAddr"] = LocalAddrText();
     body["SignalingPort"] = P2pPort();
+    Log("p2p: local address %s, P2P port %d", MaskLanAddress(body["SignalingAddr"].get<std::string>()).c_str(),
+        body["SignalingPort"].get<int>());
     {
         std::lock_guard lk(g_mapped.mu);
         body["MappedAddr"] = g_mapped.addr;
@@ -814,7 +819,6 @@ long long g_cursor = 0;
 // second. Every answer from such a server carries WaitMaxMs; one without it answers at once, so
 // the poller goes back to the 250 ms pacing against it. One poll in flight per player: a poller
 // left over from a stop (still inside a held poll) ends instead of polling beside the new one.
-std::atomic<unsigned> g_pollgen{0};
 
 int Jitter(int ms) {
     thread_local unsigned seed = static_cast<unsigned>(
@@ -825,6 +829,7 @@ int Jitter(int ms) {
 }
 
 void PollerMain(unsigned gen) {
+    t_pollgen = gen;
     const std::string me = OnlineId();
     const auto running = [gen] { return g_pollrun.load() && g_pollgen.load() == gen; };
     int wait_ms = 25000; // long polling from the first poll
@@ -875,7 +880,7 @@ void PollerMain(unsigned gen) {
             pause_ms = wait_ms > 0 ? static_cast<int>(std::max<std::int64_t>(0, 250 - took_ms)) : 250;
             if (pause_ms == 0) continue;
         } else if (Refused()) {
-            pause_ms = 60000; // nothing arrives until this PC signs in again
+            break;
         } else {
             // The server is away (network error, timeout, 5xx, 429): 1, 2, 4 ... 30 s.
             backoff_ms = backoff_ms ? std::min(backoff_ms * 2, 30000) : 1000;
@@ -924,7 +929,7 @@ void KeepaliveMain(unsigned gen) {
             std::unique_lock lk(g_keepmu);
             g_keepcv.wait_for(lk, std::chrono::seconds(15), [&] { return !running(); });
         }
-        if (!running()) break;
+        if (!running() || Refused()) break;
         MappedRefresh(true);
         std::string now;
         {
@@ -1048,6 +1053,9 @@ extern "C" bool bbthd_enabled() {
 }
 extern "C" void bbthd_add_game_headers(std::vector<std::pair<std::string, std::string>>* headers) {
     if (headers) BbThd::AddGameHeaders(*headers);
+}
+extern "C" bool bbthd_signed_out() {
+    return BbThd::Enabled() && !BbRoom::Active() && BbThd::Refused();
 }
 extern "C" void bbthd_game_reply(int status, const std::string* body) {
     if (status != 401 || !body || BbRoom::Active()) return;

@@ -4,9 +4,11 @@
 #include <assert.h>
 
 static char test_user[1024];
-static int active_writes, begins, ends;
+static int active_writes, begins, ends, mount_failure;
+uint64_t host_monotonic_ns(void) { static uint64_t now; return ++now; }
+void host_sleep_ns(uint64_t ns) { (void)ns; }
 const char *sys_file_user_dir(void) { return test_user; }
-int sys_file_mount(const char *guest, const char *host) { (void)guest; (void)host; return 0; }
+int sys_file_mount(const char *guest, const char *host) { (void)guest; (void)host; return mount_failure; }
 void sys_file_unmount(const char *guest) { (void)guest; }
 void bbgpu_save_backups_write(int begin) {
     if (begin) { ++active_writes; ++begins; }
@@ -31,6 +33,10 @@ int main(int argc, char **argv) {
     assert(active_writes == 1); // an unsuccessful mount must not leak a second lock
     assert(save_umount(&result.point) == 0);
     assert(active_writes == 0);
+    mount_failure = 1;
+    assert(save_mount(&request, &result) == SAVE_ERROR_INTERNAL);
+    assert(active_writes == 0); // upstream mount-table failure must release the backup guard
+    mount_failure = 0;
     request.mode = MOUNT_READ_ONLY;
     assert(save_mount(&request, &result) == 0);
     assert(active_writes == 0); // a long-lived read-only mount must not block backups

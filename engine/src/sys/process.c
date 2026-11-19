@@ -98,6 +98,7 @@ static SYS_ABI int32_t yield(void) {
 
 static SYS_ABI __attribute__((noreturn)) void hard_exit(int status) {
     printf("Runtime: guest requested _exit(%d)\n", status);
+    runtime_flush_settings();
     sys_report();
     fflush(stdout);
     _exit(status);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "effect_timing.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include <atomic>
@@ -16,8 +17,7 @@ namespace {
 #define GUEST_ABI __attribute__((sysv_abi))
 
 constexpr std::uint64_t kAdvanceEffects = 0x1cbc980;
-const std::uint8_t kAdvancePrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                         0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x58};
+constexpr const auto& kAdvancePrologue = HookEntries::kEffectTimingAdvancePrologue;
 
 std::uint64_t g_image = 0;
 struct Caller {
@@ -29,7 +29,7 @@ std::mutex g_mutex;
 std::unordered_map<std::uint64_t, Caller> g_callers;
 std::chrono::steady_clock::time_point g_since = std::chrono::steady_clock::now();
 
-GUEST_ABI std::int64_t AdvanceEffects(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t AdvanceEffects(std::uint64_t, std::uint64_t* saved) noexcept {
     float dt = 0;
     std::memcpy(&dt, SavedXmm(saved, 0), sizeof dt);
     const std::uint64_t chr = saved[5], ret = saved[6];
@@ -60,12 +60,15 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const char* on = std::getenv("BB_EFFECT_TIMING");
     if (!on || on[0] != '1') return false;
     Hook hook;
-    if (!Prepare(hook, image, size, kAdvanceEffects - 0x400000, kAdvancePrologue, AdvanceEffects)) {
+    if (!Prepare(hook, image, size, kAdvanceEffects - 0x400000, SiteKind::Entry, kAdvancePrologue, AdvanceEffects)) {
         host_log("Effect timing off: the status effect update differs from 1.09");
         return false;
     }
     g_image = reinterpret_cast<std::uint64_t>(image);
-    Commit(std::span{&hook, 1});
+    if (const WriteResult result = Commit(std::span{&hook, 1}); result != WriteResult::Applied) {
+        host_log("Effect timing off: the status effect update could not be written (%s)", Describe(result));
+        return false;
+    }
     host_log("Effect timing: on (a report every 10 s)");
     return true;
 }

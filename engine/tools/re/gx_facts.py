@@ -163,6 +163,18 @@ TARGET_FLUSH = (0x26d2790, (0x4e0, 0x520))
 VERTEX_FLUSH = (0x26cfcf0, (0xa260, 0x28cc, 0x28cd, 0x20, 0x120, 0x1a0))
 USER_DATA_BASES = 0x48d15c0
 USER_DATA_VALUES = (0x2e40, 0x2c0c, 0x2c4c, 0x2c8c, 0x2ccc, 0x2d0c, 0x2d4c)
+WHOLE_FLUSHES = {
+    'output-merger flush': (0x26d2230, '554889e54157415641554154534883ec38', 0xb558),
+    'index flush': (0x26bba30, '554889e541574156415541545350', 0xb518),
+    'rasterizer flush': (0x26d3370, '554889e54157415641554154534883ec78', 0xb528),
+    'post-draw': (0x26cbd50, '554889e54156534889f34989fe418b9668b30000', 0x50),
+    'target flush': (0x26d2790, '554889e54157415641554154534883ec48', 0xb558),
+    'vertex flush': (0x26cfcf0, '554889e54157415641554154534881ecc8000000', None),
+}
+WHOLE_RESOLVES = (0x26b5a70, 0x26b6810)
+WHOLE_RESETS = {0x26bba10: 0xb518, 0x26d3300: 0xb528, 0x26d2d20: 0xb558}
+WHOLE_RESET_CALLERS = (EXECUTE_COMMAND_LIST[1], EXECUTE_COMMAND_LISTS[1], FINISH_COMMAND_LIST[1], FLIP_PASS)
+WHOLE_BIND_RESET = (0x26bc090, 0x50)
 
 
 def main(path):
@@ -319,6 +331,26 @@ def main(path):
     for name, (holder, dimension) in TEXTURE_HOLDERS.items():
         check(holder in calls(CREATORS[name][0]), f'{name} fills its holder with 0x{holder:x}')
         check(dimension in immediates(e, holder), f'  dimension {dimension}')
+
+    draw_path = {CONTEXT[n][0] for n in ('Draw', 'DrawIndexed', 'DrawInstanced', 'DrawIndexedInstanced',
+                                         'DrawInstancedIndirect', 'DrawIndexedInstancedIndirect', 'Commit')}
+    for name, (f, entry, holder) in WHOLE_FLUSHES.items():
+        check(e.is_function(f) and e.read(f, len(entry) // 2).hex() == entry, f'GX whole: the {name} 0x{f:x} has the entry the hook expects')
+        callers = {e.function(c)[0] for c in e.callers(f)} | {e.function(j)[0] for j in e.jumps_to(f)}
+        expected = {BIND} if name in ('target flush', 'vertex flush') else draw_path
+        check(callers == expected, f'  called only by {"the bind" if expected == {BIND} else "the six draws and the commit"}')
+        if holder and expected == draw_path:
+            check(all(holder in immediates(e, c) for c in draw_path), f'  each passes context+0x{holder:x}')
+    check(all(r in calls(FLUSH_OUTPUT_MERGER) for r in WHOLE_RESOLVES), 'GX whole: the output-merger flush draws its own resolves (0x26b5a70, 0x26b6810)')
+    check(TARGET_FLUSH[0] in calls(BIND) and TARGET_FLUSH[0] != FLUSH_OUTPUT_MERGER,
+          "GX whole: the target flush 0x26d2790 is the bind's, apart from the draws' output-merger flush 0x26d2230")
+    for reset, holder in WHOLE_RESETS.items():
+        check(all(reset in calls(c) for c in WHOLE_RESET_CALLERS) and all(holder in immediates(e, c) for c in WHOLE_RESET_CALLERS),
+              f'GX whole: 0x{reset:x} resets the shadow at context+0x{holder:x} in ExecuteCommandList(s), FinishCommandList and the flip pass')
+    bind_reset, bind_holder = WHOLE_BIND_RESET
+    check({e.function(c)[0] for c in e.callers(bind_reset)} == set(WHOLE_RESET_CALLERS[:3]) and
+          all(bind_holder in immediates(e, c) for c in WHOLE_RESET_CALLERS[:3]) and 0xff in immediates(e, bind_reset),
+          f'GX whole: 0x{bind_reset:x} resets the bind state at context+0x{bind_holder:x} (primitive 0xff) in ExecuteCommandList(s) and FinishCommandList only')
 
     print(f"\n{len(fails)} failed")
     return 1 if fails else 0

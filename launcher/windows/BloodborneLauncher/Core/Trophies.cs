@@ -77,10 +77,12 @@ namespace BloodborneLauncher.Core
 
         public static readonly Dictionary<int, Trophy> ById = All.ToDictionary(t => t.Id);
         private static readonly int[] PlatinumNeeds = All.Where(t => !t.Dlc && t.Id != PlatinumId).Select(t => t.Id).ToArray();
-        private static readonly Regex UnlockLine = new(@"Runtime: trophy (\d+) unlocked", RegexOptions.Compiled);
+        private static readonly Regex UnlockLine = new(@"Runtime: trophy (\d+) unlocked(?: as (own|guest|host)\b)?", RegexOptions.Compiled);
         // Trophies a save already had (the engine's trophy_sync.cpp: bosses it had defeated), as an
         // imported save reports them: recorded without a notification each.
-        private static readonly Regex SaveLine = new(@"Runtime: trophy (\d+) earned in this save", RegexOptions.Compiled);
+        private static readonly Regex SaveLine = new(@"Runtime: trophy (\d+) earned in this save(?: as (own|guest|host)\b)?", RegexOptions.Compiled);
+        public const string SourceUnlocked = "unlocked";
+        public const string SourceOwnSave = "own-save";
 
         private string _userDir = "";
         private (long, DateTime)? _logStamp, _runStamp;
@@ -161,16 +163,19 @@ namespace BloodborneLauncher.Core
         /// <summary>A line of the running game's output.</summary>
         public List<int> Observe(string line)
         {
-            var ids = UnlockLine.Matches(line).Select(m => int.Parse(m.Groups[1].Value)).ToList();
-            return ids.Count == 0 ? new List<int>() : Record(ids, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            var ids = Found(UnlockLine, line);
+            return ids.Count == 0 ? new List<int>() : Record(ids, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), SourceUnlocked);
         }
 
         /// <summary>A line of the running game's output: trophies the loaded save had already earned.</summary>
         public List<int> ObserveSave(string line)
         {
-            var ids = SaveLine.Matches(line).Select(m => int.Parse(m.Groups[1].Value)).ToList();
-            return ids.Count == 0 ? new List<int>() : Record(ids, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            var ids = Found(SaveLine, line);
+            return ids.Count == 0 ? new List<int>() : Record(ids, DateTimeOffset.UtcNow.ToUnixTimeSeconds(), SourceOwnSave);
         }
+
+        private static List<(int Id, string? Role)> Found(Regex pattern, string text) =>
+            pattern.Matches(text).Select(m => (int.Parse(m.Groups[1].Value), m.Groups[2].Success ? m.Groups[2].Value : (string?)null)).ToList();
 
         private static (long, DateTime)? Stamp(string path)
         {
@@ -252,10 +257,10 @@ namespace BloodborneLauncher.Core
                 var found = new List<int>();
                 // Trophies a save already had: recorded without a notification each; only a
                 // platinum they complete is announced.
-                var saved = SaveLine.Matches(text).Select(m => int.Parse(m.Groups[1].Value)).ToList();
-                if (saved.Count > 0) found.AddRange(Record(saved, when).Where(id => id == PlatinumId));
-                var ids = UnlockLine.Matches(text).Select(m => int.Parse(m.Groups[1].Value)).ToList();
-                if (ids.Count > 0) found.AddRange(Record(ids, when));
+                var saved = Found(SaveLine, text);
+                if (saved.Count > 0) found.AddRange(Record(saved, when, SourceOwnSave).Where(id => id == PlatinumId));
+                var ids = Found(UnlockLine, text);
+                if (ids.Count > 0) found.AddRange(Record(ids, when, SourceUnlocked));
                 return found;
             }
             catch
@@ -265,14 +270,14 @@ namespace BloodborneLauncher.Core
         }
 
         /// <summary>Unlocks seen in output: added to trophies.log unless already known.</summary>
-        private List<int> Record(IEnumerable<int> ids, long when)
+        private List<int> Record(IEnumerable<(int Id, string? Role)> ids, long when, string source)
         {
             var found = RefreshLog();
-            foreach (var id in ids)
+            foreach (var (id, role) in ids)
             {
                 if (Unlocked.ContainsKey(id)) continue;
                 Unlocked[id] = when;
-                Append(id, when);
+                Append(LogLine(id, when, source, role));
                 found.Add(id);
             }
             found.AddRange(AwardPlatinum());
@@ -285,16 +290,19 @@ namespace BloodborneLauncher.Core
                 return new List<int>();
             var when = PlatinumNeeds.Max(id => Unlocked[id]);
             Unlocked[PlatinumId] = when;
-            Append(PlatinumId, when);
+            Append(LogLine(PlatinumId, when, null, null));
             return new List<int> { PlatinumId };
         }
 
-        private void Append(int id, long when)
+        public static string LogLine(int id, long when, string? source, string? role) =>
+            source == null ? $"{id} {when}" : role == null ? $"{id} {when} {source}" : $"{id} {when} {source} {role}";
+
+        private void Append(string line)
         {
             try
             {
                 Directory.CreateDirectory(_userDir);
-                File.AppendAllText(LogPath, $"{id} {when}\n");
+                File.AppendAllText(LogPath, line + "\n");
                 _logStamp = Stamp(LogPath);
             }
             catch

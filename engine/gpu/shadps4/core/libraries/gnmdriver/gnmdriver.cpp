@@ -9,6 +9,8 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/slot_vector.h"
+#include "common/thread.h"
+#include "engine/pipe_census.h"
 #include "core/address_space.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -21,6 +23,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "bbport_timeline.h"
 #include "bbport_heap_sites.h"
@@ -144,7 +147,7 @@ static bool overlap_off = false;
 static u32 SubmitsAhead() {
     static const u32 ahead = [] {
         const char* env = std::getenv("BB_SUBMIT_AHEAD");
-        return env ? u32(std::max(0, std::atoi(env))) : 2u;
+        return env ? u32(std::max(0, std::atoi(env))) : BbSettings::LowLatency() ? 0u : 2u;
     }();
     return overlap_off ? 0u : ahead;
 }
@@ -180,6 +183,19 @@ static void WaitPreviousFrameAtSubmit() {
     WaitPreviousFrame();
 }
 
+static void NoteGuestFrameWait(BbEngine::PipeCensus::WaitSite site, u64 ns) {
+    BbStats::gnm_frame_waits.fetch_add(1, std::memory_order_relaxed);
+    BbStats::gnm_frame_wait_ns.fetch_add(ns, std::memory_order_relaxed);
+    static const bool census = BbEngine::PipeCensus::On();
+    if (census) {
+        thread_local char thread[BbEngine::PipeCensus::kWaitNameBytes] = {};
+        if (!thread[0]) {
+            std::snprintf(thread, sizeof(thread), "%s", Common::GetCurrentThreadName().c_str());
+        }
+        BbEngine::PipeCensus::NoteGuestWait(thread, site, ns);
+    }
+}
+
 static void WaitPreviousFrame() {
     std::unique_lock lock{m_wait_idle};
     if (frames_retired >= u64(frames_submitted)) {
@@ -188,11 +204,10 @@ static void WaitPreviousFrame() {
     BbTimeline::Note(BbTimeline::GuestWaitBegin, u64(frames_submitted));
     const auto start = std::chrono::steady_clock::now();
     cv_lock.wait(lock, [] { return frames_retired >= u64(frames_submitted); });
-    BbStats::gnm_frame_waits.fetch_add(1, std::memory_order_relaxed);
-    BbStats::gnm_frame_wait_ns.fetch_add(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
-            .count(),
-        std::memory_order_relaxed);
+    NoteGuestFrameWait(BbEngine::PipeCensus::WaitPreviousFrame,
+                       std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count());
     BbTimeline::Note(BbTimeline::GuestWaitEnd, u64(frames_submitted));
 }
 
@@ -204,11 +219,10 @@ static void WaitGpuIdle() {
     }
     const auto start = std::chrono::steady_clock::now();
     cv_lock.wait(lock, [] { return submission_lock == 0; });
-    BbStats::gnm_frame_waits.fetch_add(1, std::memory_order_relaxed);
-    BbStats::gnm_frame_wait_ns.fetch_add(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
-            .count(),
-        std::memory_order_relaxed);
+    NoteGuestFrameWait(BbEngine::PipeCensus::WaitGpuIdle,
+                       std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count());
 }
 
 // Write a special ending NOP packet with N DWs data block

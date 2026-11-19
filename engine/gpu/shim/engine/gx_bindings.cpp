@@ -209,13 +209,6 @@ std::uint32_t Registers(const Render& render, Register* out) {
     return count;
 }
 
-std::uint64_t RenderHash(const Render& render) {
-    const auto* bytes = reinterpret_cast<const unsigned char*>(&render);
-    std::uint64_t hash = 0xCBF29CE484222325ull;
-    for (std::size_t i = 0; i < offsetof(Render, hash); ++i) hash = (hash ^ bytes[i]) * 0x100000001B3ull;
-    return hash;
-}
-
 bool VertexWords(const State& state, std::uint32_t dword_offset, std::uint32_t out[4]) {
     if (dword_offset % 4) return false;
     const u32 entry = dword_offset / 4;

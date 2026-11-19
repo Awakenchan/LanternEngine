@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "gx_draws.h"
+#include "gx_census.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include <atomic>
@@ -14,8 +16,7 @@ using u32 = std::uint32_t;
 using u64 = std::uint64_t;
 
 constexpr std::size_t kBind = 0x26bc320;
-constexpr std::uint8_t kBindEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                       0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x28, 0x01, 0x00, 0x00};
+constexpr const auto& kBindEntry = HookEntries::kGxDrawsBindEntry;
 constexpr std::size_t kVertexFlush = 0x26cfcf0, kRingAlloc = 0x26addc0, kRename = 0x26ae840;
 constexpr std::size_t kSetPrimitive = 0x1075960, kSetTessellation = 0x10756b0, kOutputFlush = 0x26d2790;
 constexpr std::size_t kLearnShader = 0x26d04e0, kSetStages = 0x1076030, kSetFetch = 0x1076390, kSetVertexShader = 0x1075480;
@@ -54,6 +55,23 @@ constexpr u64 kAccessMask = 0xff000000000ull, kBufferTableMask = 0xfffff0000ull,
 constexpr int kAccessShift = 36, kBufferShift = 16;
 constexpr u32 kBufferLiteral = 0x20;
 constexpr u32 kBufferWord1 = 0x108000, kBufferWord3 = 0x00077fac;
+
+namespace L = GxFlushCensus::Layout;
+static_assert(kContextCommands == L::kContextCommands && kContextOutput == L::kContextOutput);
+static_assert(kCommandEnd == L::kCommandEnd && kCommandCursor == L::kCommandCursor && kCommandReserve == L::kCommandReserve &&
+              kCommandUser == L::kCommandUser);
+static_assert(kContextFlags == L::kContextCommands + L::kCommandFlags);
+static_assert(kGeometryShader == L::kPendingGeometryShader);
+static_assert(kStateFresh == L::kStateFresh && kStateFlag == L::kStateFlag && kStatePrimitive == L::kStatePrimitive &&
+              kStateTessellation == L::kStateTessellation);
+static_assert(kStateVertexDirty == L::kStateVertexDirty && kStateLayout == L::kStateLayout && kStateVertexMasks == L::kStateVertexMasks);
+static_assert(kDirtyViewsLow == L::kStageDirtyViewsLow && kDirtyViewsHigh == L::kStageDirtyViewsHigh && kDirtyOther == L::kStageDirtyOther &&
+              kDirtyInputs == L::kStageDirtyInputs && kBoundShader == L::kStageBoundShader);
+static_assert(kUsedViewsLow == L::kStageUsedViewsLow && kUsedViewsHigh == L::kStageUsedViewsHigh && kUsedOther == L::kStageUsedOther);
+static_assert(kSharedBlock == L::kStateSharedBlock);
+static_assert(kVertexFlush == GxFlushCensus::kWriterAddress[static_cast<std::size_t>(GxFlushCensus::Writer::Vertex)] &&
+              kOutputFlush == GxFlushCensus::kWriterAddress[static_cast<std::size_t>(GxFlushCensus::Writer::Target)] &&
+              kBind == GxFlushCensus::kWriterAddress[static_cast<std::size_t>(GxFlushCensus::Writer::Bind)]);
 
 std::atomic<bool> g_on{false};
 u64 g_image = 0;
@@ -370,7 +388,7 @@ void WritePacket(u64 commands, const Packet& packet) {
     Count(g_words, total);
 }
 
-std::int64_t __attribute__((sysv_abi)) OnBind(std::uint64_t, const std::uint64_t* saved) {
+std::int64_t __attribute__((sysv_abi)) OnBind(std::uint64_t, std::uint64_t* saved) noexcept {
     const u64 state = saved[5], context = saved[4], pending = saved[3];
     const u64 vertex = Peek<u64>(pending + kVertex.block + kBlockShader);
     const u64 pixel = Peek<u64>(pending + kPixel.block + kBlockShader);
@@ -436,12 +454,15 @@ bool Install(std::uint8_t* image, std::size_t size) {
     }
     g_image = reinterpret_cast<u64>(image);
     Hook hook;
-    if (!Prepare(hook, image, size, kBind, kBindEntry, OnBind)) {
+    if (!Prepare(hook, image, size, kBind, SiteKind::Entry, kBindEntry, OnBind)) {
         host_log("GX draws off: GX's bind differs from 1.09");
         return false;
     }
+    if (const WriteResult result = Commit(std::span<Hook>(&hook, 1)); result != WriteResult::Applied) {
+        host_log("GX draws off: GX's bind could not be written (%s)", Describe(result));
+        return false;
+    }
     g_on.store(true, std::memory_order_relaxed);
-    Commit(std::span<Hook>(&hook, 1));
     host_log("GX draws: on (LANTERN_GX_DRAWS=1)");
     return true;
 }

@@ -39,6 +39,11 @@
 #include "engine/gx_records.h"
 #include "engine/gx_draws.h"
 #include "engine/gx_trace.h"
+#include "engine/gx_whole_census_stage.h"
+#include "engine/gx_owed_check.h"
+#include "engine/pipe_census.h"
+#include "engine/pm4_walk.h"
+#include "engine/reg_window.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_occlusion.h"
@@ -116,6 +121,21 @@ static size_t UnreadableDwords(std::span<const u32> span) {
 
 namespace {
 bool ZpassInOrder(); // bbport: BB_ZPASS_IN_ORDER (RunZpassDump)
+static_assert(BbEngine::GxWhole::OwedCheck::kRegisterWords == Regs::NumRegs && BbEngine::GxWhole::OwedCheck::kContextBase == Regs::ContextRegWordOffset);
+static_assert(BbEngine::GxWhole::OwedCheck::OpcodesAre(u32(PM4ItOpcode::ClearState), u32(PM4ItOpcode::DispatchDirect), u32(PM4ItOpcode::DispatchIndirect), u32(PM4ItOpcode::DrawIndirect), u32(PM4ItOpcode::DrawIndexIndirect), u32(PM4ItOpcode::DrawIndex2), u32(PM4ItOpcode::DrawIndirectMulti), u32(PM4ItOpcode::DrawIndexAuto), u32(PM4ItOpcode::DrawIndexOffset2), u32(PM4ItOpcode::DrawIndexIndirectMulti), u32(PM4ItOpcode::WaitRegMem), u32(PM4ItOpcode::EventWrite), u32(PM4ItOpcode::DrawIndexIndirectCountMulti), u32(EventType::SoVgtStreamoutFlush), u32(PM4CmdWaitRegMem::MemSpace::Register)));
+
+void CountNestedStart() {
+    if (BbEngine::PipeCensus::On()) {
+        BbEngine::PipeCensus::NoteNestedStart();
+    }
+}
+
+template <typename Handle>
+void FreeNested(BbEngine::Pm4Walk::OwnedFrame<Handle>& nested) {
+    if (nested.Free() && BbEngine::PipeCensus::On()) {
+        BbEngine::PipeCensus::NoteNestedFreed();
+    }
+}
 } // namespace
 
 Liverpool::Liverpool() : guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
@@ -688,10 +708,11 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 }
 
 // bbport: the stand-in occlusion counts (BB_OCCLUSION=0) in stream order. The game starts every
-// query (0x1077660) with a DMA_DATA that zeroes its 128-byte block, a WAIT_REG_MEM for the zero,
-// then the counter dump; it reads the query as done only when all 16 counters have bit 63
-// (0x216a3ca). With the draw pipe the DMA runs later, on the recording thread, but the dump was
-// written at once here: on a block that already read zero (a new one) the WAIT_REG_MEM passed,
+// query (0x1077660) with a DMA_DATA that zeroes its 128-byte block, a WAIT_REG_MEM, then the
+// counter dump; it reads the query as done only when all 16 counters have bit 63 (0x216a3ca).
+// That WAIT_REG_MEM is function 5 (>=) against reference 0 with mask 0xffffffff on the PFP, so it
+// always passes: it orders the PFP after the DMA fill and does not wait for the zero. With the
+// draw pipe the DMA runs later, on the recording thread, but the dump was written at once here:
 // the zeroing landed after the counts and the query never finished. The game polls its unfinished
 // queries every frame (0xec6970 hands them to GXRenderThread, 0xec6bf0) and makes new ones in
 // their place: FPS fell over a session (both players' logs, 2026-10-21), and when the game could
@@ -919,12 +940,15 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
             auto task =
                 ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
+            BbEngine::Pm4Walk::OwnedFrame nested{task.handle};
+            CountNestedStart();
             RESUME_CE(task);
 
             while (!task.handle.done()) {
                 YIELD_CE();
                 RESUME_CE(task);
             }
+            FreeNested(nested);
             break;
         }
         default:
@@ -1330,6 +1354,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     static const bool native_timing = BbNativeCalls::TimingEnabled();
     static const bool native_report =
         native_timing || BbNativeCalls::GetMode() != BbNativeCalls::Mode::Off;
+    if (native_timing) BbEngine::GxWholeCensus::OnConstantEngine(ccb.size());
+    const bool owed_check = BbEngine::GxWhole::OwedCheck::Attach(pipe_dirty.on_mark, regs.reg_array);
     // Records are noted by guest address; a top-level buffer is decoded from its copy.
     const auto guest_address = [&](const PM4Header* at) -> u64 {
         const auto* p = reinterpret_cast<const u32*>(at);
@@ -1394,7 +1420,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             const bool native_draw =
                 opcode == PM4ItOpcode::Nop &&
                 BbNativeCalls::ReadRecord(reinterpret_cast<const u32*>(header), native_record);
+            if (native_timing) BbEngine::GxWholeCensus::OnPacket(reinterpret_cast<const u32*>(header), native_draw);
+            if (owed_check && native_draw) BbEngine::GxWhole::OwedCheck::TokenStart();
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
+            u64 owed_check_record = 0;
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
                 !(opcode == PM4ItOpcode::DmaData &&
@@ -1459,9 +1488,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 regs.primitive_type != AmdGpu::PrimitiveType::RectList
                             ? BbEngine::GxRecords::Take(reinterpret_cast<u64>(header))
                             : 0;
+                    owed_check_record = gx_record;
                     rasterizer->ScopeMarker(
                         "gfx:{}:NativeDraw", fmt::make_format_args(cmd_address),
                         [&] { rasterizer->Draw(is_indexed, index_offset, prepared, gx_record); });
+                    if (native_timing) BbEngine::GxWholeCensus::OnTokenDraw(regs, native_record.predicate, gx_record, *rasterizer);
                     break;
                 }
                 const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -1471,6 +1502,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
                 switch (nop->data_block[0]) {
                 case PM4CmdNop::PayloadType::PatchedFlip: {
+                    if (native_timing) BbEngine::GxWholeCensus::OnFlip();
                     // There is no evidence that GPU CP drives flip events by parsing
                     // special NOP packets. For convenience lets assume that it does.
                     // bbport: after the writes before it (the buffer label: WriteData, which
@@ -1600,9 +1632,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (set_data->reg_offset >= 0x200 &&
                     set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4)) {
                     ASSERT(set_size <= sizeof(ComputeProgram));
+                    // bbport: a compute V# or T# bound from the graphics command buffer can reach
+                    // past COMPUTE_USER_DATA_15: only the registers inside cs_state are kept.
+                    const auto copy = BbEngine::RegWindow::Clamp(
+                        sizeof(ComputeProgram) / sizeof(u32), set_data->reg_offset - 0x200,
+                        set_size / sizeof(u32));
+                    if (copy.clamped) {
+                        BbEngine::PipeCensus::NoteShClamp();
+                    }
                     auto* addr = reinterpret_cast<u32*>(&mapped_queues[GfxQueueId].cs_state) +
                                  (set_data->reg_offset - 0x200);
-                    std::memcpy(addr, header + 2, set_size);
+                    std::memcpy(addr, header + 2, copy.dwords * sizeof(u32));
                 } // other SH registers: ApplyGraphicsRegisterPacket
                 break;
             }
@@ -1840,6 +1880,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // measured and the counts written once the GPU has run them. Nothing is
                     // written now: the game zeroed the block and reads it as not ready until then.
                     // BB_OCCLUSION=0 (or no query support): the fake rising count below.
+                    static const bool pipe_census = BbEngine::PipeCensus::On();
+                    if (pipe_census && event->event_type.Value() == EventType::PixelPipeStatDump) {
+                        BbEngine::PipeCensus::NoteOcclusion((event->Address<VAddr>() & 8) == 0);
+                    }
                     if (event->event_type.Value() == EventType::PixelPipeStatDump && rasterizer &&
                         rasterizer->OcclusionDump(event->Address<VAddr>(), num_counter_pairs)) {
                         break;
@@ -2050,6 +2094,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
                 auto task = ProcessGraphics(
                     {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
+                BbEngine::Pm4Walk::OwnedFrame nested{task.handle};
+                CountNestedStart();
                 // Tasks start suspended: the nested body (and its scan) runs on this resume.
                 g_dcb_depth = dcb_depth + 1;
                 RESUME_GFX(task);
@@ -2059,6 +2105,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     YIELD_GFX();
                     RESUME_GFX(task);
                 }
+                FreeNested(nested);
                 break;
             }
             case PM4ItOpcode::IncrementDeCounter: {
@@ -2107,6 +2154,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                                 static_cast<u32>(opcode), count);
             }
+            if (owed_check) BbEngine::GxWhole::OwedCheck::Note(static_cast<u32>(opcode), reinterpret_cast<const u32*>(header), native_draw, native_draw && native_record.kind != BbNativeCalls::DrawAuto, owed_check_record, regs.reg_array, guest_address(header));
             if (native_report) {
                 // bbport BB_FRAME_STATS: this thread's time per packet (nested IBs count their
                 // own packets), per draw; the "Native calls" lines every 5 s.
@@ -2116,6 +2164,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         timed_packet ? (BbNativeCalls::Ticks() - packet_start) * BbNativeCalls::PacketSampling
                                      : 0,
                         is_draw);
+                    BbEngine::GxWholeCensus::OnPacketTicks(timed_packet ? (BbNativeCalls::Ticks() - packet_start) * BbNativeCalls::PacketSampling : 0, is_draw);
                 }
                 if (is_draw) {
                     BbNativeCalls::MaybeReport();
@@ -2126,6 +2175,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         }
     }
 
+    if (owed_check && dcb_depth == 0) BbEngine::GxWhole::OwedCheck::SubmissionEnd(regs.reg_array);
     if (ce_task.handle) {
         while (!ce_task.handle.done()) {
             RESUME_GFX(ce_task);
@@ -2133,6 +2183,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         ce_task.handle.destroy();
     }
 
+    if (native_timing && dcb_depth == 0) BbEngine::GxWholeCensus::OnSubmissionEnd();
     if (rasterizer && seq != NoSeq) {
         rasterizer->RetireSubmission(); // prepared draws live until the recording thread is past
     }
@@ -2163,6 +2214,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    const bool owed_check = BbEngine::GxWhole::OwedCheck::Attach(pipe_dirty.on_mark, regs.reg_array);
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
@@ -2191,19 +2243,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             queue.tmp_dwords = 0;
         }
 
-        // If the packet is split across ring boundary, buffer until next submission
-        if (next_dw_off > acb.size()) [[unlikely]] {
-            std::memcpy(queue.tmp_packet.data(), acb.data(), acb.size_bytes());
-            queue.tmp_dwords = acb.size();
-            if constexpr (!is_indirect) {
-                *queue.read_addr += acb.size();
-                *queue.read_addr %= queue.ring_size_dw;
-            }
-            break;
-        }
-
-        if (header->type == 2) {
+        const auto step = BbEngine::Pm4Walk::Classify(header->type, next_dw_off, acb.size());
+        if (step == BbEngine::Pm4Walk::Step::Pad) {
             // Type-2 packet are used for padding purposes
+            if (next_dw_off > acb.size() && BbEngine::PipeCensus::On()) {
+                BbEngine::PipeCensus::NoteTrailingPad();
+            }
             next_dw_off = 1;
             acb = NextPacket(acb, next_dw_off);
             if constexpr (!is_indirect) {
@@ -2211,6 +2256,17 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 *queue.read_addr %= queue.ring_size_dw;
             }
             continue;
+        }
+
+        // If the packet is split across ring boundary, buffer until next submission
+        if (step == BbEngine::Pm4Walk::Step::Split) [[unlikely]] {
+            std::memcpy(queue.tmp_packet.data(), acb.data(), acb.size_bytes());
+            queue.tmp_dwords = acb.size();
+            if constexpr (!is_indirect) {
+                *queue.read_addr += acb.size();
+                *queue.read_addr %= queue.ring_size_dw;
+            }
+            break;
         }
 
         if (header->type != 3) {
@@ -2230,12 +2286,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
             auto task = ProcessCompute<true>(
                 {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid);
+            BbEngine::Pm4Walk::OwnedFrame nested{task.handle};
+            CountNestedStart();
             RESUME_ASC(task, vqid);
 
             while (!task.handle.done()) {
                 YIELD_ASC(vqid);
                 RESUME_ASC(task, vqid);
             }
+            FreeNested(nested);
             break;
         }
         case PM4ItOpcode::DmaData: {
@@ -2300,21 +2359,37 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::SetShReg: {
             const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
             const auto set_size = (header->type3.NumWords() - 1) * sizeof(u32);
+            const auto route = BbEngine::Pm4Walk::RouteComputeSh(
+                Regs::ShRegWordOffset, static_cast<u32>(sizeof(ComputeProgram) / sizeof(u32)),
+                set_data->reg_offset, static_cast<u32>(set_size / sizeof(u32)));
 
-            if (set_data->reg_offset >= 0x200 &&
-                set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4)) {
+            if (route.cs_state) {
                 ASSERT(set_size <= sizeof(ComputeProgram));
+                // bbport: the game's 0x26b4230 can write 4 dwords from COMPUTE_USER_DATA_15
+                // (0x24f): only the registers inside cs_state are kept, the rest is dropped.
+                const auto copy = BbEngine::RegWindow::Clamp(sizeof(ComputeProgram) / sizeof(u32),
+                                                             set_data->reg_offset - 0x200,
+                                                             set_size / sizeof(u32));
+                if (copy.clamped) {
+                    BbEngine::PipeCensus::NoteShClamp();
+                }
                 auto* addr = reinterpret_cast<u32*>(&mapped_queues[vqid + 1].cs_state) +
                              (set_data->reg_offset - 0x200);
-                std::memcpy(addr, header + 2, set_size);
+                std::memcpy(addr, header + 2, copy.dwords * sizeof(u32));
             } else {
                 std::memcpy(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
                             header + 2, set_size);
+                pipe_dirty.Mark(route.graphics_word, route.graphics_dwords);
+                if (owed_check) BbEngine::GxWhole::OwedCheck::Read(BbEngine::GxWhole::Owed::Reader::ComputeShWrite, regs.reg_array, reinterpret_cast<u64>(header));
                 // bbport: interleaves with the graphics stream at an unpredictable point, so
                 // draw-preparation workers cannot reproduce it: make their checksums differ.
                 gfx_reg_checksum = HashRegisterPacket(gfx_reg_checksum ^ 0xA5C0A5C0A5C0ull,
                                                       reinterpret_cast<const u32*>(header),
                                                       header->type3.NumWords() + 1);
+                static const bool pipe_census = BbEngine::PipeCensus::On();
+                if (pipe_census) {
+                    BbEngine::PipeCensus::NoteComputeWrite();
+                }
             }
             break;
         }
@@ -2326,6 +2401,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::DispatchDirect: {
             const auto* dispatch_direct = reinterpret_cast<const PM4CmdDispatchDirect*>(header);
+            if (owed_check) BbEngine::GxWhole::OwedCheck::Read(BbEngine::GxWhole::Owed::Reader::ComputeDispatch, regs.reg_array, reinterpret_cast<u64>(header));
             if (auto it = std::ranges::find(indirect_patches, header, &IndirectPatch::header);
                 it != indirect_patches.end()) {
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
@@ -2353,6 +2429,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::DispatchIndirect: {
             const auto* dispatch_indirect =
                 reinterpret_cast<const PM4CmdDispatchIndirectMec*>(header);
+            if (owed_check) BbEngine::GxWhole::OwedCheck::Read(BbEngine::GxWhole::Owed::Reader::ComputeDispatch, regs.reg_array, reinterpret_cast<u64>(header));
             auto& cs_program = GetCsRegs();
             const auto ib_address = dispatch_indirect->Address<VAddr>();
             const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);

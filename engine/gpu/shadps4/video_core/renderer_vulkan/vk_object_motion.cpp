@@ -231,11 +231,47 @@ void ObjectMotion::AdvanceHistory() {
         index_ranges.stats = {};
         history.stats = {};
     }
+    LogFill();
     history.NextFrame();
     ++history_frame;
     if (history_frame % Motion::IndexRangeCache::Unused == 0) {
         index_ranges.Trim(history_frame);
     }
+}
+
+void ObjectMotion::LogFill() {
+    const auto now = std::chrono::steady_clock::now();
+    if (fill_start == std::chrono::steady_clock::time_point{}) {
+        fill_start = now;
+        fill_base = history.totals;
+    }
+    const u32 used = history.Used();
+    ++fill_frames;
+    fill_sum += used;
+    fill_max = std::max(fill_max, used);
+    if (now - fill_start < std::chrono::seconds(BbStats::enabled ? 5 : 60)) {
+        return;
+    }
+    const auto& t = history.totals;
+    const u64 draws = t.draws - fill_base.draws;
+    if (draws) {
+        const double capacity = history.Capacity();
+        std::printf("Object motion: %llu frames in %.1f s, positions %.0f%% full on average, %.0f%% at most "
+                    "(%u per frame); %llu of %llu draws skipped for space (%llu of characters, %.1f M "
+                    "vertices)\n",
+                    (unsigned long long)fill_frames,
+                    std::chrono::duration<double>(now - fill_start).count(),
+                    100.0 * double(fill_sum) / (double(fill_frames) * capacity),
+                    100.0 * fill_max / capacity, history.Capacity(),
+                    (unsigned long long)(t.exhausted - fill_base.exhausted), (unsigned long long)draws,
+                    (unsigned long long)(t.exhausted_characters - fill_base.exhausted_characters),
+                    double(t.exhausted_vertices - fill_base.exhausted_vertices) / 1e6);
+    }
+    fill_start = now;
+    fill_base = t;
+    fill_frames = 0;
+    fill_sum = 0;
+    fill_max = 0;
 }
 
 void ObjectMotion::Run(const Job& job) {
@@ -271,6 +307,14 @@ void ObjectMotion::Sync() {
         return;
     }
     const u64 target = posted.load(std::memory_order_acquire);
+    if (BbStats::enabled) {
+        BbStats::motion_sync_calls.fetch_add(1, std::memory_order_relaxed);
+        if (done.load(std::memory_order_acquire) >= target) {
+            return;
+        }
+    }
+    const auto start = BbStats::enabled ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
     for (u32 spins = 1; done.load(std::memory_order_acquire) < target; ++spins) {
         if (spins < 4096) {
             __builtin_ia32_pause();
@@ -278,10 +322,15 @@ void ObjectMotion::Sync() {
             std::this_thread::yield();
         }
     }
+    if (BbStats::enabled) {
+        BbStats::NoteWait(BbStats::motion_sync_waits, BbStats::motion_sync_ns,
+                          BbStats::motion_sync_max_ns, start);
+    }
 }
 
 void ObjectMotion::WorkerLoop(std::stop_token stop) {
     Common::SetCurrentThreadName("bb:Motion");
+    BbThreads::MakeCritical();
     bb_fault_recovers_only = true;
     static const auto spin_time =
         std::chrono::microseconds(BbThreads::CapSpinUs(BbThreads::Available() >= 12 ? 200 : 50));
@@ -317,7 +366,7 @@ Motion::History::Allocation ObjectMotion::Evaluate(const DrawJob& job) {
     Motion::Draw draw = job.draw;
     if (!job.index_size) {
         draw.vertices = {u32(job.base_vertex), draw.index_count};
-        return history.Prepare(draw);
+        return history.Prepare(draw, job.object, job.character);
     }
     draw.vertices = {};
     if (job.indices_valid) {
@@ -327,7 +376,7 @@ Motion::History::Allocation ObjectMotion::Evaluate(const DrawJob& job) {
         BbRecoverBuf recover;
         if (BB_RECOVER_SET(recover)) {
             runtime_fault_recover = outer_recover;
-            return history.Prepare(draw);
+            return history.Prepare(draw, job.object, job.character);
         }
         runtime_fault_recover = &recover;
         const auto scanned = index_ranges.Get(
@@ -346,7 +395,7 @@ Motion::History::Allocation ObjectMotion::Evaluate(const DrawJob& job) {
         draw.vertices = scanned.range;
         draw.topology = scanned.topology;
     }
-    return history.Prepare(draw);
+    return history.Prepare(draw, job.object, job.character);
 }
 
 void ObjectMotion::WriteParam(u32 index, const Motion::History::Allocation& allocation) {
@@ -380,7 +429,14 @@ void ObjectMotion::OnFrameStart() {
     const u32 slot = u32(frame % FrameSlots);
     // Do not overwrite host parameters still referenced by queued GPU work.
     if (params_ticks[slot]) {
-        scheduler.Wait(params_ticks[slot]);
+        if (BbStats::enabled && !scheduler.IsFree(params_ticks[slot])) {
+            const auto start = std::chrono::steady_clock::now();
+            scheduler.Wait(params_ticks[slot]);
+            BbStats::NoteWait(BbStats::motion_frame_waits, BbStats::motion_frame_wait_ns,
+                              BbStats::motion_frame_wait_max_ns, start);
+        } else {
+            scheduler.Wait(params_ticks[slot]);
+        }
         params_ticks[slot] = 0;
     }
     params_used = 0;

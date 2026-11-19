@@ -983,6 +983,7 @@ void hle_np_matching2_transport_up(const std::string& online_id) {
         std::lock_guard lk(BbThd::g_link_mu);
         if (!BbThd::g_link_up.insert({room, member}).second) return;
     }
+    BbThd::Log("np: member %u connected", member);
     BbThd::fire_signaling(member, BbThd::kEvSignalingEstablished, 0, room);
 }
 
@@ -995,6 +996,8 @@ void hle_np_matching2_transport_dead(const std::string& online_id, int error) {
         if (!BbThd::g_dead_sent.insert({room, member}).second) return;
         BbThd::g_link_up.erase({room, member});
     }
+    if (error == BbThd::kM2ErrSignalingTimeout) BbThd::Log("np: member %u timed out", member);
+    else BbThd::Log("np: member %u dead (error 0x%08x)", member, static_cast<unsigned>(error));
     BbThd::fire_signaling(member, BbThd::kEvSignalingDead, error, room);
 }
 

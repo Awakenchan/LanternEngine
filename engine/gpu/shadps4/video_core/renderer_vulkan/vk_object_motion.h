@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include "video_core/renderer_vulkan/motion_history.h"
@@ -42,12 +43,14 @@ public:
         Motion::Draw draw;
         Motion::History::GateKey gate;
         u64 palette = 0;
+        u64 object = 0;
         u64 index_address = 0;
         s32 base_vertex = 0;
         u32 index_size = 0;
         bool gated = false;
         bool restart = false;
         bool indices_valid = false;
+        bool character = false;
     };
     u32 Draw(const DrawJob& job);
     void Sync();
@@ -65,6 +68,18 @@ public:
     /// The image of the last PrepareRead (layout General), or null.
     [[nodiscard]] vk::ImageView View() const noexcept {
         return read_target && read_target->view ? *read_target->view : vk::ImageView{};
+    }
+    struct Written {
+        vk::Image image;
+        vk::ImageView view;
+        vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+    };
+    [[nodiscard]] Written WrittenTarget(u32 width, u32 height) const noexcept {
+        const Target* target = Find(width, height);
+        if (!target || !target->written || !target->view) {
+            return {};
+        }
+        return {vk::Image(target->image), *target->view, target->layout};
     }
     [[nodiscard]] vk::Image Image(u32 width, u32 height) const noexcept {
         const Target* target = Find(width, height);
@@ -108,6 +123,7 @@ private:
     Motion::History::Allocation Evaluate(const DrawJob& job);
     void WriteParam(u32 index, const Motion::History::Allocation& allocation);
     void AdvanceHistory();
+    void LogFill();
     void Run(const Job& job);
     void Post(const Job& job);
     void WorkerLoop(std::stop_token stop);
@@ -142,6 +158,10 @@ private:
     u64 frame = 0;
     u64 history_frame = 0;
     u32 params_used = 0;
+    std::chrono::steady_clock::time_point fill_start{};
+    u64 fill_frames = 0, fill_sum = 0;
+    u32 fill_max = 0;
+    Motion::History::Totals fill_base{};
     std::array<Target, MaxTargets> targets;
     const Target* read_target = nullptr; ///< of the last PrepareRead
 

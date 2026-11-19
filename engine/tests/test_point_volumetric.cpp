@@ -10,6 +10,7 @@
 #include <cstring>
 #include <vector>
 #include "video_core/host_shaders/point_volumetric_comp.h"
+#include "video_core/host_shaders/point_volumetric_falloff_comp.h"
 
 namespace {
 #define CHECK(call) do { if ((call) != VK_SUCCESS) { std::fprintf(stderr, "%s failed\n", #call); std::abort(); } } while (false)
@@ -17,8 +18,9 @@ constexpr unsigned W = 19, H = 11;
 struct Push {
     unsigned count = 2;
     float intensity = 1.0f;
+    float glow_size = 0.08f;
 };
-static_assert(sizeof(Push) == 8);
+static_assert(sizeof(Push) == 12);
 struct Buffer { VkBuffer buffer{}; VkDeviceMemory memory{}; void* data{}; unsigned size{}; };
 struct Image { VkImage image{}; VkDeviceMemory memory{}; VkImageView view{}; };
 struct Test {
@@ -81,7 +83,7 @@ struct Test {
         images.push_back(i);
         return i;
     }
-    Test() {
+    Test(const uint32_t* code, size_t code_size, unsigned push_size) {
         VkApplicationInfo app{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = "point-volumetric-test", .apiVersion = VK_API_VERSION_1_3};
         VkInstanceCreateInfo ci{.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
@@ -127,13 +129,13 @@ struct Test {
             .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
             .bindingCount = unsigned(bindings.size()), .pBindings = bindings.data()};
         CHECK(vkCreateDescriptorSetLayout(device, &si, nullptr, &set));
-        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
+        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size};
         VkPipelineLayoutCreateInfo li{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1, .pSetLayouts = &set, .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
         CHECK(vkCreatePipelineLayout(device, &li, nullptr, &layout));
         VkShaderModule module;
         VkShaderModuleCreateInfo mi{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            .codeSize = sizeof(POINT_VOLUMETRIC_COMP), .pCode = POINT_VOLUMETRIC_COMP};
+            .codeSize = code_size, .pCode = code};
         CHECK(vkCreateShaderModule(device, &mi, nullptr, &module));
         VkComputePipelineCreateInfo pc{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -180,8 +182,10 @@ struct Test {
 };
 }
 
-int main() {
-    Test t;
+void Check(bool falloff) {
+    const unsigned push_size = falloff ? sizeof(Push) : 2 * sizeof(unsigned);
+    Test t(falloff ? POINT_VOLUMETRIC_FALLOFF_COMP : POINT_VOLUMETRIC_COMP,
+           falloff ? sizeof(POINT_VOLUMETRIC_FALLOFF_COMP) : sizeof(POINT_VOLUMETRIC_COMP), push_size);
     const auto cb = t.MakeBuffer(256), lights = t.MakeBuffer(1024), result = t.MakeBuffer(W * H * 8);
     const auto depth = t.MakeImage(VK_FORMAT_R32_SFLOAT), fog = t.MakeImage(VK_FORMAT_R16G16B16A16_SFLOAT);
     auto* constants = static_cast<float*>(cb.data);
@@ -217,7 +221,7 @@ int main() {
         }};
         vkCmdBindPipeline(t.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pipeline);
         t.descriptors(t.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.layout, 0, 4, writes.data());
-        vkCmdPushConstants(t.cmd, t.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof push, &push);
+        vkCmdPushConstants(t.cmd, t.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, &push);
         vkCmdDispatch(t.cmd, (W + 7) / 8, (H + 7) / 8, 1);
         t.Barrier(fog.image);
         VkBufferImageCopy copy{.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {W, H, 1}};
@@ -256,13 +260,23 @@ int main() {
             const double luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
             const double colour = luminance + (rgb[channel] - luminance) * 0.75;
             const double radius = 1 / std::sqrt(double(r[3]));
+            const double core = std::clamp(double(push.glow_size) * radius, 0.05, 1000.0);
             constexpr unsigned Steps = 20000;
             double energy = 0;
             for (unsigned i = 0; i < Steps; ++i) {
                 const double t = (i + 0.5) / Steps * limit;
                 const double dx = ray[0] * t - r[0], dy = ray[1] * t - r[1], dz = ray[2] * t - r[2];
-                const double falloff = std::max(0.0, 1 - std::sqrt(dx * dx + dy * dy + dz * dz) / radius);
-                energy += falloff * falloff * std::exp(-0.025 * t) * 0.025 * limit / Steps;
+                const double d2 = dx * dx + dy * dy + dz * dz;
+                double shape;
+                if (falloff) {
+                    const double x2 = d2 / (radius * radius);
+                    const double window = std::clamp(1 - x2 * x2, 0.0, 1.0);
+                    shape = 2.5 * core * core / (d2 + core * core) * window * window;
+                } else {
+                    const double cone = std::max(0.0, 1 - std::sqrt(d2) / radius);
+                    shape = cone * cone;
+                }
+                energy += shape * std::exp(-0.025 * t) * 0.025 * limit / Steps;
             }
             total += colour * energy;
         }
@@ -270,23 +284,42 @@ int main() {
     };
     double worst = 0;
     unsigned checked = 0;
-    for (const float scene_depth : {0.5f, 0.9f, 1.0f}) {
-        const auto out = run(scene_depth);
-        for (unsigned y = 0; y < H; ++y) {
-            for (unsigned x = 0; x < W; ++x) {
-                for (unsigned c = 0; c < 3; ++c) {
-                    const double want = reference(x, y, scene_depth, c);
-                    const double got = half_to_float(out[(y * W + x) * 4 + c]);
-                    assert(want > 0);
-                    worst = std::max(worst, std::abs(got - want) / want);
-                    ++checked;
+    std::vector<uint16_t> default_glow;
+    for (const float glow : {0.08f, 0.03f, 0.2f}) {
+        push.glow_size = glow;
+        for (const float scene_depth : {0.5f, 0.9f, 1.0f}) {
+            const auto out = run(scene_depth);
+            if (glow == 0.08f && scene_depth == 0.5f) default_glow = out;
+            if (glow != 0.08f && scene_depth == 0.5f) assert((out != default_glow) == falloff);
+            for (unsigned y = 0; y < H; ++y) {
+                for (unsigned x = 0; x < W; ++x) {
+                    for (unsigned c = 0; c < 3; ++c) {
+                        const double want = reference(x, y, scene_depth, c);
+                        const double got = half_to_float(out[(y * W + x) * 4 + c]);
+                        assert(want > 0);
+                        worst = std::max(worst, std::abs(got - want) / want);
+                        ++checked;
+                    }
                 }
             }
         }
     }
-    std::printf("Lamp fog: largest error against a 20000-step reference %.3f%% over %u values\n",
-                worst * 100, checked);
+    push.glow_size = 0.08f;
+    std::printf("Lamp fog (%s): largest error against a 20000-step reference %.3f%% over %u values\n",
+                falloff ? "inverse-square" : "classic", worst * 100, checked);
     assert(worst < 0.02);
+    const auto finite = [](const std::vector<uint16_t>& out) {
+        return std::ranges::all_of(out, [](uint16_t v) { return ((v >> 10) & 31) != 31; });
+    };
+    for (const float huge : {1.2e-38f, 1e-30f, 1e-12f}) {
+        light[3] = huge;
+        for (const float glow : {0.03f, 0.2f}) {
+            push.glow_size = glow;
+            assert(finite(run(0.5f)) && finite(run(1.0f)));
+        }
+    }
+    light[3] = 0.01f;
+    push.glow_size = 0.08f;
     light[19] = 0;
     light[3] = 1e9f;
     const auto missed = run(0.5f);
@@ -295,6 +328,11 @@ int main() {
     push.intensity = 0;
     const auto off = run(0.5f);
     assert(std::ranges::all_of(off, [](auto v) { return v == 0; }));
-    std::puts("Lamp fog: PASS (reference match with two lights, surfaces and sky, lights the ray "
-              "misses, zero intensity)");
+}
+
+int main() {
+    Check(false);
+    Check(true);
+    std::puts("Lamp fog: PASS (classic and inverse-square reference match with two lights, surfaces and sky, "
+              "glow size only in inverse-square, finite with huge lights, lights the ray misses, zero intensity)");
 }

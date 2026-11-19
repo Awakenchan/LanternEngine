@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) buffer Positions { vec4 p[]; } positions;
+layout(std430, set = 0, binding = 1) buffer Bounds { uint b[]; } bounds;
+
+layout(push_constant) uniform Constants {
+    vec4 row0;
+    vec4 row1;
+    vec4 row2;
+    uint first;
+    uint count;
+    uint box;
+};
+
+shared uint lo[3];
+shared uint hi[3];
+
+uint Ordered(float value) {
+    const uint bits = floatBitsToUint(value);
+    return (bits & 0x80000000u) != 0u ? ~bits : bits | 0x80000000u;
+}
+
+void main() {
+    const uint id = gl_GlobalInvocationID.x;
+    const bool live = id < count;
+    vec3 world = vec3(0.0);
+    if (live) {
+        const vec4 clip = positions.p[first + id];
+        world = vec3(dot(row0, clip), dot(row1, clip), dot(row2, clip));
+        positions.p[first + id] = vec4(world, 1.0);
+    }
+    if (box == 0xffffffffu) {
+        return;
+    }
+    if (gl_LocalInvocationIndex < 3u) {
+        lo[gl_LocalInvocationIndex] = 0xffffffffu;
+        hi[gl_LocalInvocationIndex] = 0u;
+    }
+    barrier();
+    if (live) {
+        for (uint axis = 0u; axis < 3u; ++axis) {
+            const uint value = Ordered(world[axis]);
+            atomicMin(lo[axis], value);
+            atomicMax(hi[axis], value);
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex < 3u) {
+        atomicMin(bounds.b[box * 6u + gl_LocalInvocationIndex], lo[gl_LocalInvocationIndex]);
+        atomicMax(bounds.b[box * 6u + 3u + gl_LocalInvocationIndex], hi[gl_LocalInvocationIndex]);
+    }
+}

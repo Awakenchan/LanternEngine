@@ -33,6 +33,8 @@ vk::UniqueDebugUtilsMessengerEXT CreateDebugCallback(vk::Instance instance);
 /// bbport: whether CreateInstance enabled this instance extension (the last instance created).
 bool IsInstanceExtensionEnabled(std::string_view name);
 
+bool QueueFamilyCanPresent(vk::Instance instance, vk::PhysicalDevice physical, u32 family);
+
 /// bbport: VK_EXT_full_screen_exclusive on Windows (the swapchain stays a normal window
 /// swapchain: drivers otherwise switch a screen-covering window to exclusive fullscreen, which
 /// turned Windows HDR off); nullptr on the other platforms.

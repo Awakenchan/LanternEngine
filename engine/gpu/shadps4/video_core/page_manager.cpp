@@ -60,6 +60,7 @@
 #else
 #include "common/spin_lock.h"
 #endif
+#include "lantern_switches.h"
 
 extern "C" void runtime_memory_set_write_watch(uintptr_t address, uint64_t size, int watch);
 
@@ -133,8 +134,8 @@ std::array<ImageFaultSite, 256> image_fault_sites;
 void NoteFaultSite(void* context, VAddr address) {
     current_fault_rip = 0;
     // Collecting a stack for every streamed page adds OS reads to the normal load path.
-    static const bool enabled = std::getenv("BB_FRAME_STATS") || std::getenv("BB_FAULT_SITES");
-    if (!enabled) return;
+    const Lantern::Switches& switches = Lantern::Switches::Get();
+    if (!switches.frame_stats && !switches.fault_sites) return;
 #ifdef _WIN32
     const auto* registers = static_cast<const EXCEPTION_POINTERS*>(context)->ContextRecord;
     const u64 rip = registers->Rip, rbp = registers->Rbp, rsp = registers->Rsp;

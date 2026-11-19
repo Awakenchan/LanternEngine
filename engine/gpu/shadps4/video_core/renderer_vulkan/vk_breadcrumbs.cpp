@@ -11,6 +11,8 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -19,16 +21,23 @@
 #include <vector>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_optiscaler.h"
+#include "video_core/renderer_vulkan/vk_breadcrumbs_ring.h"
+#include "video_core/renderer_vulkan/vk_breadcrumbs_note.h"
+#include "video_core/texture_cache/image.h"
 
 extern "C" int runtime_memory_vma_info(uintptr_t address, int* prot, int* type, uintptr_t* end);
+extern "C" uint64_t runtime_tsc_frequency(void);
 
 #include <vk_mem_alloc.h>
 
 namespace Vulkan::Breadcrumbs {
 
+Switch marker_switch;
+
 namespace {
 
 constexpr u32 MaxStreams = 16;
+constexpr u64 MarkerCountBatch = 1024;
 constexpr u32 StreamStride = 64; // bytes of the marker buffer per stream (a cache line)
 constexpr u64 RingSize = 1u << 15;
 constexpr u32 ArgSlots = 4096;                     // indirect dispatch arguments, 16 bytes each
@@ -47,7 +56,27 @@ struct Stream {
 
 std::array<Stream, MaxStreams> streams;
 std::atomic<u32> num_streams{0};
-bool enabled = false;
+
+struct MarkerStats {
+    std::atomic<u64> writes{0};
+    std::atomic<const std::atomic<u64>*> stage_b_busy{nullptr};
+    u64 last_writes = 0;
+    u64 last_noted = 0;
+    u64 last_frames = 0;
+    u64 last_busy = 0;
+};
+
+struct MarkerArming {
+    Arming::Reason reason = Arming::Reason::Default;
+    bool wanted = false;
+    bool available = false;
+    std::filesystem::path note;
+    std::filesystem::path fallback;
+    std::atomic<bool> armed_after_loss{false};
+};
+MarkerArming marker_arming;
+MarkerStats marker_stats;
+thread_local u64 unpublished_writes = 0;
 std::once_flag init_once;
 vk::Buffer marker_buffer{};
 VmaAllocation marker_allocation{};
@@ -82,9 +111,66 @@ struct FreedRing {
     }
 };
 std::mutex address_mutex;
-std::map<u64, AddressBinding> address_bound;
+std::multimap<u64, AddressBinding> bound_resources;
+std::multimap<u64, AddressBinding> bound_memory;
+HandleRanges handle_ranges;
 FreedRing freed_images{.capacity = 32768};
 FreedRing freed_others{.capacity = 65536};
+
+constexpr u32 DrawRingSize = 512;
+std::unique_ptr<DrawRing<DrawRingSize>> draw_ring;
+bool draw_capture = false;
+thread_local u32 last_stream = ~0u;
+thread_local u64 last_id = 0;
+thread_local DrawResources draw_scratch;
+
+struct StuckDraw {
+    u32 stream;
+    u64 id;
+};
+std::array<StuckDraw, MaxStreams * 2> stuck_draws{};
+std::atomic<u32> num_stuck{0};
+
+std::multimap<u64, AddressBinding>& BoundMap(VkObjectType type) {
+    return type == VK_OBJECT_TYPE_DEVICE_MEMORY ? bound_memory : bound_resources;
+}
+
+const AddressBinding* FindContaining(const std::multimap<u64, AddressBinding>& map, u64 address) {
+    auto it = map.upper_bound(address);
+    const AddressBinding* best = nullptr;
+    for (u32 steps = 0; it != map.begin() && steps < 256; ++steps) {
+        --it;
+        const AddressBinding& b = it->second;
+        if (address < b.base + b.size && (!best || b.size < best->size)) {
+            best = &b;
+        }
+    }
+    return best;
+}
+
+const AddressBinding* FindLiveHandle(u64 handle, u64 base) {
+    auto [lo, hi] = bound_resources.equal_range(base);
+    for (auto it = lo; it != hi; ++it) {
+        if (it->second.handle == handle) {
+            return &it->second;
+        }
+    }
+    return nullptr;
+}
+
+const AddressBinding* FindFreedHandle(const FreedRing& ring, u64 handle, u64 base) {
+    if (!ring.entries) {
+        return nullptr;
+    }
+    const u64 count = std::min(ring.next, ring.capacity);
+    for (u64 i = 0; i < count; ++i) {
+        const auto& freed = ring.entries[(ring.next - 1 - i) % ring.capacity];
+        if (freed.handle == handle && freed.base == base) {
+            return &freed;
+        }
+    }
+    return nullptr;
+}
 
 const char* ObjectTypeName(VkObjectType type) {
     switch (type) {
@@ -127,18 +213,24 @@ VKAPI_ATTR VkBool32 VKAPI_CALL AddressReportCallback(VkDebugUtilsMessageSeverity
         }
     }
     std::scoped_lock lock{address_mutex};
+    auto& map = BoundMap(entry.type);
     if (binding->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT) {
-        address_bound[entry.base] = entry;
+        map.emplace(entry.base, entry);
+        if (entry.type != VK_OBJECT_TYPE_DEVICE_MEMORY) {
+            handle_ranges.Bind(entry.handle, entry.base, entry.size);
+        }
         return VK_FALSE;
     }
-    if (auto it = address_bound.find(entry.base); it != address_bound.end()) {
+    if (const auto it = FindUnbound(map, entry.base, entry.handle); it != map.end()) {
         if (!entry.name[0]) {
             std::memcpy(entry.name, it->second.name, sizeof(entry.name));
         }
-        if (entry.type == VK_OBJECT_TYPE_UNKNOWN) {
-            entry.type = it->second.type;
-        }
-        address_bound.erase(it);
+        entry.handle = it->second.handle;
+        entry.type = it->second.type;
+        map.erase(it);
+    }
+    if (entry.type != VK_OBJECT_TYPE_DEVICE_MEMORY) {
+        handle_ranges.Unbind(entry.handle, entry.base);
     }
     entry.freed = std::chrono::steady_clock::now();
     (entry.type == VK_OBJECT_TYPE_IMAGE ? freed_images : freed_others).Push(entry);
@@ -177,18 +269,21 @@ void DescribeRing(const char* what, const FreedRing& ring, std::chrono::steady_c
                     std::chrono::duration_cast<std::chrono::milliseconds>(now - oldest.freed).count()));
 }
 
+void PrintBinding(const char* label, const AddressBinding& b) {
+    std::printf("    %s %s %#llx [%#llx, +%#llx) %s\n", label, ObjectTypeName(b.type),
+                static_cast<unsigned long long>(b.handle), static_cast<unsigned long long>(b.base),
+                static_cast<unsigned long long>(b.size), b.name[0] ? b.name : "(no name)");
+}
+
 void DescribeFaultAddress(u64 address) {
     std::scoped_lock lock{address_mutex};
-    auto it = address_bound.upper_bound(address);
-    if (it != address_bound.begin()) {
-        const auto& bound = std::prev(it)->second;
-        if (address < bound.base + bound.size) {
-            std::printf("    in a live %s %#llx [%#llx, +%#llx) %s\n", ObjectTypeName(bound.type),
-                        static_cast<unsigned long long>(bound.handle),
-                        static_cast<unsigned long long>(bound.base),
-                        static_cast<unsigned long long>(bound.size), bound.name);
-            return;
+    const AddressBinding* memory = FindContaining(bound_memory, address);
+    if (const AddressBinding* live = FindContaining(bound_resources, address)) {
+        PrintBinding("in a live", *live);
+        if (memory) {
+            PrintBinding("  within live", *memory);
         }
+        return;
     }
     const auto now = std::chrono::steady_clock::now();
     if (freed_images.entries && FindFreed(freed_images, address, now)) {
@@ -197,19 +292,113 @@ void DescribeFaultAddress(u64 address) {
     if (freed_others.entries && FindFreed(freed_others, address, now)) {
         return;
     }
-    std::printf("    not in any memory bound now (%zu bound) or freed recently\n", address_bound.size());
+    std::printf("    not in any image or buffer bound now (%zu bound, %zu memory objects) or freed "
+                "recently\n",
+                bound_resources.size(), bound_memory.size());
+    if (memory) {
+        PrintBinding("but inside live", *memory);
+    }
     DescribeRing("images", freed_images, now);
     DescribeRing("other objects", freed_others, now);
-    if (it != address_bound.begin()) {
+    auto it = bound_resources.upper_bound(address);
+    if (it != bound_resources.begin()) {
         const auto& below = std::prev(it)->second;
-        std::printf("    nearest below: %s [%#llx, +%#llx) %s\n", ObjectTypeName(below.type),
-                    static_cast<unsigned long long>(below.base),
-                    static_cast<unsigned long long>(below.size), below.name);
+        PrintBinding("nearest below:", below);
+        std::printf("      the address is %#llx past its end\n",
+                    static_cast<unsigned long long>(address - (below.base + below.size)));
     }
-    if (it != address_bound.end()) {
-        std::printf("    nearest above: %s [%#llx, +%#llx) %s\n", ObjectTypeName(it->second.type),
-                    static_cast<unsigned long long>(it->second.base),
-                    static_cast<unsigned long long>(it->second.size), it->second.name);
+    if (it != bound_resources.end()) {
+        PrintBinding("nearest above:", it->second);
+        std::printf("      the address is %#llx before its start\n",
+                    static_cast<unsigned long long>(it->second.base - address));
+    }
+}
+
+const char* ResourceState(const DrawResource& r, long long& freed_ms) {
+    freed_ms = -1;
+    if (!r.gpu_size) {
+        return "no GPU range at the draw";
+    }
+    if (FindLiveHandle(r.handle, r.gpu_base)) {
+        return "live";
+    }
+    const FreedRing& ring = r.image ? freed_images : freed_others;
+    if (const AddressBinding* freed = FindFreedHandle(ring, r.handle, r.gpu_base)) {
+        freed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - freed->freed)
+                       .count();
+        return "FREED";
+    }
+    return "gone (freed before the kept ones)";
+}
+
+std::optional<DrawResources> ReadDraw(u32 stream, u64 id) {
+    return draw_ring ? draw_ring->Read(stream, id) : std::nullopt;
+}
+
+void PrintDrawResources(u64 id, const std::optional<DrawResources>& draw) {
+    if (!draw_ring) {
+        return;
+    }
+    if (!draw) {
+        std::printf("      resources of #%llu: not kept (not a full-screen draw, or overwritten)\n",
+                    (unsigned long long)id);
+        return;
+    }
+    std::printf("      resources of #%llu: %u image and %u buffer descriptors, %u known%s\n",
+                (unsigned long long)id, draw->image_descriptors, draw->buffer_descriptors,
+                draw->count, draw->dropped ? " (some left out)" : "");
+    std::scoped_lock lock{address_mutex};
+    for (u32 i = 0; i < draw->count; ++i) {
+        const DrawResource& r = draw->items[i];
+        long long freed_ms = -1;
+        const char* state = ResourceState(r, freed_ms);
+        if (r.image) {
+            std::printf("        [%u] T# image %#llx guest %#llx+%#llx %s %ux%ux%u L%u, GPU [%#llx, "
+                        "+%#llx) %s",
+                        i, (unsigned long long)r.handle, (unsigned long long)r.guest,
+                        (unsigned long long)r.guest_size,
+                        vk::to_string(vk::Format(r.format)).c_str(), r.width, r.height, r.depth,
+                        r.layers, (unsigned long long)r.gpu_base, (unsigned long long)r.gpu_size,
+                        state);
+        } else {
+            std::printf("        [%u] V# buffer %#llx guest %#llx+%#llx at +%#llx, GPU [%#llx, +%#llx) "
+                        "%s",
+                        i, (unsigned long long)r.handle, (unsigned long long)r.guest,
+                        (unsigned long long)r.range, (unsigned long long)r.offset,
+                        (unsigned long long)r.gpu_base, (unsigned long long)r.gpu_size, state);
+        }
+        if (freed_ms >= 0) {
+            std::printf(" %lld ms before the crash", freed_ms);
+        }
+        std::printf("\n");
+    }
+}
+
+void MatchStuckDraws(u64 address) {
+    if (!draw_ring) {
+        return;
+    }
+    const u32 count = std::min<u32>(num_stuck.load(), stuck_draws.size());
+    for (u32 s = 0; s < count; ++s) {
+        const auto draw = draw_ring->Read(stuck_draws[s].stream, stuck_draws[s].id);
+        if (!draw) {
+            continue;
+        }
+        const Nearest n = Locate(*draw, address);
+        if (n.index < 0) {
+            std::printf("    stuck #%llu: none of its resources has a GPU range\n",
+                        (unsigned long long)draw->id);
+            continue;
+        }
+        if (n.inside) {
+            std::printf("    stuck #%llu: the address is in its resource [%d]\n",
+                        (unsigned long long)draw->id, n.index);
+        } else {
+            std::printf("    stuck #%llu: in none of its resources; nearest [%d], %#llx %s\n",
+                        (unsigned long long)draw->id, n.index, (unsigned long long)n.distance,
+                        n.past_end ? "past its end" : "before its start");
+        }
     }
 }
 
@@ -219,13 +408,36 @@ void Init(const Instance& instance) {
     if (instance.IsDeviceFaultSupported()) {
         fault_device = instance.GetDevice();
     }
-    const char* env = std::getenv("BB_BREADCRUMBS");
-    if (env && env[0] == '0') {
+    MarkerArming& a = marker_arming;
+    const char* user_dir = std::getenv("BB_GPU_USER_DIR");
+    a.note = Arming::NotePath(std::getenv("BB_LOG_FILE"), user_dir);
+    a.fallback = Arming::FallbackNotePath(user_dir, a.note);
+    const auto start =
+        Arming::Start(Arming::ParseOverride(std::getenv("BB_BREADCRUMBS")), a.note, a.fallback);
+    a.reason = start.decision.reason;
+    a.wanted = start.decision.on;
+    a.available = instance.IsBufferMarkerSupported();
+    if (start.update == Arming::NoteUpdate::Failed ||
+        a.reason == Arming::Reason::NoteUnreadable) {
+        std::printf("GPU markers: the device-loss note %s in the %s folder could not be %s; the "
+                    "markers stay on at every start until it is deleted\n",
+                    std::string(Arming::kNoteName).c_str(), start.from_fallback ? "user" : "logs",
+                    a.reason == Arming::Reason::NoteUnreadable ? "read" : "updated");
+    }
+    if (!a.wanted) {
+        std::printf("GPU markers: off (%s); BB_BREADCRUMBS=1 forces them on, and a device loss "
+                    "turns them on for the next %u starts\n",
+                    Arming::ReasonText(a.reason), Arming::kArmedStarts);
+        if (a.reason == Arming::Reason::ForcedOff && start.note.valid && start.note.starts > 0) {
+            std::printf("GPU markers: this start used up one armed start of a device loss (%u left)\n",
+                        start.decision.starts_left);
+        }
         return;
     }
-    if (!instance.IsBufferMarkerSupported()) {
-        std::printf("GPU breadcrumbs: VK_AMD_buffer_marker unavailable, GPU hangs will not be "
-                    "located\n");
+    if (!a.available) {
+        std::printf("GPU markers: wanted (%s) but VK_AMD_buffer_marker is unavailable, GPU hangs "
+                    "will not be located\n",
+                    Arming::ReasonText(a.reason));
         return;
     }
     const VkBufferCreateInfo buffer_ci = {
@@ -253,7 +465,18 @@ void Init(const Instance& instance) {
         markers[i] = 0;
     }
     args = markers + ArgsOffset / sizeof(u32);
-    enabled = true;
+    marker_switch.markers = true;
+    if (a.reason == Arming::Reason::Armed) {
+        std::printf("GPU markers: on (%s; %u more armed starts after this one)\n",
+                    Arming::ReasonText(a.reason), start.decision.starts_left);
+    } else {
+        std::printf("GPU markers: on (%s)\n", Arming::ReasonText(a.reason));
+    }
+    const char* resources = std::getenv("BB_DRAW_RESOURCES");
+    if (!resources || resources[0] != '0') {
+        draw_ring = std::make_unique<DrawRing<DrawRingSize>>();
+        draw_capture = true;
+    }
 }
 
 /// Guest memory that may be gone by now: read only where the runtime has it mapped (its direct
@@ -370,11 +593,16 @@ void DumpPrograms(const Stream& stream, u64 id) {
         std::snprintf(path, sizeof(path), "%shang_shader_%016llx.bin", dir,
                       (unsigned long long)entry.crumb.hash[i]);
         if (FILE* file = std::fopen(path, "wb")) {
-            std::fwrite(code.data(), 1, size, file);
-            std::fclose(file);
-            std::printf("    shader %016llx code (%zu bytes from %#llx) saved to %s\n",
-                        (unsigned long long)entry.crumb.hash[i], size,
-                        (unsigned long long)program, path);
+            const bool written = std::fwrite(code.data(), 1, size, file) == size;
+            if (std::fclose(file) == 0 && written) {
+                std::printf("    shader %016llx code (%zu bytes from %#llx) saved to %s\n",
+                            (unsigned long long)entry.crumb.hash[i], size,
+                            (unsigned long long)program, path);
+            } else {
+                std::remove(path);
+                std::printf("    shader %016llx code could not be written to %s; partial file removed\n",
+                            (unsigned long long)entry.crumb.hash[i], path);
+            }
         }
     }
 }
@@ -392,10 +620,6 @@ u32 NewStream(const Instance& instance, const char* name) {
     return index;
 }
 
-bool Enabled() noexcept {
-    return enabled;
-}
-
 u32 Note(u32 stream_index, const Crumb& crumb) {
     if (stream_index >= MaxStreams) {
         return 0;
@@ -405,6 +629,8 @@ u32 Note(u32 stream_index, const Crumb& crumb) {
     Entry& entry = stream.ring[id & (RingSize - 1)];
     entry.crumb = crumb;
     entry.id = id;
+    last_stream = stream_index;
+    last_id = id;
     if (crumb.args_slot < ArgSlots) {
         args_notes[crumb.args_slot] = {id, stream_index, crumb.hash[0]};
     }
@@ -412,19 +638,23 @@ u32 Note(u32 stream_index, const Crumb& crumb) {
 }
 
 void Mark(vk::CommandBuffer cmdbuf, u32 stream, u32 id, bool after) {
-    if (!enabled || stream >= MaxStreams) {
+    if (!marker_switch.markers || stream >= MaxStreams) {
         return;
     }
     cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eBottomOfPipe, marker_buffer,
                                 stream * StreamStride, id * 2 + (after ? 1 : 0));
+    if (++unpublished_writes == MarkerCountBatch) {
+        marker_stats.writes.fetch_add(unpublished_writes, std::memory_order_relaxed);
+        unpublished_writes = 0;
+    }
 }
 
 u32 ArgsSlot() {
-    return enabled ? next_args_slot.fetch_add(1, std::memory_order_relaxed) % ArgSlots : ~0u;
+    return marker_switch.markers ? next_args_slot.fetch_add(1, std::memory_order_relaxed) % ArgSlots : ~0u;
 }
 
 void CopyArgs(vk::CommandBuffer cmdbuf, vk::Buffer source, u64 offset, u32 slot) {
-    if (!enabled || slot >= ArgSlots) {
+    if (!marker_switch.markers || slot >= ArgSlots) {
         return;
     }
     cmdbuf.copyBuffer(source, marker_buffer,
@@ -433,9 +663,35 @@ void CopyArgs(vk::CommandBuffer cmdbuf, vk::Buffer source, u64 offset, u32 slot)
 
 namespace {
 void Report(const char* title, const char* where);
+void ArmNextStarts(Arming::Trigger trigger, const char* event);
+}
+
+namespace {
+void ArmNextStarts(Arming::Trigger trigger, const char* event) {
+    MarkerArming& a = marker_arming;
+    if (!Arming::ArmsNextStarts(trigger) || a.note.empty() || a.armed_after_loss.exchange(true)) {
+        return;
+    }
+    const Arming::ArmResult armed = Arming::Arm(a.note, a.fallback);
+    const bool written = armed != Arming::ArmResult::Failed;
+    std::printf("GPU markers %s: %s this run (%s); %s\n", event,
+                marker_switch.markers ? "on" : "off", Arming::ReasonText(a.reason),
+                armed == Arming::ArmResult::WrittenToFallback ? "armed for the next starts (note in the user folder)"
+                : written ? "armed for the next starts"
+                        : "the device-loss note could not be written");
+}
+} // namespace
+
+namespace {
+std::atomic<bool> device_lost{false};
+}
+
+bool DeviceLost() noexcept {
+    return device_lost.load(std::memory_order_acquire);
 }
 
 void ReportDeviceLost(const char* where) {
+    device_lost.store(true, std::memory_order_release);
     static std::atomic_flag reported = ATOMIC_FLAG_INIT;
     static std::atomic<bool> done{false};
     if (reported.test_and_set()) {
@@ -447,7 +703,8 @@ void ReportDeviceLost(const char* where) {
         }
         return;
     }
-    if (enabled) {
+    ArmNextStarts(Arming::Trigger::DeviceLost, "at device lost");
+    if (marker_switch.markers) {
         Report("at device lost", where);
     }
     // The game's GPU range allocators (BB_FRAME_STATS, bbport_guest_hooks): Ebrietas' rock effect
@@ -506,10 +763,12 @@ void ReportDeviceFault() {
     }
     std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
     std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
-    counts.vendorBinarySize = 0;
+    std::vector<u8> vendor_binary(counts.vendorBinarySize);
     VkDeviceFaultInfoEXT info{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
                               .pAddressInfos = addresses.data(),
-                              .pVendorInfos = vendor.data()};
+                              .pVendorInfos = vendor.data(),
+                              .pVendorBinaryData = vendor_binary.empty() ? nullptr
+                                                                         : vendor_binary.data()};
     const VkResult result = get(device, &counts, &info);
     if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
         std::printf("GPU fault: the driver gave no fault report\n");
@@ -530,7 +789,28 @@ void ReportDeviceFault() {
         if (a.addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT ||
             a.addressType == VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT) {
             DescribeFaultAddress(a.reportedAddress);
+            MatchStuckDraws(a.reportedAddress);
         }
+    }
+    if (counts.vendorBinarySize && !vendor_binary.empty()) {
+        const char* dir = access("out", W_OK) == 0 ? "out/" : "";
+        char path[256];
+        std::snprintf(path, sizeof(path), "%sgpu_fault_vendor.bin", dir);
+        if (FILE* file = std::fopen(path, "wb")) {
+            const size_t size = std::min<size_t>(counts.vendorBinarySize, vendor_binary.size());
+            const bool written = std::fwrite(vendor_binary.data(), 1, size, file) == size;
+            if (std::fclose(file) == 0 && written) {
+                std::printf("  vendor fault binary (%llu bytes) saved to %s\n",
+                            static_cast<unsigned long long>(counts.vendorBinarySize), path);
+            } else {
+                std::remove(path);
+                std::printf("  vendor fault binary could not be written to %s; partial file removed\n",
+                            path);
+            }
+        }
+    } else {
+        std::printf("  no vendor fault binary (the driver gave none, or deviceFaultVendorBinary is "
+                    "off)\n");
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         const auto& v = vendor[i];
@@ -543,7 +823,11 @@ void ReportDeviceFault() {
 
 void ReportStuck(const char* where) {
     static std::atomic_flag reported = ATOMIC_FLAG_INIT;
-    if (enabled && !reported.test_and_set()) {
+    if (reported.test_and_set()) {
+        return;
+    }
+    ArmNextStarts(Arming::Trigger::GpuStuck, "while the GPU makes no progress");
+    if (marker_switch.markers) {
         Report("while the GPU makes no progress", where);
     }
 }
@@ -580,6 +864,12 @@ void Report(const char* title, const char* where) {
                         (unsigned long long)id, (unsigned long long)(id + 1));
             PrintEntry(stream, id, "finished");
             PrintEntry(stream, id + 1, "next");
+            if (const auto draw = ReadDraw(s, id + 1)) {
+                PrintDrawResources(id + 1, draw);
+                if (const u32 slot = num_stuck.fetch_add(1); slot < stuck_draws.size()) {
+                    stuck_draws[slot] = {s, id + 1};
+                }
+            }
         } else {
             std::printf(", the GPU started #%llu and did not finish it (%llu noted after it)\n",
                         (unsigned long long)id, (unsigned long long)(last - id));
@@ -587,6 +877,14 @@ void Report(const char* title, const char* where) {
                 PrintEntry(stream, id - 1, "finished");
             }
             PrintEntry(stream, id, "STUCK");
+            PrintDrawResources(id, ReadDraw(s, id));
+            if (const u32 slot = num_stuck.fetch_add(1); slot < stuck_draws.size()) {
+                stuck_draws[slot] = {s, id};
+            }
+            if (const auto before = id > 1 ? ReadDraw(s, id - 1) : std::nullopt) {
+                std::printf("    the one before:\n");
+                PrintDrawResources(id - 1, before);
+            }
             std::fflush(stdout);
             DumpPrograms(stream, id);
         }
@@ -602,8 +900,52 @@ void Report(const char* title, const char* where) {
 } // Anonymous namespace
 
 
+void WatchStageB(const std::atomic<u64>* busy_cycles) noexcept {
+    marker_stats.stage_b_busy.store(busy_cycles, std::memory_order_release);
+}
+
+namespace {
+void PrintMarkerLine() {
+    MarkerStats& m = marker_stats;
+    const u64 frames_now = BbStats::gpu_frames.load(std::memory_order_relaxed);
+    const u64 frames = frames_now - m.last_frames;
+    m.last_frames = frames_now;
+    const u64 writes_now = m.writes.load(std::memory_order_relaxed);
+    const u64 writes = writes_now - m.last_writes;
+    m.last_writes = writes_now;
+    u64 noted_now = 0;
+    const u32 count = std::min(num_streams.load(), MaxStreams);
+    for (u32 s = 0; s < count; ++s) {
+        noted_now += streams[s].next.load(std::memory_order_relaxed) - 1;
+    }
+    const u64 noted = noted_now - m.last_noted;
+    m.last_noted = noted_now;
+    const double per_frame = frames ? 1.0 / double(frames) : 0.0;
+    std::printf("GPU markers A/B: %s (%s); %.0f marker writes/frame (counted in batches of %llu), "
+                "%.0f commands noted/frame",
+                marker_switch.markers ? "on" : "off",
+                marker_arming.wanted && !marker_arming.available
+                    ? "wanted, no VK_AMD_buffer_marker"
+                    : Arming::ReasonText(marker_arming.reason),
+                double(writes) * per_frame,
+                static_cast<unsigned long long>(MarkerCountBatch), double(noted) * per_frame);
+    const std::atomic<u64>* busy = m.stage_b_busy.load(std::memory_order_acquire);
+    const double tsc_hz = double(runtime_tsc_frequency());
+    if (busy && tsc_hz > 0.0 && frames) {
+        const u64 busy_now = busy->load(std::memory_order_relaxed);
+        const u64 spent = busy_now - m.last_busy;
+        m.last_busy = busy_now;
+        std::printf("; stage B (draw recording thread) busy %.3f ms/frame over %llu frames\n",
+                    1e3 * double(spent) / tsc_hz * per_frame, static_cast<unsigned long long>(frames));
+    } else {
+        std::printf("; stage B busy not timed (no draw pipe)\n");
+    }
+}
+} // namespace
+
 void PrintProgress() {
-    if (!enabled) {
+    PrintMarkerLine();
+    if (!marker_switch.markers) {
         return;
     }
     std::printf("GPU breadcrumbs:");
@@ -661,6 +1003,68 @@ void PrintProgress() {
         }
     }
     std::printf("\n");
+}
+
+DrawResources* BeginDraw(u32 stream, u32 image_descriptors, u32 buffer_descriptors) {
+    if (!draw_capture || stream != last_stream || last_id == 0) {
+        return nullptr;
+    }
+    draw_scratch = {.id = last_id,
+                    .stream = stream,
+                    .image_descriptors = image_descriptors,
+                    .buffer_descriptors = buffer_descriptors};
+    return &draw_scratch;
+}
+
+void AddImage(DrawResources& draw, const VideoCore::Image& image) {
+    DrawResource* r = draw.Add();
+    if (!r) {
+        return;
+    }
+    *r = {.handle = reinterpret_cast<u64>(static_cast<VkImage>(image.GetImage())),
+          .guest = image.info.guest_address,
+          .guest_size = image.info.guest_size,
+          .format = static_cast<u32>(image.info.pixel_format),
+          .width = image.info.size.width,
+          .height = image.info.size.height,
+          .depth = static_cast<u16>(image.info.size.depth),
+          .layers = static_cast<u8>(std::min<u32>(image.info.resources.layers, 255)),
+          .image = true};
+}
+
+void AddBuffer(DrawResources& draw, vk::Buffer buffer, u64 guest, u64 offset, u64 size) {
+    DrawResource* r = draw.Add();
+    if (!r) {
+        return;
+    }
+    *r = {.handle = reinterpret_cast<u64>(static_cast<VkBuffer>(buffer)),
+          .guest = guest + offset,
+          .guest_size = size,
+          .offset = offset,
+          .range = size};
+}
+
+void EndDraw(DrawResources& draw) {
+    handle_ranges.Resolve(std::span{draw.items.data(), draw.count});
+    draw_ring->Publish(draw);
+}
+
+void NameBound(u64 handle, const char* name) {
+    if (!handle || !name) {
+        return;
+    }
+    const auto range = handle_ranges.Find(handle);
+    if (!range.size) {
+        return;
+    }
+    std::scoped_lock lock{address_mutex};
+    auto [lo, hi] = bound_resources.equal_range(range.base);
+    for (auto it = lo; it != hi; ++it) {
+        if (it->second.handle == handle) {
+            std::snprintf(it->second.name, sizeof(it->second.name), "%s", name);
+            return;
+        }
+    }
 }
 
 } // namespace Vulkan::Breadcrumbs

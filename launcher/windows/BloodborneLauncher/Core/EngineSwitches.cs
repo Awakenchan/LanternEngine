@@ -47,14 +47,14 @@ namespace BloodborneLauncher.Core
         public const string Performance = "Performance";
         public const string Memory = "Memory and VRAM";
         public const string Upscalers = "Upscalers";
-        public const string Online = "Online";
+        public const string Seamless = "Seamless co-op";
         public const string Input = "Input";
         public const string Sound = "Sound";
         public const string Fixes = "Game fixes";
         public const string Diagnostics = "Diagnostics and logs";
         public const string DirectVulkan = "Direct rendering";
 
-        public static readonly string[] Groups = { Graphics, Performance, Input, Online, Sound, Fixes };
+        public static readonly string[] Groups = { Graphics, Performance, Input, Sound, Fixes, Diagnostics };
 
         // ---------------------------------------------------------------- building the list
 
@@ -137,6 +137,12 @@ namespace BloodborneLauncher.Core
             OnUnless0("LANTERN_FRAMERATE_FOLLOW", Performance, L.T("Steps follow the frame rate"),
                 L.T("With the native frame rate: the game's steps take the frame rate it actually holds. Off: they stay at the ") +
                 L.T("chosen frame rate, and the game slows down when it runs below it")),
+            OnUnless0("LANTERN_FRAME_START_PACING", Performance, L.T("Frame start pacing"),
+                L.T("With a fixed frame rate: each game frame starts on the same clock as the flips, so the game's steps match ") +
+                L.T("the time each frame is shown, in whole refreshes when the flips follow the display. Off: the game's own limiter")),
+            OffUnless1("BB_LOW_LATENCY", Performance, L.T("Low latency"),
+                L.T("Less input lag: the game no longer prepares its next frame while the GPU draws the last one, at most one ") +
+                L.T("frame waits to be shown, and a frame counts as shown only after it is. Can lower the frame rate")),
             OnUnless0("LANTERN_MEMORY_RETRY_LIMIT", Performance, L.T("Memory retry limit"),
                 L.T("With the PC memory model: game data the processor keeps rewriting stays in system memory after three tries ") +
                 L.T("instead of moving back and forth for ever, which slowed the game down the longer you played. Off: no limit")),
@@ -144,7 +150,7 @@ namespace BloodborneLauncher.Core
 
 
 
-            OffUnless1("BB_SEAMLESS_DEATHS", Online, L.T("Seamless co-op: spectate and party wipe"),
+            OffUnless1("BB_SEAMLESS_DEATHS", Seamless, L.T("Seamless co-op: spectate and party wipe"),
                 L.T("Experimental, never run with two hunters. In a boss fight a hunter who dies watches the others through a spectator ") +
                 L.T("camera, and a party wipe brings everyone back at the lamp without a loading screen. Off: a fallen hunter stays down ") +
                 L.T("until the boss dies, and a party wipe sends everyone back to the lamp through a loading screen")),
@@ -187,6 +193,11 @@ namespace BloodborneLauncher.Core
                 L.T("Starts with game files that are not the supported version (base game plus the 1.09 update). Other editions ") +
                 L.T("may crash, and the engine's patches and PC menus may not apply")),
 
+            Text("LANTERN_STEPS_OFF", Diagnostics, L.T("Engine steps to leave out"),
+                L.T("For finding which engine step causes a problem: a comma list of step names (vertex-memo), groups (group:gx), ") +
+                L.T("all-new, or a half of the steps that are on (@1/2, then @2/2). After a difference the engine writes the line to ") +
+                L.T("copy here into logs\\diagnosis.txt. Empty: every step as the engine sets it"), "@1/2"),
+
 
             // bbport: BB_NATIVE_CALLS was here too (Direct draw calls, passed even at its default):
             // passed after Engine features > Native draw calls, its 0 turned that setting off for
@@ -208,9 +219,13 @@ namespace BloodborneLauncher.Core
             else s.Set(item.Key, value);
         }
 
+        public static IEnumerable<EngineSwitch> InGroup(string group) => All.Where(x => x.Group == group);
+
+        public static IEnumerable<EngineSwitch> OnEnginePage => All.Where(x => Groups.Contains(x.Group));
+
         public static void ResetAll(LauncherSettings s)
         {
-            foreach (var item in All)
+            foreach (var item in OnEnginePage)
                 s.Remove(item.Key);
         }
 

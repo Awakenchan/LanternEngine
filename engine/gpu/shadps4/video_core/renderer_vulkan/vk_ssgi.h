@@ -86,6 +86,9 @@ private:
     bool history_valid = false;
     bool failed = false;
     bool tried = false;
+    bool bounce_motion = false;
+    bool motion_stats = false;
+    u32 motion_frames = 0, motion_missing = 0, motion_reported = 0;
     VideoCore::ImageId gbuffer_depth, gbuffer_albedo, gbuffer_normal;
     VideoCore::ImageId ao_image;
     std::array<ViewEntry, 4> view_cache{};

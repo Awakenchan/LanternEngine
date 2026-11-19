@@ -1,0 +1,112 @@
+requests per phase (background poll and heartbeat counted apart)
+  in game: Matching2 Initialize, CreateContext, ContextStart: 1
+  in game: signaling activate (a peer outside the room): 1
+  in game: Matching2 CreateJoinRoom: 1
+  in game: Matching2 LeaveRoom (host): 1
+  in game: Matching2 JoinRoom: 1
+  in game: Matching2 LeaveRoom (guest): 1
+  in game: one sceHttp request: 1
+  game start: POST /auth/whoami: 0
+  background: event polls: 1
+
+requests in order
+[in game: Matching2 Initialize, CreateContext, ContextStart] POST /mp/matching2/context_start
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 105
+  Accept: application/json
+  body: {"MappedAddr":"","MappedPort":0,"OnlineId":"TestHunter","SignalingAddr":"127.0.0.1","SignalingPort":3658}
+[in game: signaling activate (a peer outside the room)] POST /np/signaling/resolve
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 29
+  Accept: application/json
+  body: {"OnlineId":"SummonedHunter"}
+[in game: Matching2 CreateJoinRoom] POST /mp/matching2/create_room
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 155
+  Accept: application/json
+  body: {"LocalAddr":"127.0.0.1","LocalPort":3658,"MappedAddr":"","MappedPort":0,"MaxMembers":4,"OnlineId":"TestHunter","PublicAddr":"127.0.0.1","PublicPort":3658}
+[in game: Matching2 LeaveRoom (host)] POST /mp/matching2/leave_room
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 41
+  Accept: application/json
+  body: {"MemberId":1,"SessionId":"session-host"}
+[in game: Matching2 JoinRoom] POST /mp/matching2/join_room
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 154
+  Accept: application/json
+  body: {"LocalAddr":"127.0.0.1","LocalPort":3658,"MappedAddr":"","MappedPort":0,"OnlineId":"TestHunter","PublicAddr":"127.0.0.1","PublicPort":3658,"RoomId":4242}
+[in game: Matching2 LeaveRoom (guest)] POST /mp/matching2/leave_room
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 42
+  Accept: application/json
+  body: {"MemberId":2,"SessionId":"session-guest"}
+[in game: one sceHttp request] POST /fs4/login.spd
+  Accept-Encoding: gzip, deflate
+  Accept: */*
+  User-Agent: Bloodborne/1.09 libhttp/14.00 (PlayStation 4) shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
+  Content-Type: application/octet-stream
+  Content-Type: application/octet-stream
+  Connection: close
+  Host: 127.0.0.1:<port>
+  Content-Length: 14
+  body: game-body-0123
+
+background request shapes (heartbeat only when a 5 s beat fell inside a room)
+POST /np/events/poll
+  Accept-Encoding: gzip, deflate
+  X-BBHost-Ruleset: vanilla
+  X-BB-Token: test-token-0123456789
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  Content-Length: 78
+  Accept: application/json
+  body: {"Categories":["matching2"],"Cursor":0,"OnlineId":"TestHunter","WaitMs":25000}
+
+game-visible results
+  np state 2 online id TestHunter
+  context event 0x6f02 error 0x0
+  request 1 event 0x101 error 0x0
+  request 2 event 0x106 error 0x80550c28
+  request 3 event 0x103 error 0x0
+  request 4 event 0x102 error 0x0
+  request 5 event 0x103 error 0x0
+  webapi status 200 body {"totalResults":0,"friendList":[]}

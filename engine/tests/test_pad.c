@@ -8,6 +8,7 @@
 #include <string.h>
 
 static int capture, menu, failures;
+static uint8_t actions;
 static bool keyboard[SDL_SCANCODE_COUNT];
 
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition); ++failures; } } while (0)
@@ -18,7 +19,7 @@ uint64_t host_monotonic_ns(void) {
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_anti_lag_before_input(void) {}
 int bbgpu_pc_input(BbPcPad *pad, const bool *keys, int count, int gamepad) {
-    (void)pad;
+    actions = pad->actions;
     (void)keys;
     (void)count;
     (void)gamepad;
@@ -78,7 +79,8 @@ int main(void) {
     temp_path(config, sizeof(config), "pad-config");
     write_file(pad_file, "");
     write_file(config, "upscaler=fsr3\npad.cross=b\npad.circle=a\npad.r2=rightshoulder\n"
-                       "pad.r1=righttrigger\nkey.cross=X, Space\npad.bogus=a\npad.menu_back=b\n");
+                       "pad.r1=righttrigger\nkey.cross=X, Space\npad.bogus=a\npad.menu_back=b\n"
+                       "pad.l1=\npad.sprint=leftshoulder\npad.dodge=paddle1\npad.backstep=b\nkey.sprint=N\n");
     set_env("BB_PAD_FILE", pad_file);
     set_env("BB_CONFIG", config);
     set_env("SDL_VIDEODRIVER", "dummy");
@@ -148,15 +150,30 @@ int main(void) {
     update();
     CHECK(read(1, &data) == 0 && data.buttons == 0);
 
+    CHECK(read(1, &data) == 0 && actions == 0);
+    CHECK(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, true));
+    update();
+    CHECK(read(1, &data) == 0 && actions == 4 && (data.buttons & (PAD_L1 | PAD_CIRCLE)) == PAD_CIRCLE);
+    CHECK(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, false));
+    CHECK(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, true));
+    update();
+    CHECK(read(1, &data) == 0 && actions == 1 && data.buttons == PAD_CIRCLE);
+    CHECK(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, false));
+    update();
+    CHECK(read(1, &data) == 0 && actions == 0 && data.buttons == 0);
+    keyboard[SDL_SCANCODE_N] = true;
+    CHECK(read(1, &data) == 0 && actions == 0 && data.buttons == 0);
+    keyboard[SDL_SCANCODE_N] = false;
+
     CHECK(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_EAST, true));
     CHECK(SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, true));
     CHECK(SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 32767));
     update();
-    CHECK(read(1, &data) == 0 && data.buttons == (PAD_CROSS | PAD_R2 | PAD_R1) && data.r2 == 255);
+    CHECK(read(1, &data) == 0 && data.buttons == (PAD_CROSS | PAD_R2 | PAD_R1 | PAD_CIRCLE) && data.r2 == 255 && actions == 2);
     menu = 1;
-    CHECK(read(1, &data) == 0 && (data.buttons & (PAD_CROSS | PAD_CIRCLE)) == PAD_CIRCLE);
+    CHECK(read(1, &data) == 0 && (data.buttons & (PAD_CROSS | PAD_CIRCLE)) == PAD_CIRCLE && actions == 0);
     menu = 0;
-    CHECK(read(1, &data) == 0 && !(data.buttons & (PAD_CROSS | PAD_CIRCLE)));
+    CHECK(read(1, &data) == 0 && !(data.buttons & (PAD_CROSS | PAD_CIRCLE)) && actions == 0);
     CHECK(sys_pad_button(PAD_CROSS, 0) == SDL_GAMEPAD_BUTTON_EAST);
 
     SDL_CloseJoystick(joystick);
@@ -165,6 +182,6 @@ int main(void) {
     remove(pad_file);
     remove(config);
     if (failures) return 1;
-    puts("PASS: pad ABI, left/right clicks, SDL touch coordinates, overlay capture, controls, menu buttons");
+    puts("PASS: pad ABI, left/right clicks, SDL touch coordinates, overlay capture, controls, menu buttons, dodge/backstep/sprint buttons");
     return 0;
 }

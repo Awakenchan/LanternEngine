@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -87,24 +88,20 @@ namespace BloodborneLauncher.Core
             var available = Discover(root);
             var order = new List<string>();
             var disabled = new HashSet<string>();
-            try
+            var read = SettingsText.Read(ProfilePath);
+            var (profile, writable) = Parse(read, ProfilePath);
+            Volatile.Write(ref _loadedUnreadable, read.State == TextState.Unreadable || !writable);
+            if (profile != null)
             {
-                if (File.Exists(ProfilePath) && JsonNode.Parse(File.ReadAllText(ProfilePath)) is JsonObject profile)
-                {
-                    order = profile["order"]?.AsArray().Select(n => n?.GetValue<string>() ?? "").ToList() ?? order;
-                    disabled = profile["disabled"]?.AsArray().Select(n => n?.GetValue<string>() ?? "").ToHashSet() ?? disabled;
-                }
-            }
-            catch
-            {
-                // A broken profile: everything enabled, alphabetical.
+                order = Names(profile["order"]).ToList();
+                disabled = Names(profile["disabled"]).ToHashSet();
             }
 
             return order.Concat(available).Distinct().Where(available.Contains)
                 .Select(n => new Entry(n, !disabled.Contains(n))).ToList();
         }
 
-        public static void Save(IEnumerable<Entry> mods)
+        public static SaveOutcome Save(IEnumerable<Entry> mods)
         {
             var list = mods.ToList();
             var profile = new JsonObject
@@ -112,9 +109,51 @@ namespace BloodborneLauncher.Core
                 ["order"] = new JsonArray(list.Select(m => (JsonNode?)m.Name).ToArray()),
                 ["disabled"] = new JsonArray(list.Where(m => !m.Enabled).Select(m => (JsonNode?)m.Name).ToArray()),
             };
-            Directory.CreateDirectory(Paths.DataDir);
-            File.WriteAllText(ProfilePath, profile.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n");
+            if (Volatile.Read(ref _loadedUnreadable)) throw new SettingsUnreadableException(ProfilePath);
+            return SettingsText.Update(ProfilePath, _ => profile.ToJsonString(Indented) + "\n");
         }
+
+        private static bool _loadedUnreadable;
+
+        internal static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
+
+        internal static (JsonObject? Profile, bool Writable) Parse(TextRead read, string path)
+        {
+            if (read.State != TextState.Read) return (null, true);
+            string why;
+            try
+            {
+                if (JsonNode.Parse(read.Text) is JsonObject profile) return (profile, true);
+                why = "not a JSON object";
+            }
+            catch (JsonException e)
+            {
+                why = e.Message;
+            }
+            return (null, KeepBroken(path, read.Text, why));
+        }
+
+        public static string BrokenOf(string path) => path + ".broken";
+
+        private static bool KeepBroken(string path, string text, string why)
+        {
+            try
+            {
+                SettingsText.Replace(BrokenOf(path), text);
+                Trace.TraceWarning($"{Path.GetFileName(path)} could not be parsed ({why}); kept as {Path.GetFileName(BrokenOf(path))}");
+                return true;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                Trace.TraceWarning($"{Path.GetFileName(path)} could not be parsed ({why}) and its copy failed ({e.Message}); it is not written over");
+                return false;
+            }
+        }
+
+        internal static IEnumerable<string> Names(JsonNode? node) =>
+            node is JsonArray array
+                ? array.Select(n => n is JsonValue value && value.TryGetValue<string>(out var name) ? name : "")
+                : Enumerable.Empty<string>();
     }
 
     /// <summary>Third-party shadPS4 XML patches for 01.09 (scripts/patches.py; profile in patches.json).</summary>
@@ -290,63 +329,77 @@ namespace BloodborneLauncher.Core
 
         public static (HashSet<string> Enabled, HashSet<string> Disabled) LoadProfile()
         {
-            try
+            var read = SettingsText.Read(ProfilePath);
+            var (enabled, disabled, writable) = Profile(read);
+            Volatile.Write(ref _loadedUnreadable, read.State == TextState.Unreadable || !writable);
+            if (writable && read.State != TextState.Unreadable && (Rename(enabled) | Rename(disabled)))
             {
-                if (File.Exists(ProfilePath) && JsonNode.Parse(File.ReadAllText(ProfilePath)) is JsonObject profile)
+                try
                 {
-                    var (enabled, disabled) = (Set(profile["enabled"]), Set(profile["disabled"]));
-                    if (Rename(enabled) | Rename(disabled))
+                    SettingsText.Update(ProfilePath, before =>
                     {
-                        try
-                        {
-                            Write(enabled, disabled);
-                        }
-                        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-                        {
-                        }
-                    }
-                    return (enabled, disabled);
+                        var (savedEnabled, savedDisabled, _) = Writable(Profile(before));
+                        Rename(savedEnabled);
+                        Rename(savedDisabled);
+                        return Text(savedEnabled, savedDisabled);
+                    });
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    Trace.TraceWarning($"{Path.GetFileName(ProfilePath)}: renamed patches not written ({e.Message}); the next save tries again");
                 }
             }
-            catch
-            {
-                // Broken: every patch at its file's default.
-            }
-            return (new HashSet<string>(), new HashSet<string>());
-
-            static HashSet<string> Set(JsonNode? node) =>
-                node?.AsArray().Select(n => n?.GetValue<string>() ?? "").ToHashSet() ?? new HashSet<string>();
+            return (enabled, disabled);
         }
+
+        private static (HashSet<string> Enabled, HashSet<string> Disabled, bool Writable) Profile(TextRead read)
+        {
+            var (profile, writable) = Mods.Parse(read, ProfilePath);
+            return profile != null
+                ? (Mods.Names(profile["enabled"]).ToHashSet(), Mods.Names(profile["disabled"]).ToHashSet(), writable)
+                : (new HashSet<string>(), new HashSet<string>(), writable);
+        }
+
+        private static (HashSet<string> Enabled, HashSet<string> Disabled, bool Writable) Writable(
+            (HashSet<string> Enabled, HashSet<string> Disabled, bool Writable) profile) =>
+            profile.Writable ? profile : throw new SettingsUnreadableException(ProfilePath);
 
         public static bool IsOn(Patch patch, (HashSet<string> Enabled, HashSet<string> Disabled) profile) =>
             profile.Enabled.Contains(patch.Key) || (patch.DefaultOn && !profile.Disabled.Contains(patch.Key));
 
         /// <summary>Records the switches that differ from each file's isEnabled; patches of other
         /// folders keep their saved choice.</summary>
-        public static void Save(IEnumerable<(Patch Patch, bool On)> shown)
+        private static bool _loadedUnreadable;
+
+        public static SaveOutcome Save(IEnumerable<(Patch Patch, bool On)> shown)
         {
             var list = shown.ToList();
             var keys = list.Select(p => p.Patch.Key).ToHashSet();
-            var (enabled, disabled) = LoadProfile();
-            enabled.RemoveWhere(keys.Contains);
-            disabled.RemoveWhere(keys.Contains);
-            foreach (var (patch, on) in list)
+            if (Volatile.Read(ref _loadedUnreadable)) throw new SettingsUnreadableException(ProfilePath);
+            return SettingsText.Update(ProfilePath, before =>
             {
-                if (on == patch.DefaultOn) continue;
-                (on ? enabled : disabled).Add(patch.Key);
-            }
-            Write(enabled, disabled);
+                var (enabled, disabled, _) = Writable(Profile(before));
+                Rename(enabled);
+                Rename(disabled);
+                enabled.RemoveWhere(keys.Contains);
+                disabled.RemoveWhere(keys.Contains);
+                foreach (var (patch, on) in list)
+                {
+                    if (on == patch.DefaultOn) continue;
+                    (on ? enabled : disabled).Add(patch.Key);
+                }
+                return Text(enabled, disabled);
+            });
         }
 
-        private static void Write(HashSet<string> enabled, HashSet<string> disabled)
+        private static string Text(HashSet<string> enabled, HashSet<string> disabled)
         {
             var profile = new JsonObject
             {
                 ["enabled"] = new JsonArray(enabled.OrderBy(k => k, StringComparer.Ordinal).Select(k => (JsonNode?)k).ToArray()),
                 ["disabled"] = new JsonArray(disabled.OrderBy(k => k, StringComparer.Ordinal).Select(k => (JsonNode?)k).ToArray()),
             };
-            Directory.CreateDirectory(Paths.DataDir);
-            File.WriteAllText(ProfilePath, profile.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n");
+            return profile.ToJsonString(Mods.Indented) + "\n";
         }
     }
 }

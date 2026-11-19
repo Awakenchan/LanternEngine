@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "room_service.h"
 #include "room_host.h"
+#include "../../shim/engine/insight_sync.h"
 #include "../../shim/engine/online_gate.h"
+#include "../../shim/test_sandbox_net.h"
 
 #include <random>
 #include <atomic>
@@ -14,6 +16,7 @@
 #include <cstdarg>
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -43,6 +46,9 @@ inline void CloseSocket(SocketHandle s) { close(s); }
 #include <openssl/evp.h>
 
 #include "room_announce.h"
+#include "room_calls.h"
+#include "room_frames.h"
+#include "room_bundle.h"
 #include "room_link.h"
 #include "../thd/thd_signal.h"
 
@@ -52,11 +58,8 @@ namespace {
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
-enum : std::uint8_t { kRequest = 1, kReply = 2, kEvent = 3, kDatagram = 4, kBatch = 5, kVitals = 6, kTravel = 7, kProgress = 8, kDungeon = 9, kChalices = 10, kPortrait = 11, kBundle = 12, kBring = 13, kVoice = 14, kBossLot = 15, kBossTrophy = 16, kPiece = 17, kPartyCall = 18, kTravelFlags = 19, kPing = 20, kPong = 21, kWarpAsk = 22, kWarpAnswer = 23, kLampAsk = 24, kLampAnswer = 25, kWorldFlags = 26, kWorldAsk = 27, kStageTravel = 28 };
-constexpr std::size_t kVitalsFixed = 1 + 1 + 4 * 4 + 2 + 3 * 4 + 4;
-constexpr std::size_t kBatchBytes = 16000;
+using namespace Frames;
 constexpr std::size_t kBundleBytes = 60000;
-constexpr std::size_t kSlotBundleBytes = 65500;
 constexpr int kResolveWaitMs = 1500;
 constexpr std::size_t kLargestPortrait = 128 * 1024;
 constexpr std::size_t kPieceBytes = 1200;
@@ -159,7 +162,7 @@ struct State {
 
     std::mutex mu;
     std::condition_variable cv;
-    std::uint32_t next_call = 1;
+    Calls::Pending calls;
     std::map<std::uint32_t, Json> replies;
     std::deque<Json> events;
     long long next_event = 1;
@@ -171,6 +174,7 @@ struct State {
     std::uint64_t next_room = 1;
     std::map<int, Sign> signs;
     std::map<std::uint64_t, Channel> channels;
+    Calls::Recent recent;
 
     std::mutex bridge_mu;
     std::map<int, SocketHandle> bridges;
@@ -194,6 +198,9 @@ struct State {
     Clock::time_point stage_at;
     std::vector<std::vector<std::uint8_t>> world_flags;
     std::vector<int> world_asks;
+    std::mutex insight_mu;
+    BbEngine::InsightSync::HostValue host_insight;
+    std::atomic<bool> in_game_room{false};
     std::vector<std::uint32_t> progress;
     std::vector<std::int32_t> boss_lots;
     std::vector<std::int32_t> boss_trophies;
@@ -212,9 +219,44 @@ struct State {
     Clock::time_point ping_at{};
 };
 
+State& S();
+
+std::int64_t SinceStartMs() {
+    static const Clock::time_point start = Clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+}
+
+void InGameRoom(bool in) {
+    S().in_game_room = in;
+    std::lock_guard lock(S().insight_mu);
+    S().host_insight.Forget();
+}
+
 State& S() {
     static State s;
     return s;
+}
+
+struct NetBook {
+    NetCounts::Counters counts;
+    std::mutex mu;
+    NetCounts::Reporter report;
+};
+
+NetBook& Net() {
+    static NetBook& n = *new NetBook;
+    return n;
+}
+
+void ReportNet(bool leaving) {
+    NetBook& n = Net();
+    const NetCounts::Snapshot now = n.counts.Take();
+    std::optional<std::string> line;
+    {
+        std::lock_guard lock(n.mu);
+        line = leaving ? n.report.Leave(now) : n.report.Tick(now, Clock::now(), S().link.Connected());
+    }
+    if (line) Log("%s", line->c_str());
 }
 
 std::vector<std::uint8_t> Pack(std::uint8_t kind, const std::string& text, std::uint32_t id = 0, bool with_id = false) {
@@ -321,6 +363,7 @@ void NoteEvent(const Json& ev) {
     } else if (name == "room_member_left") {
         AddPartyLine(StrOf(ev, "Reason") == "kicked" && !ev.contains("ByChoice") ? PartyLineKind::Kicked : PartyLineKind::Left, MemberName(ev));
     } else if (name == "room_member_kicked" || name == "room_closed") {
+        InGameRoom(false);
         Note(Stage::Home);
     }
 }
@@ -869,13 +912,19 @@ bool Rpc(const Json& request, Json& reply, std::string& error, int timeout_ms) {
         return false;
     }
     std::uint32_t id;
+    std::vector<std::uint8_t> frame;
     {
         std::lock_guard lock(S().mu);
-        id = S().next_call++;
+        id = S().calls.NextId();
+        frame = Pack(kRequest, request.dump(), id, true);
+        S().calls.Add(id, host, frame, Calls::Resendable(StrOf(request, "p")));
     }
-    SendJson(host, kRequest, request, id, true);
+    const bool sent = S().link.Send(host, frame.data(), frame.size());
     std::unique_lock lock(S().mu);
+    if (!sent) S().calls.Unsent(id);
     if (!S().cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return S().replies.count(id) > 0; })) {
+        S().calls.Drop(id);
+        S().replies.erase(id);
         error = "the host did not answer";
         return false;
     }
@@ -904,14 +953,17 @@ bool PollEvent(const Json& body, Json& reply) {
 }
 
 SocketHandle OpenLoopbackUdp(int* port) {
+    if (!LanternSandbox::AllowLocalSocket("room game bridge")) return kNoSocket;
     const SocketHandle s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s == kNoSocket) return kNoSocket;
+    LanternSandbox::NoteSocket();
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
     socklen_t len = sizeof(addr);
-    if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+    if (!LanternSandbox::LocalBind(reinterpret_cast<sockaddr*>(&addr), sizeof addr, "room game bridge") ||
+        ::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
         ::getsockname(s, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
         CloseSocket(s);
         return kNoSocket;
@@ -920,10 +972,35 @@ SocketHandle OpenLoopbackUdp(int* port) {
 #ifdef _WIN32
     u_long nonblocking = 1;
     ioctlsocket(s, FIONBIO, &nonblocking);
+    BOOL report = FALSE;
+    DWORD bytes = 0;
+    ::WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12), &report, sizeof(report), nullptr, 0, &bytes, nullptr, nullptr);
 #else
     fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
 #endif
     return s;
+}
+
+NetCounts::RecvError BridgeRecvError() {
+#ifdef _WIN32
+    switch (::WSAGetLastError()) {
+    case WSAEWOULDBLOCK:
+        return NetCounts::RecvError::WouldBlock;
+    case WSAECONNRESET:
+    case WSAENETRESET:
+    case WSAEMSGSIZE:
+    case WSAEINTR:
+    case WSAETIMEDOUT:
+        return NetCounts::RecvError::Transient;
+    default:
+        return NetCounts::RecvError::Fatal;
+    }
+#else
+    const int e = errno;
+    if (e == EAGAIN || e == EWOULDBLOCK) return NetCounts::RecvError::WouldBlock;
+    if (e == ECONNREFUSED || e == EINTR || e == EMSGSIZE) return NetCounts::RecvError::Transient;
+    return NetCounts::RecvError::Fatal;
+#endif
 }
 
 void BridgeOpen(int slot) {
@@ -941,15 +1018,19 @@ void BridgeToGame(int slot, const std::uint8_t* data, std::size_t size) {
     {
         std::lock_guard lock(S().bridge_mu);
         const auto it = S().bridges.find(slot);
-        if (it == S().bridges.end()) return;
+        if (it == S().bridges.end()) {
+            Net().counts.Add(NetCounts::Kind::BridgeMissing, size);
+            return;
+        }
         s = it->second;
     }
     sockaddr_in to{};
     to.sin_family = AF_INET;
     to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     to.sin_port = htons(static_cast<std::uint16_t>(S().game_port));
-    ::sendto(s, reinterpret_cast<const char*>(data), static_cast<int>(size), 0, reinterpret_cast<sockaddr*>(&to),
-             sizeof(to));
+    const auto sent = ::sendto(s, reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
+                               reinterpret_cast<sockaddr*>(&to), sizeof(to));
+    if (sent < 0 || static_cast<std::size_t>(sent) != size) Net().counts.Add(NetCounts::Kind::BridgeSendFailed, size);
 }
 
 void SendBundle(std::map<int, std::vector<std::uint8_t>>& pending) {
@@ -961,7 +1042,8 @@ void SendBundle(std::map<int, std::vector<std::uint8_t>>& pending) {
         const auto n = static_cast<std::uint32_t>(bytes.size());
         frame.insert(frame.end(), reinterpret_cast<const std::uint8_t*>(&n), reinterpret_cast<const std::uint8_t*>(&n) + 4);
         frame.insert(frame.end(), bytes.begin(), bytes.end());
-        S().link.SendGame(slot, frame.data(), frame.size());
+        const bool sent = S().link.SendGame(slot, frame.data(), frame.size());
+        Net().counts.Add(sent ? NetCounts::Kind::BundleSent : NetCounts::Kind::BundleLost, frame.size());
         bytes.clear();
     }
 }
@@ -998,12 +1080,18 @@ void BridgeLoop() {
             if (ready > 0) {
                 for (const auto& [slot, s] : bridges) {
                     if (!FD_ISSET(s, &set)) continue;
-                    for (;;) {
+                    for (int errors = 0;;) {
                         sockaddr_in from{};
                         socklen_t len = sizeof(from);
                         const int n = ::recvfrom(s, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
                                                  reinterpret_cast<sockaddr*>(&from), &len);
-                        if (n <= 0) break;
+                        if (n <= 0) {
+                            const auto error = n < 0 ? BridgeRecvError() : NetCounts::RecvError::None;
+                            if (NetCounts::CountsAsRecvError(error)) Net().counts.Add(NetCounts::Kind::BridgeRecvError);
+                            if (NetCounts::AfterRecv(n, error, errors++) == NetCounts::RecvStep::Skip) continue;
+                            break;
+                        }
+                        errors = 0;
                         if (BbThd::Signal::IsSignal(buffer.data(), static_cast<std::size_t>(n))) {
                             std::vector<std::uint8_t> frame(1 + static_cast<std::size_t>(n));
                             frame[0] = kDatagram;
@@ -1011,18 +1099,13 @@ void BridgeLoop() {
                             S().link.Send(slot, frame.data(), frame.size());
                             continue;
                         }
-                        auto& out = pending[slot];
-                        if (!out.empty() && out.size() + 2 + static_cast<std::size_t>(n) > kSlotBundleBytes) {
+                        held += 2 + static_cast<std::size_t>(n);
+                        Bundle::Add(pending[slot], buffer.data(), static_cast<std::size_t>(n), [&, to = slot](std::vector<std::uint8_t>& out) {
                             held -= out.size();
                             std::map<int, std::vector<std::uint8_t>> full;
-                            full[slot] = std::move(out);
-                            out.clear();
+                            full[to] = std::move(out);
                             SendBundle(full);
-                        }
-                        out.push_back(static_cast<std::uint8_t>(n));
-                        out.push_back(static_cast<std::uint8_t>(n >> 8));
-                        out.insert(out.end(), buffer.begin(), buffer.begin() + n);
-                        held += 2 + static_cast<std::size_t>(n);
+                        });
                     }
                 }
                 if (until == Clock::time_point{} && held) until = Clock::now() + BundleWindow();
@@ -1053,11 +1136,17 @@ void OnFrame(int sender, const std::vector<std::uint8_t>& data) {
             std::uint32_t n = 0;
             std::memcpy(&n, data.data() + at + 1, 4);
             at += 5;
-            if (n > data.size() - at) return;
+            if (n > data.size() - at) {
+                Net().counts.Add(NetCounts::Kind::BadBundle, data.size());
+                return;
+            }
             for (std::size_t p = at; slot == own && at + n - p >= 2;) {
                 const std::size_t m = data[p] | (std::size_t(data[p + 1]) << 8);
                 p += 2;
-                if (m > at + n - p) break;
+                if (m > at + n - p) {
+                    Net().counts.Add(NetCounts::Kind::BadBundle, data.size());
+                    break;
+                }
                 BridgeToGame(sender, data.data() + p, m);
                 p += m;
             }
@@ -1070,7 +1159,10 @@ void OnFrame(int sender, const std::vector<std::uint8_t>& data) {
         while (data.size() - at >= 2) {
             const std::size_t n = data[at] | (std::size_t(data[at + 1]) << 8);
             at += 2;
-            if (n > data.size() - at) break;
+            if (n > data.size() - at) {
+                Net().counts.Add(NetCounts::Kind::BadBundle, data.size());
+                break;
+            }
             BridgeToGame(sender, data.data() + at, n);
             at += n;
         }
@@ -1105,6 +1197,13 @@ void OnFrame(int sender, const std::vector<std::uint8_t>& data) {
         if (sender != S().link.HostSlot() || data.size() < 2 || data.size() > kBundleBytes) return;
         std::lock_guard lock(S().vitals_mu);
         if (S().world_flags.size() < 256) S().world_flags.emplace_back(data.begin() + 1, data.end());
+        return;
+    }
+    if (kind == kHostInsight) {
+        BbEngine::InsightSync::Frame frame;
+        if (sender != S().link.HostSlot() || !BbEngine::InsightSync::Decode(data.data(), data.size(), frame)) return;
+        std::lock_guard lock(S().insight_mu);
+        S().host_insight.Take(frame, SinceStartMs());
         return;
     }
     if (kind == kWorldAsk) {
@@ -1321,12 +1420,21 @@ void OnFrame(int sender, const std::vector<std::uint8_t>& data) {
         if (value.is_discarded()) return;
         if (kind == kRequest) {
             if (!S().host) return;
-            SendJson(sender, kReply, HandleHost(sender, value), id, true);
+            if (const std::string* kept = S().recent.Find(sender, id, data.data(), data.size())) {
+                const auto frame = Pack(kReply, *kept, id, true);
+                S().link.Send(sender, frame.data(), frame.size());
+                return;
+            }
+            std::string reply = HandleHost(sender, value).dump();
+            const auto frame = Pack(kReply, reply, id, true);
+            S().recent.Keep(sender, id, data.data(), data.size(), std::move(reply));
+            S().link.Send(sender, frame.data(), frame.size());
             return;
         }
         if (!id) return;
         {
             std::lock_guard lock(S().mu);
+            if (!S().calls.Answer(id)) return;
             S().replies[id] = std::move(value);
         }
         S().cv.notify_all();
@@ -1404,10 +1512,15 @@ void LinkLoop() {
                 if (S().host) {
                     std::lock_guard lock(S().host_mu);
                     ForgetSlotLocked(e.slot);
+                    S().recent.Forget(e.slot);
                 }
                 break;
             case Event::Kind::Away:
                 Log("slot %d dropped without a leave: the room holds its slot for a reconnect", e.slot);
+                if (e.slot == S().link.HostSlot() && !S().host) {
+                    std::lock_guard lock(S().mu);
+                    S().calls.Lost();
+                }
                 {
                     std::lock_guard lock(S().status_mu);
                     S().status.Away(e.slot, Clock::now());
@@ -1416,6 +1529,7 @@ void LinkLoop() {
             case Event::Kind::Host:
                 if (e.slot != last_host) Log("the room's host is slot %d", e.slot);
                 if (last_host && e.slot != last_host && !S().host) {
+                    InGameRoom(false);
                     std::lock_guard lock(S().mu);
                     S().events.push_back({{"Name", "room_closed"}, {"RoomId", 0}, {"Reason", "host_left"},
                                           {"EventId", S().next_event++}});
@@ -1426,6 +1540,19 @@ void LinkLoop() {
                     const std::string introduce = NetworkId();
                     SendJson(e.slot, kRequest,
                              Json{{"p", "/mp/matching2/context_start"}, {"b", {{"OnlineId", introduce}}}}, 0, true);
+                }
+                if (e.slot && !S().host) {
+                    std::vector<Calls::Owed> owed;
+                    {
+                        std::lock_guard lock(S().mu);
+                        owed = S().calls.Back(e.slot);
+                    }
+                    for (const Calls::Owed& call : owed) {
+                        if (S().link.Send(call.host, call.frame.data(), call.frame.size())) continue;
+                        std::lock_guard lock(S().mu);
+                        S().calls.Unsent(call.id);
+                    }
+                    if (!owed.empty()) Log("sent %zu unanswered request(s) to the host again", owed.size());
                 }
                 break;
             case Event::Kind::Data:
@@ -1438,6 +1565,10 @@ void LinkLoop() {
             case Event::Kind::Disconnected:
                 Log("lost the room connection; reconnecting");
                 {
+                    std::lock_guard lock(S().mu);
+                    S().calls.Lost();
+                }
+                {
                     std::lock_guard lock(S().status_mu);
                     S().status.OwnLost(Clock::now());
                 }
@@ -1448,6 +1579,7 @@ void LinkLoop() {
                     S().status.OwnGaveUp(Clock::now());
                 }
                 Log("the room could not be reached for 2 minutes: seamless co-op is off until the next start");
+                ReportNet(true);
                 break;
             case Event::Kind::Refused:
                 if (!e.data.empty()) {
@@ -1473,6 +1605,7 @@ void LinkLoop() {
             }
         }
         StatusTick();
+        ReportNet(false);
     }
 }
 
@@ -1609,6 +1742,7 @@ void HttpLoop() {
         res.set_content(answer, "application/json");
     });
     server.Put(".*", [](const httplib::Request&, httplib::Response& res) { res.status = 200; });
+    if (!LanternSandbox::AllowLocalSocket("room game server")) return;
     if (!server.listen("127.0.0.1", S().http_port)) Log("the game server could not listen on port %d", S().http_port);
 }
 
@@ -1743,6 +1877,26 @@ void SendWorldAsk() {
     if (host <= 0) return;
     const std::uint8_t frame[1] = {kWorldAsk};
     S().link.Send(host, frame, sizeof frame);
+}
+
+void SendHostInsight(std::uint16_t insight, std::uint8_t facts, int target) {
+    if (!S().started.load() || !S().link.Connected()) return;
+    const auto frame = BbEngine::InsightSync::Encode({insight, facts});
+    S().link.Send(target, frame.data(), frame.size());
+}
+
+bool HostInsight(std::uint16_t& insight, std::uint8_t& facts, std::int64_t& age_ms) {
+    std::lock_guard lock(S().insight_mu);
+    BbEngine::InsightSync::Frame frame;
+    if (!S().host_insight.Get(SinceStartMs(), frame, age_ms)) return false;
+    insight = frame.insight;
+    facts = frame.facts;
+    return true;
+}
+
+int GameRoomOthers() {
+    if (S().host) return static_cast<int>(PartyMembers().size());
+    return S().in_game_room.load() ? 1 : 0;
 }
 
 std::vector<int> TakeWorldAsks() {
@@ -1912,6 +2066,7 @@ void Shutdown() {
     if (!S().started.load() || done.exchange(true)) return;
     if (S().link.Connected()) Log("leaving the room: this game is closing");
     S().link.Stop();
+    ReportNet(true);
     SetVoice(false);
 }
 
@@ -1926,16 +2081,24 @@ void Start(int game_p2p_port) {
     if (S().http_port <= 0 || S().http_port > 65535) S().http_port = game_p2p_port + 1;
     S().link.SetHost(S().host);
     S().link.SetVisitor(!S().host && Env("BB_ROOM_VISITOR") == "1");
+    S().link.SetCounters(&Net().counts);
     if (const int local = std::atoi(Env("BB_ROOM_LOCAL_PORT").c_str()); S().host && local > 0) {
+        auto direct = Derive(Env("BB_ROOM_NAME"), Env("BB_ROOM_PASSWORD"));
+        if (!direct) {
+            Log("direct room not opened: the room key could not be derived");
+            return;
+        }
+        WipeKey(direct->key);
         std::string error;
-        if (!S().local_room.Start(local, Derive(Env("BB_ROOM_NAME"), Env("BB_ROOM_PASSWORD")).room_id, error)) {
+        if (!S().local_room.Start(local, direct->room_id, error)) {
             Log("direct room not opened: %s", error.c_str());
             return;
         }
         Log("direct room open on this PC, port %d: guests connect straight to this game, no server", local);
     }
     if (!S().link.Start(Env("BB_ROOM_SERVER"), Env("BB_ROOM_NAME"), Env("BB_ROOM_PASSWORD"))) {
-        Log("no room server or room name: seamless co-op is off");
+        const std::string& why = S().link.LastError();
+        Log("%s: seamless co-op is off", why.empty() ? "no room server or room name" : why.c_str());
         return;
     }
     Log("joining room on %s as %s (%s), game server on 127.0.0.1:%d", DirectRoom() ? "a direct connection" : Env("BB_ROOM_SERVER").c_str(),
@@ -1956,8 +2119,10 @@ bool Call(const std::string& path, const Json& body, Json& reply, std::string& e
         return true;
     }
     const bool ok = Rpc({{"p", path}, {"b", body}}, reply, error, std::max(timeout_ms, 3000));
+    if (path == "/mp/matching2/leave_room") InGameRoom(false);
     if (path == "/mp/matching2/join_room") {
         const bool joined = ok && IntOf(reply, "ResKind", 1) == 0;
+        InGameRoom(joined);
         Notice& n = N();
         std::unique_lock lock(n.mu);
         const std::string who = n.who;
@@ -2065,6 +2230,8 @@ void SetVoice(bool on) {
     S().voice_on = on;
     if (on) {
         if (!S().voice_link.Start(Env("BB_ROOM_SERVER"), Env("BB_ROOM_NAME"), Env("BB_ROOM_PASSWORD"), "voice")) {
+            const std::string& why = S().voice_link.LastError();
+            Log("voice not started: %s", why.empty() ? "no room server or room name" : why.c_str());
             S().voice_on = false;
             return;
         }

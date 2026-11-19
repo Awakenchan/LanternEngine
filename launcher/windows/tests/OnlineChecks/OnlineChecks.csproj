@@ -10,5 +10,6 @@
   <ItemGroup>
     <Compile Include="../../BloodborneLauncher/Core/OnlineStatus.cs" Link="OnlineStatus.cs" />
     <Compile Include="../../BloodborneLauncher/Core/SessionStats.cs" Link="SessionStats.cs" />
+    <Compile Include="../../BloodborneLauncher/Core/SeamlessPlay.cs" Link="SeamlessPlay.cs" />
   </ItemGroup>
 </Project>

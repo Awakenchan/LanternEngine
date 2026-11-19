@@ -102,4 +102,8 @@ distributed here.
 
 fromsoftserve contributed the optional lighting effects (GTAO, indirect lighting, contact shadows,
 PCSS, improved reflections, POM cavity, volumetric sunlight and lamp fog, point light shadows, shadow
-resolution choices, motion blur quality) and the conservative occlusion fix, from their BBFSS fork.
+resolution choices, motion blur quality) and the conservative occlusion fix, from their BBFSS fork,
+and the inverse-square lamp fog option (pull request 95).
+
+RockingSisyphus found and fixed DLSS on Linux install paths with non-ASCII characters (pull request 104).
+rhkim1292 fixed lamp fog left behind by enemies' torches (pull request 98).

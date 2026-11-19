@@ -1,0 +1,34 @@
+gpu/shadps4/video_core/amdgpu/liverpool.cpp|Liverpool::ApplyGraphicsRegisterPacket|none|writer of regs; not run for a covered token (M5)
+gpu/shadps4/video_core/amdgpu/liverpool.cpp|Liverpool::ProcessGraphics|record|Take gate on primitive_type, GxTrace block, OnTokenDraw arguments
+gpu/shadps4/video_core/amdgpu/liverpool.cpp|VerifyNativeDraw|off|no packet exists for a covered token
+gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_cache.cpp|PipelineCache::BuildRuntimeInfo|record|primitive_type, clipper_control, blend_control[0] on a memo miss
+gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_cache.cpp|PipelineCache::MemoKey|record|primitive_type, clipper_control, polygon_control, color_target_mask, blend_control
+gpu/shadps4/video_core/renderer_vulkan/vk_pipeline_cache.cpp|PipelineCache::RefreshGraphicsKey|record|the key fields, blend per target
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|MakeUserData|record|viewport_control, viewports[0]
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::ApplyGxRecord|none|offset asserts only
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::BeginRenderingFull|carried|depth_control for clears
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::BeginScalarsSame|carried|depth_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::BindBuffers|carried|clipper_control.user_clip_plane_enable
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::BindResources|carried|blend_control[0]
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::DepthStencilCopy|carried|depth_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::DrawIndirectRecord|fallback|indirect draws are never covered
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::DrawRecord|record|index_base_address, index_buffer_type
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::DrawScissor|carried|screen_scissor, mode_control, viewport_scissors
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::FilterDraw|record|primitive_type == None
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::FilterDrawPasses|record|primitive_type == None
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::FindTargets|carried|color_target_mask, depth_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::MakeBeginSignature|carried|depth_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::NotifyUiDraw|carried|depth_control, viewports[0]
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::PostDraw|carried|index_buffer_type, index_base_address
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::PrepareRenderState|carried|viewports[0], blend_control[0], depth_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::ResolveIndexBuffer|carried|index_buffer_type, index_base_address
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::UpdateColorBlendingState|carried|blend_constants, blend_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::UpdateDepthStencilState|carried|depth_control, depth bounds, poly_offset, stencil
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::UpdateDynamicState|carried|primitive_type
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::UpdatePrimitiveState|carried|primitive_type, polygon_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::UpdateUiTransform|carried|viewports[0], IsClipDisabled, viewport_control
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer.cpp|Rasterizer::UpdateViewportScissorState|carried|entry 0 carried; entries 1-15 as today (written only with a geometry shader)
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer_effects.cpp|Rasterizer::EffectTile|off|an active effect turns the route off (M8)
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer_effects.cpp|Rasterizer::EffectsBeforeTargets|off|an active effect turns the route off (M8)
+gpu/shadps4/video_core/renderer_vulkan/vk_rasterizer_effects.cpp|Rasterizer::EffectsCaptureDraw|off|an active effect turns the route off (M8)
+gpu/shim/engine/gx_whole_census_stage.cpp|OnTokenDraw|record|census fields

@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "lantern_switches.h"
+
 namespace Shader::CompileStats {
 
 enum Phase : int {
@@ -29,8 +31,7 @@ enum Phase : int {
 };
 
 inline bool Enabled() {
-    static const bool enabled = std::getenv("BB_FRAME_STATS") != nullptr;
-    return enabled;
+    return Lantern::Switches::Load().frame_stats;
 }
 
 inline std::array<std::atomic<unsigned long long>, Count> phase_ns{};

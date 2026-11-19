@@ -25,6 +25,8 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_streamline.h"
 #include "video_core/renderer_vulkan/vk_fsr4vk.h"
+#include "video_core/renderer_vulkan/vk_fsr_framegen.h"
+#include "video_core/renderer_vulkan/vk_fsr_framegen_rules.h"
 #include "video_core/renderer_vulkan/vk_fsr_sdk.h"
 #include "video_core/renderer_vulkan/vk_occlusion.h"
 #include "video_core/renderer_vulkan/vk_optiscaler.h"
@@ -395,6 +397,8 @@ bool Instance::CreateDevice() {
     buffer_marker = add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
     device_fault = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault &&
                    add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    const bool fault_vendor_binary =
+        device_fault && feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFaultVendorBinary;
     address_binding_report =
         device_fault &&
         feature_chain.get<vk::PhysicalDeviceAddressBindingReportFeaturesEXT>().reportAddressBinding &&
@@ -612,6 +616,59 @@ bool Instance::CreateDevice() {
             }
         }
     }
+    static const std::array<float, 32> fsr_fg_priorities = [] {
+        std::array<float, 32> priorities{};
+        priorities.fill(1.0f);
+        return priorities;
+    }();
+    std::vector<vk::DeviceQueueCreateInfo> fsr_fg_infos;
+    FsrFgRules::QueuePlan fsr_fg_plan;
+    if (FsrFrameGen::SelectedAtStart()) {
+        const char* why = nullptr;
+        if (!FsrFrameGen::FilesPresent()) {
+            why = "amd_fidelityfx_framegeneration_vk.dll or the FSR SDK loader is missing from fsr_sdk";
+        } else if (!OptiScaler::Detect().frame_generation.empty()) {
+            why = "OptiScaler's own frame generation is on";
+        } else {
+            std::vector<FsrFgRules::Family> families;
+            for (u32 i = 0; i < family_properties.size(); ++i) {
+                families.push_back({u32(family_properties[i].queueFlags),
+                                    std::min<u32>(family_properties[i].queueCount, u32(fsr_fg_priorities.size())),
+                                    QueueFamilyCanPresent(*instance, physical_device, i)});
+            }
+            fsr_fg_plan = FsrFgRules::PlanQueues(families, queue_family_index, readback_family_index, true);
+            if (fsr_fg_plan.Extra()) {
+                const auto add = [&](u32 family) {
+                    if (family < fsr_fg_plan.counts.size() && fsr_fg_plan.counts[family]) {
+                        fsr_fg_infos.push_back({.queueFamilyIndex = family,
+                                                .queueCount = fsr_fg_plan.counts[family],
+                                                .pQueuePriorities = fsr_fg_priorities.data()});
+                        fsr_fg_plan.counts[family] = 0;
+                    }
+                };
+                const auto counts = fsr_fg_plan.counts;
+                add(queue_family_index);
+                add(readback_family_index);
+                for (u32 i = 0; i < counts.size(); ++i) {
+                    add(i);
+                }
+                fsr_fg_plan.counts = counts;
+                std::printf("AMD FSR Frame Generation: queues present %u.%u, image acquire %u.%u, "
+                            "async compute %s (the game's is %u.0)\n",
+                            fsr_fg_plan.present.family, fsr_fg_plan.present.index,
+                            fsr_fg_plan.acquire.family, fsr_fg_plan.acquire.index,
+                            fsr_fg_plan.async.Valid()
+                                ? fmt::format("{}.{}", fsr_fg_plan.async.family, fsr_fg_plan.async.index).c_str()
+                                : "none",
+                            queue_family_index);
+            } else {
+                why = fsr_fg_plan.problem;
+            }
+        }
+        if (why) {
+            FsrFrameGen::Fallback(why);
+        }
+    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
@@ -702,8 +759,8 @@ bool Instance::CreateDevice() {
     const bool fsr_shared = fsr4vk || fsr_sdk;
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = queue_info_count,
-            .pQueueCreateInfos = queue_infos.data(),
+            .queueCreateInfoCount = fsr_fg_infos.empty() ? queue_info_count : u32(fsr_fg_infos.size()),
+            .pQueueCreateInfos = fsr_fg_infos.empty() ? queue_infos.data() : fsr_fg_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -880,6 +937,7 @@ bool Instance::CreateDevice() {
         },
         vk::PhysicalDeviceFaultFeaturesEXT{
             .deviceFault = true,
+            .deviceFaultVendorBinary = fault_vendor_binary,
         },
         vk::PhysicalDeviceAddressBindingReportFeaturesEXT{
             .reportAddressBinding = true,
@@ -985,6 +1043,24 @@ bool Instance::CreateDevice() {
         }
         return created;
     });
+    if (device_result != vk::Result::eSuccess && !fsr_fg_infos.empty()) {
+        std::printf("AMD FSR Frame Generation: the device with its queues failed (%s); made again without\n",
+                    vk::to_string(device_result).c_str());
+        FsrFrameGen::Fallback("the device could not be made with AMD's queues");
+        fsr_fg_infos.clear();
+        fsr_fg_plan = {};
+        device_chain.get<vk::DeviceCreateInfo>().queueCreateInfoCount = queue_info_count;
+        device_chain.get<vk::DeviceCreateInfo>().pQueueCreateInfos = queue_infos.data();
+        auto retried = OptiScaler::OnCleanThread([&] {
+            auto created = physical_device.createDeviceUnique(device_chain.get());
+            if (created.result == vk::Result::eSuccess) {
+                VULKAN_HPP_DEFAULT_DISPATCHER.init(*created.value);
+            }
+            return created;
+        });
+        device_result = retried.result;
+        dev = std::move(retried.value);
+    }
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
         return false;
@@ -999,6 +1075,16 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
+    if (fsr_fg_plan.Extra()) {
+        fsr_fg_queues.present = device->getQueue(fsr_fg_plan.present.family, fsr_fg_plan.present.index);
+        fsr_fg_queues.present_family = fsr_fg_plan.present.family;
+        fsr_fg_queues.acquire = device->getQueue(fsr_fg_plan.acquire.family, fsr_fg_plan.acquire.index);
+        fsr_fg_queues.acquire_family = fsr_fg_plan.acquire.family;
+        if (fsr_fg_plan.async.Valid()) {
+            fsr_fg_queues.async = device->getQueue(fsr_fg_plan.async.family, fsr_fg_plan.async.index);
+            fsr_fg_queues.async_family = fsr_fg_plan.async.family;
+        }
+    }
     if (readback_family_index != NoFamily) {
         readback_queue = device->getQueue(readback_family_index, 0);
         LOG_INFO(Render_Vulkan, "Readback queue: family {}", readback_family_index);

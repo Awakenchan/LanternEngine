@@ -29,7 +29,8 @@ bool Good(vk::Result result, const char* name, const char* what) {
 bool Create(const Instance& instance, vk::UniqueDescriptorSetLayout& set_layout,
             vk::UniquePipelineLayout& layout, vk::UniquePipeline& pipeline,
             std::initializer_list<vk::DescriptorType> types, u32 push_size,
-            std::span<const u32> code, const char* name, bool dispatch_base) {
+            std::span<const u32> code, const char* name, bool dispatch_base,
+            const vk::SpecializationInfo* specialization) {
     const auto device = instance.GetDevice();
     std::vector<vk::DescriptorSetLayoutBinding> bindings;
     bindings.reserve(types.size());
@@ -66,7 +67,8 @@ bool Create(const Instance& instance, vk::UniqueDescriptorSetLayout& set_layout,
                                        : vk::PipelineCreateFlags{},
                 .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
                           .module = module,
-                          .pName = "main"},
+                          .pName = "main",
+                          .pSpecializationInfo = specialization},
                 .layout = *made.value,
             });
     device.destroyShaderModule(module);

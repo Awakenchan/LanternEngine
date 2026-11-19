@@ -5,6 +5,8 @@
 // HELLO, and hole punching. Adapted from droogie/bbhost src/hle/net.cpp and src/net/stun.cpp
 // (566184a), its poll path.
 #include "thd_internal.h"
+#include "p2p_split.h"
+#include "../../shim/test_sandbox_net.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -75,6 +77,11 @@ ssize_type sock_recvfrom(sockfd_t fd, void* buf, std::size_t len, bool dontwait,
 }
 ssize_type sock_sendto(sockfd_t fd, const void* buf, std::size_t len, bool dontwait,
                        const sockaddr_in* sa) {
+    if (!LanternSandbox::AllowAddress(reinterpret_cast<const sockaddr*>(sa), sizeof(*sa), "THD UDP send") ||
+        !LanternSandbox::BindIfUnbound(fd, "THD UDP send")) {
+        ::WSASetLastError(WSAEACCES);
+        return -1;
+    }
     for (;;) {
         const int n = ::sendto(fd, static_cast<const char*>(buf), static_cast<int>(len), 0,
                                reinterpret_cast<const sockaddr*>(sa), sizeof(*sa));
@@ -91,7 +98,12 @@ void wsa_start() {
 }
 sockfd_t sock_udp() {
     wsa_start();
+    if (!LanternSandbox::AllowLocalSocket("THD UDP socket")) {
+        ::WSASetLastError(WSAEACCES);
+        return INVALID_SOCKET;
+    }
     const sockfd_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd != INVALID_SOCKET) LanternSandbox::NoteSocket();
     if (fd != INVALID_SOCKET) sock_set_nonblock(fd, true); // blocking calls wait with WSAPoll
     return fd;
 }
@@ -119,11 +131,24 @@ ssize_type sock_recvfrom(sockfd_t fd, void* buf, std::size_t len, bool dontwait,
 }
 ssize_type sock_sendto(sockfd_t fd, const void* buf, std::size_t len, bool dontwait,
                        const sockaddr_in* sa) {
+    if (!LanternSandbox::AllowAddress(reinterpret_cast<const sockaddr*>(sa), sizeof(*sa), "THD UDP send") ||
+        !LanternSandbox::BindIfUnbound(fd, "THD UDP send")) {
+        errno = EACCES;
+        return -1;
+    }
     return ::sendto(fd, buf, len, dontwait ? MSG_DONTWAIT : 0, reinterpret_cast<const sockaddr*>(sa),
                     sizeof(*sa));
 }
 void wsa_start() {}
-sockfd_t sock_udp() { return ::socket(AF_INET, SOCK_DGRAM, 0); }
+sockfd_t sock_udp() {
+    if (!LanternSandbox::AllowLocalSocket("THD UDP socket")) {
+        errno = EACCES;
+        return -1;
+    }
+    const sockfd_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) LanternSandbox::NoteSocket();
+    return fd;
+}
 void sock_setopt_int(sockfd_t fd, int level, int name, int v) {
     ::setsockopt(fd, level, name, &v, sizeof(v));
 }
@@ -572,7 +597,8 @@ std::shared_ptr<UdpPort> p2p_port_open(std::uint16_t want) {
         sa.sin_family = AF_INET;
         sa.sin_port = bswap16(at);
         sa.sin_addr.s_addr = INADDR_ANY;
-        if (::bind(port->fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0) {
+        if (LanternSandbox::LocalBind(reinterpret_cast<sockaddr*>(&sa), sizeof(sa), "THD P2P port") &&
+            ::bind(port->fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0) {
             port->port = at;
             break;
         }
@@ -672,60 +698,94 @@ int dgram_send(int s, const void* buf, std::uint64_t len, int flags, const SceSo
     const sockfd_t fd = sock.port ? sock.port->fd : sock.fd;
     if (!sock_ok(fd)) return static_cast<int>(len);
     if (!to) return net_err(EINVAL);
-    thread_local std::vector<std::uint8_t> pkt_storage(kMaxDatagram + 8);
-    std::uint8_t* pkt = pkt_storage.data();
+    std::uint8_t p2p_header[6] = {};
     std::size_t hdr = 0;
     const std::uint16_t dst_vport = bswap16(to->vport);
     if (sock.p2p) {
-        pkt[0] = kP2pMagic;
+        p2p_header[0] = kP2pMagic;
         if (sock.vport < 256 && dst_vport < 256) {
-            pkt[1] = kP2pFlagP2p | kP2pFlagByteVports | kP2pType;
-            pkt[2] = static_cast<std::uint8_t>(sock.vport);
-            pkt[3] = static_cast<std::uint8_t>(dst_vport);
+            p2p_header[1] = kP2pFlagP2p | kP2pFlagByteVports | kP2pType;
+            p2p_header[2] = static_cast<std::uint8_t>(sock.vport);
+            p2p_header[3] = static_cast<std::uint8_t>(dst_vport);
             hdr = 4;
         } else {
-            pkt[1] = kP2pFlagP2p | kP2pType;
-            pkt[2] = static_cast<std::uint8_t>(sock.vport >> 8);
-            pkt[3] = static_cast<std::uint8_t>(sock.vport);
-            pkt[4] = static_cast<std::uint8_t>(dst_vport >> 8);
-            pkt[5] = static_cast<std::uint8_t>(dst_vport);
+            p2p_header[1] = kP2pFlagP2p | kP2pType;
+            p2p_header[2] = static_cast<std::uint8_t>(sock.vport >> 8);
+            p2p_header[3] = static_cast<std::uint8_t>(sock.vport);
+            p2p_header[4] = static_cast<std::uint8_t>(dst_vport >> 8);
+            p2p_header[5] = static_cast<std::uint8_t>(dst_vport);
             hdr = 6;
         }
     }
-    if (hdr + len > kMaxDatagram) return net_err(EMSGSIZE);
-    if (buf && len) std::memcpy(pkt + hdr, buf, static_cast<std::size_t>(len));
+    std::uint8_t token[kStunTokenLen];
+    sockaddr_in stun_sa{};
+    const bool relayed = sock.p2p && relay_target(to->addr, to->port, token, &stun_sa);
+    const std::size_t lead = relayed ? kRelayHeader : 0;
+    const auto* bytes = static_cast<const std::uint8_t*>(buf);
+    const bool fits = len <= kMaxDatagram - hdr;
+    thread_local std::vector<std::size_t> ends;
+    ends.clear();
+    if (BbNet::P2pSplit::Wanted(sock.p2p, bytes, len, fits, BbNet::P2pSplit::Loopback(to->addr))) {
+        BbNet::P2pSplit::PieceEnds(bytes, static_cast<std::size_t>(len), ends);
+    }
+    if (ends.empty()) ends.push_back(static_cast<std::size_t>(len));
+    const std::size_t largest = BbNet::P2pSplit::Largest(ends);
+    if (!fits || lead + hdr + largest > kMaxDatagram) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true)) {
+            Log("net: a %llu-byte datagram does not fit in one UDP datagram with its headers; not sent, the game "
+                "sends what it held again (logged once)",
+                static_cast<unsigned long long>(len));
+        }
+        g_net_errno = to_freebsd(EMSGSIZE);
+        return net_err(EMSGSIZE);
+    }
     sockaddr_in sa{};
     sa.sin_family = AF_INET;
     sa.sin_port = to->port;
     sa.sin_addr.s_addr = to->addr;
     const bool dontwait = sock.nonblock || (flags & 0x80);
-    ssize_type n;
-    std::uint8_t token[kStunTokenLen];
-    sockaddr_in stun_sa{};
-    if (sock.p2p && relay_target(to->addr, to->port, token, &stun_sa)) {
-        thread_local std::vector<std::uint8_t> frame_storage(kMaxDatagram + 8 + kRelayHeader);
-        std::uint8_t* frame = frame_storage.data();
-        frame[0] = kRelayMagic;
-        frame[1] = kRelayToServer;
-        std::memcpy(frame + 2, token, kStunTokenLen);
-        std::memcpy(frame + 10, &to->port, 2); // network order is the frame's big-endian
-        std::memcpy(frame + kRelayHeader, pkt, hdr + static_cast<std::size_t>(len));
-        n = sock_sendto(fd, frame, kRelayHeader + hdr + static_cast<std::size_t>(len), dontwait, &stun_sa);
-        if (n >= 0) n -= static_cast<ssize_type>(kRelayHeader);
-    } else {
-        n = sock_sendto(fd, pkt, hdr + static_cast<std::size_t>(len), dontwait, &sa);
+    thread_local std::vector<std::uint8_t> piece(kRelayHeader + kMaxDatagram + 8);
+    ssize_type n = -1;
+    int err = 0;
+    std::size_t sent = 0;
+    for (std::size_t i = 0, begin = 0; i < ends.size(); begin = ends[i++]) {
+        std::uint8_t* const out = piece.data();
+        std::size_t at = 0;
+        if (relayed) {
+            out[0] = kRelayMagic;
+            out[1] = kRelayToServer;
+            std::memcpy(out + 2, token, kStunTokenLen);
+            std::memcpy(out + 10, &to->port, 2);
+            at = kRelayHeader;
+        }
+        std::memcpy(out + at, p2p_header, hdr);
+        at += hdr;
+        const std::size_t piece_len = ends[i] - begin;
+        if (bytes && piece_len) std::memcpy(out + at, bytes + begin, piece_len);
+        at += piece_len;
+        n = sock_sendto(fd, out, at, dontwait, relayed ? &stun_sa : &sa);
+        if (n < 0) {
+            err = sock_errno();
+            break;
+        }
+        ++sent;
     }
     if (sock.p2p) {
-        (n < 0 ? g_p2p_counts.send_failed : g_p2p_counts.sent).fetch_add(1, std::memory_order_relaxed);
-        if (n >= 0) g_p2p_counts.sent_bytes.fetch_add(len, std::memory_order_relaxed);
+        (sent ? g_p2p_counts.sent : g_p2p_counts.send_failed).fetch_add(1, std::memory_order_relaxed);
+        if (sent) g_p2p_counts.sent_bytes.fetch_add(len, std::memory_order_relaxed);
     }
     static int logs = 0;
     if (trace_now(logs)) {
-        Log("net: send %d -> %s:%u vport %u->%u: %llu bytes -> %lld", s, BbNet::MaskIpv4(to->addr).c_str(),
-            bswap16(to->port), sock.vport,
-            dst_vport, static_cast<unsigned long long>(len), static_cast<long long>(n));
+        Log("net: send %d -> %s:%u vport %u->%u: %llu bytes in %zu of %zu datagrams -> %lld", s,
+            BbNet::MaskIpv4(to->addr).c_str(), bswap16(to->port), sock.vport, dst_vport,
+            static_cast<unsigned long long>(len), sent, ends.size(), static_cast<long long>(n));
     }
-    if (n < 0) return sock_errno() == EAGAIN ? net_again() : net_fail();
+    if (!sent) {
+        if (err == EAGAIN) return net_again();
+        g_net_errno = to_freebsd(err);
+        return net_err(err);
+    }
     return static_cast<int>(len);
 }
 
@@ -807,6 +867,7 @@ s32 PS4_SYSV_ABI net_bind(int s, const void* addr, int len) {
     sa.sin_family = AF_INET;
     sa.sin_port = in.port;
     sa.sin_addr.s_addr = INADDR_ANY;
+    if (!LanternSandbox::LocalBind(reinterpret_cast<sockaddr*>(&sa), sizeof(sa), "THD socket bind")) return net_err(EACCES);
     if (::bind(sock.fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) < 0) return net_fail();
     return 0;
 }
@@ -1118,6 +1179,7 @@ s32 PS4_SYSV_ABI ctl_nat(void* info) {
 bool P2pStun(const char* host, std::uint16_t sport, int timeout_ms, std::uint32_t* mapped_addr,
              std::uint16_t* mapped_port, Relay* relay) {
     wsa_start();
+    if (!LanternSandbox::AllowHost(host ? host : "", "THD STUN")) return false;
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
@@ -1267,13 +1329,15 @@ std::string DetectLanAddress(const std::string& host) {
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
     addrinfo* res = nullptr;
-    if (host.empty() || getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return "";
+    if (host.empty() || !LanternSandbox::AllowHost(host, "THD LAN address probe")) return "";
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) return "";
     sockaddr_in to{};
     std::memcpy(&to, res->ai_addr, sizeof(to));
     to.sin_port = bswap16(3478);
     freeaddrinfo(res);
     const sockfd_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (!sock_ok(fd)) return "";
+    LanternSandbox::NoteSocket();
     std::string out;
     sockaddr_in local{};
     socklen_type len = sizeof(local);

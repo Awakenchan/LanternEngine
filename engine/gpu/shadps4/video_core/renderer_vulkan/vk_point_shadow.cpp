@@ -5,14 +5,18 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
 #include "bbport_settings.h"
 #include "common/assert.h"
+#include "lantern_switches.h"
 #include "video_core/host_shaders/point_shadow_comp.h"
 #include "video_core/host_shaders/point_shadow_ray_comp.h"
+#include "video_core/host_shaders/point_shadow_f16_comp.h"
+#include "video_core/host_shaders/point_shadow_ray_f16_comp.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_effect_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -44,6 +48,7 @@ static_assert(sizeof(Push) == 64);
 constexpr auto Compute = vk::PipelineStageFlagBits2::eComputeShader;
 constexpr vk::ImageSubresourceRange ColorRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 constexpr auto TargetFormat = vk::Format::eB10G11R11UfloatPack32;
+constexpr auto WideTargetFormat = vk::Format::eR16G16B16A16Sfloat;
 constexpr u32 ConstantWords = 16, LightWords = 16;
 constexpr u32 DataWords = 64 * 1024;
 constexpr u32 UpdateWords = 16 * 1024;
@@ -51,6 +56,8 @@ constexpr u32 WholeImageBatches = 4;
 constexpr u32 TileWords = 8;
 constexpr auto HistoryFormat = vk::Format::eR16G16B16A16Sfloat;
 constexpr u32 HistoryRead = 1, HistoryWrite = 2;
+constexpr std::size_t GameLightsPerBatch = 64;
+constexpr u32 GameLightsPick = 2;
 
 std::array<float, 16> Invert(const u32* words, bool& ok) {
     std::array<double, 32> t{};
@@ -124,6 +131,10 @@ PointShadow::PointShadow(const Instance& instance_, Scheduler& scheduler_,
       runtime{runtime_}, scene_targets{scene_targets_}, rt_shadow{rt_shadow_},
       camera_motion{camera_motion_} {
     fade_start_m = fade_end_m * 0.6f;
+    game_lights = Lantern::Switches::Get().rt_game_lights;
+    if (game_lights) {
+        lamp_pick = GameLightsPick;
+    }
     if (const char* env = std::getenv("LANTERN_RT_LAMPS_EXACT"); env && env[0] == '1') {
         lamp_pick = 0;
     }
@@ -151,13 +162,33 @@ bool PointShadow::Ready() {
         std::printf("Point shadows: off - this GPU cannot run the pass\n");
         return false;
     }
+    if (!EffectPass::StorageFormat(instance, WideTargetFormat) ||
+        !EffectPass::Create(instance, set_layout16, layout16, pipeline16,
+                            {eStorageBuffer, eCombinedImageSampler, eStorageImage, eStorageImage,
+                             eStorageImage, eStorageImage},
+                            sizeof(Push), POINT_SHADOW_F16_COMP, "Point shadows (FP16 light)", true)) {
+        std::printf("Point shadows: FP16 light targets unsupported on this GPU; those light draws are skipped\n");
+    }
+    const u32 ray_mask = rt_shadow.LampRayMask();
+    const vk::SpecializationMapEntry mask_entry{0, 0, sizeof(ray_mask)};
+    const vk::SpecializationInfo mask_info{1, &mask_entry, sizeof(ray_mask), &ray_mask};
     if (rt_shadow.Capturing() &&
         !EffectPass::Create(instance, ray_set_layout, ray_layout, ray_pipeline,
                             {eStorageBuffer, eCombinedImageSampler, eStorageImage, eStorageImage,
                              eStorageImage, eStorageImage, eAccelerationStructureKHR, eStorageImage,
                              eStorageImage},
-                            sizeof(Push), POINT_SHADOW_RAY_COMP, "Ray traced lamps", true)) {
+                            sizeof(Push), POINT_SHADOW_RAY_COMP, "Ray traced lamps", true,
+                            ray_mask != 0xffu ? &mask_info : nullptr)) {
         std::printf("Ray traced lamps: off - the pass could not be made\n");
+    }
+    if (ray_pipeline && pipeline16 &&
+        !EffectPass::Create(instance, ray_set_layout16, ray_layout16, ray_pipeline16,
+                            {eStorageBuffer, eCombinedImageSampler, eStorageImage, eStorageImage,
+                             eStorageImage, eStorageImage, eAccelerationStructureKHR, eStorageImage,
+                             eStorageImage},
+                            sizeof(Push), POINT_SHADOW_RAY_F16_COMP, "Ray traced lamps (FP16 light)", true,
+                            ray_mask != 0xffu ? &mask_info : nullptr)) {
+        std::printf("Ray traced lamps: FP16 light targets use the screen-space pass\n");
     }
     light_data = std::make_unique<VideoCore::Buffer>(
         instance, 0, DataWords * sizeof(u32), VideoCore::MemoryType::DeviceLocal, "Point shadow lights");
@@ -168,7 +199,7 @@ PointShadow::~PointShadow() = default;
 
 bool PointShadow::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format format,
                               const char* name) {
-    if (own.image && own.width == width && own.height == height) {
+    if (own.image && own.width == width && own.height == height && own.format == format) {
         return false;
     }
     if (own.image) {
@@ -200,6 +231,7 @@ bool PointShadow::EnsureImage(OwnImage& own, u32 width, u32 height, vk::Format f
     }));
     own.width = width;
     own.height = height;
+    own.format = format;
     return true;
 }
 
@@ -222,6 +254,48 @@ void PointShadow::OnFrameEnd() {
                     frame_tiles, batches, kept_draws, ended_by_draws,
                     (unsigned long long)ending_hashes[0], (unsigned long long)ending_hashes[1],
                     (unsigned long long)ending_hashes[2], (unsigned long long)ending_hashes[3]);
+        if (game_lights) {
+            std::printf("Ray traced lamps from the game's light list: %zu lights in view this frame (nearest %.1f m), "
+                        "%u added to batches, %u already in a tile, %u drawn by a tile elsewhere, %u outside the "
+                        "unrecognised draws, %u over the limit of %zu a batch, %u torn reads; %u draws of "
+                        "unrecognised lamp shaders kept (%08llx %08llx %08llx %08llx), %u dropped before any "
+                        "known lamp; %llu rows, %u cells cut over %zu a light, %u lights cut for room, %u drawn "
+                        "lights over %zu; %.3f ms this frame (max %.3f)\n",
+                        game_placed.size(), game_nearest_m, game_count.added, game_count.matched,
+                        game_count.elsewhere, game_count.outside, game_count.dropped, GameLightsPerBatch, game_torn,
+                        unknown_draws, (unsigned long long)unknown_hashes[0], (unsigned long long)unknown_hashes[1],
+                        (unsigned long long)unknown_hashes[2], (unsigned long long)unknown_hashes[3],
+                        unknown_dropped, (unsigned long long)game_rows, game_count.cells_cut,
+                        RtLamps::MaxCellsPerLight, game_room_cut, drawn.Truncated(), RtLamps::DrawnLights::Most,
+                        double(game_ns_frame) / 1e6, double(std::max(game_ns_max, game_ns_frame)) / 1e6);
+            game_ns_max = 0;
+        }
+    }
+    if (frame_index % 1800 == 0 && (skipped_draws != skips_reported || mixed_flushes != mixed_reported)) {
+        std::printf("Point shadows: %llu light draws skipped so far; %llu batches drew into full-size light "
+                    "targets over the reduced depth\n",
+                    static_cast<unsigned long long>(skipped_draws), static_cast<unsigned long long>(mixed_flushes));
+        skips_reported = skipped_draws;
+        mixed_reported = mixed_flushes;
+    }
+    if (game_lights) {
+        drawn.Roll();
+    }
+    game_ns_max = std::max(game_ns_max, game_ns_frame);
+    game_ns_frame = 0;
+    game_rows = 0;
+    game_room_cut = 0;
+    game_count = {};
+    game_torn = 0;
+    unknown_dropped = 0;
+    unknown_draws = 0;
+    unknown_hashes = {};
+    frame_constants_valid = false;
+    if (frame_tiles != tiles_logged && frame_index - tiles_logged_frame >= 120) {
+        std::printf("Point shadows: %u light tiles this frame (was %u), %llu light draws skipped so far\n",
+                    frame_tiles, tiles_logged, static_cast<unsigned long long>(skipped_draws));
+        tiles_logged = frame_tiles;
+        tiles_logged_frame = frame_index;
     }
     batches = 0;
     frame_tiles = 0;
@@ -260,6 +334,7 @@ void PointShadow::Ended(u64 hash) {
 
 void PointShadow::Drop() {
     tiles.clear();
+    cone_records.clear();
     pending[0] = pending[1] = {};
     merged = false;
     history_fresh = false;
@@ -267,7 +342,17 @@ void PointShadow::Drop() {
 
 void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId color1,
                               const Inputs& inputs) {
-    if (failed || !color0 || !color1 || !inputs.constants || !inputs.lights || inputs.count == 0 ||
+    const bool unknown = inputs.count == 0;
+    if (unknown && game_lights && !frame_constants_valid) {
+        if (tiles.empty() || data.size() < ConstantWords) {
+            ++unknown_dropped;
+            return;
+        }
+        std::copy_n(data.begin(), ConstantWords, frame_constants.begin());
+        frame_constants_valid = true;
+    }
+    if (failed || !color0 || !color1 ||
+        (unknown ? !game_lights || !frame_constants_valid : !inputs.constants || !inputs.lights) ||
         (!BbSettings::Get().effects[BbSettings::EffectPointShadows].load(
              std::memory_order_relaxed) &&
          !rt_shadow.Wanted()) ||
@@ -278,22 +363,40 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
     if (!depth_id) {
         return;
     }
-    const bool reduced = scene_targets.Reduced() &&
-                         scene_targets.Eligible(texture_cache.GetImage(depth_id));
+    const bool reduced_depth = scene_targets.Reduced() &&
+                               scene_targets.Eligible(texture_cache.GetImage(depth_id));
     const std::array ids{color0, color1};
     std::array<VideoCore::Image*, 2> targets{};
+    std::array<bool, 2> eligible{};
     for (int i = 0; i < 2; ++i) {
         targets[i] = &texture_cache.GetImage(ids[i]);
+        eligible[i] = reduced_depth && scene_targets.Eligible(*targets[i]);
+    }
+    const bool reduced = RtLamps::ProxyTargets(reduced_depth, eligible[0], eligible[1]);
+    for (int i = 0; i < 2; ++i) {
         const auto& info = targets[i]->info;
-        if (info.pixel_format != TargetFormat ||
-            (!reduced && !(targets[i]->usage_flags & vk::ImageUsageFlagBits::eStorage)) ||
-            (!reduced && !(targets[i]->usage_flags & vk::ImageUsageFlagBits::eTransferSrc)) ||
-            (reduced && !scene_targets.Eligible(*targets[i])) ||
+        if (eligible[0] != eligible[1] ||
+            !RtLamps::LightTargetUsable(info.pixel_format == targets[0]->info.pixel_format &&
+                                            (info.pixel_format == TargetFormat ||
+                                             (info.pixel_format == WideTargetFormat && pipeline16)),
+                                        reduced,
+                                        bool(targets[i]->usage_flags & vk::ImageUsageFlagBits::eStorage),
+                                        bool(targets[i]->usage_flags & vk::ImageUsageFlagBits::eTransferSrc)) ||
             info.size.width != targets[0]->info.size.width ||
             info.size.height != targets[0]->info.size.height) {
-            failed = true;
-            std::printf("Point shadows: the light targets are not matching B10G11R11 storage "
-                        "images; off\n");
+            ++skipped_draws;
+            if (skipped_draws == 1) {
+                std::printf("Point shadows: light draw skipped, target %d is format %d %ux%u usage 0x%x "
+                            "against %ux%u, reduced depth %d, proxies %d/%d; point shadows stay on and the "
+                            "count is in the summary line\n",
+                            i, static_cast<int>(info.pixel_format), info.size.width, info.size.height,
+                            static_cast<u32>(targets[i]->usage_flags), targets[0]->info.size.width,
+                            targets[0]->info.size.height, reduced_depth ? 1 : 0, eligible[0] ? 1 : 0,
+                            eligible[1] ? 1 : 0);
+            }
+            if (!tiles.empty()) {
+                Flush(false);
+            }
             return;
         }
     }
@@ -312,8 +415,28 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
     }
     const std::array<s32, 4> rect{x0, y0, x1, y1};
     const u32 words = inputs.count * LightWords;
+    if (game_lights && !unknown) {
+        std::copy_n(inputs.constants, ConstantWords, frame_constants.begin());
+        frame_constants_valid = true;
+    }
+    if (unknown) {
+        ++unknown_draws;
+        for (u64& slot : unknown_hashes) {
+            if (slot == inputs.shader || slot == 0) {
+                slot = inputs.shader;
+                break;
+            }
+        }
+    }
     const auto add_lights = [&] {
-        data.insert(data.end(), inputs.lights, inputs.lights + words);
+        if (inputs.stride == LightWords && !inputs.radius_in_w) {
+            data.insert(data.end(), inputs.lights, inputs.lights + words);
+        } else {
+            const std::size_t at = data.size();
+            data.resize(at + words);
+            RtLamps::Normalize(inputs.lights, {inputs.count, inputs.stride, inputs.radius_in_w}, data.data() + at,
+                               &cone_records, at);
+        }
         ++frame_tiles;
     };
     if (!tiles.empty()) {
@@ -322,14 +445,14 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
                                   pending_uid[1] == targets[1]->image_uid;
         const bool room = data.size() + words + TileWords * (tiles.size() + 1) <= DataWords;
         if (same_targets && (merged || !one_tile_batches) && room) {
-            if (tiles.back().rect == rect) {
+            if (tiles.back().rect == rect && tiles.back().unknown == unknown) {
                 tiles.back().count += inputs.count;
                 add_lights();
                 return;
             }
             if (merged ||
                 std::ranges::none_of(tiles, [&](const Tile& t) { return Overlaps(t.rect, rect); })) {
-                tiles.push_back({rect, u32(data.size()), inputs.count});
+                tiles.push_back({rect, u32(data.size()), inputs.count, unknown});
                 add_lights();
                 return;
             }
@@ -347,18 +470,21 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
                     width, height, length_m, thickness_m, strength, steps, x1 - x0, y1 - y0);
     }
 
-    if ((!snapshot[0].image || snapshot[0].width != width || snapshot[0].height != height) &&
-        !EffectPass::HasRoom(instance, 2ull * 4 * width * height)) {
+    const vk::Format light_format = targets[0]->info.pixel_format;
+    const u64 texel_bytes = light_format == WideTargetFormat ? 8 : 4;
+    if ((!snapshot[0].image || snapshot[0].width != width || snapshot[0].height != height ||
+         snapshot[0].format != light_format) &&
+        !EffectPass::HasRoom(instance, 2ull * texel_bytes * width * height)) {
         failed = true;
         std::printf("Point shadows: off - not enough video memory\n");
         return;
     }
     scheduler.EndRendering();
     for (auto& own : snapshot) {
-        EnsureImage(own, width, height, TargetFormat, "Point shadow snapshot");
+        EnsureImage(own, width, height, light_format, "Point shadow snapshot");
     }
     VideoCore::ImageViewInfo target_info;
-    target_info.format = TargetFormat;
+    target_info.format = light_format;
     std::array<vk::Image, 2> src{};
     vk::ImageLayout src_layout = vk::ImageLayout::eTransferSrcOptimal;
     if (reduced) {
@@ -384,7 +510,7 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
         runtime.FlushBarriers();
         src = {targets[0]->GetImage(), targets[1]->GetImage()};
     }
-    merged = ray_pipeline && rt_shadow.Wanted();
+    merged = (light_format == WideTargetFormat ? bool(ray_pipeline16) : bool(ray_pipeline)) && rt_shadow.Wanted();
     one_tile_batches = ++batches > WholeImageBatches;
     const std::array<s32, 4> copied = one_tile_batches && !merged
                                           ? rect
@@ -451,9 +577,127 @@ void PointShadow::OnLightDraw(VideoCore::ImageId color0, VideoCore::ImageId colo
     pending[0] = color0;
     pending[1] = color1;
     pending_uid = {targets[0]->image_uid, targets[1]->image_uid};
-    data.assign(inputs.constants, inputs.constants + ConstantWords);
-    tiles.push_back({rect, u32(data.size()), inputs.count});
+    const u32* constants = unknown ? frame_constants.data() : inputs.constants;
+    data.assign(constants, constants + ConstantWords);
+    cone_records.clear();
+    tiles.push_back({rect, u32(data.size()), inputs.count, unknown});
     add_lights();
+}
+
+void PointShadow::RefreshGameLights(u32 width, u32 height) {
+    game_frame = frame_index;
+    std::vector<RtLamps::WorldLight> read;
+    u64 stamp = 0;
+    if (RtLamps::SharedFeed().Read(read, stamp)) {
+        game_world = std::move(read);
+        game_stamp = stamp;
+    } else {
+        ++game_torn;
+    }
+    game_placed.clear();
+    game_nearest_m = 0.0f;
+    const auto now = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count());
+    const auto camera = camera_motion.PassMatrices();
+    bool ok = false;
+    const auto proj = Invert(data.data(), ok);
+    if (!ok || !camera.valid || !RtLamps::Fresh(game_stamp, now)) {
+        return;
+    }
+    game_placed = RtLamps::FrameLights(game_world, camera.view, proj, width, height);
+    float nearest = 0.0f;
+    for (const auto& light : game_placed) {
+        const float x = RtLamps::Word(light.record, 0), y = RtLamps::Word(light.record, 1),
+                    z = RtLamps::Word(light.record, 2);
+        const float d = std::sqrt(x * x + y * y + z * z);
+        nearest = nearest == 0.0f ? d : std::min(nearest, d);
+    }
+    game_nearest_m = nearest;
+}
+
+void PointShadow::AddGameLights(std::vector<Tile>& batch, u32 width, u32 height) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto spent = [&] {
+        game_ns_frame += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - start)
+                                 .count());
+    };
+    if (game_frame != frame_index) {
+        RefreshGameLights(width, height);
+    }
+    const auto camera = camera_motion.PassMatrices();
+    if (batch.empty() || !camera.valid) {
+        spent();
+        return;
+    }
+    std::vector<RtLamps::Rect> unknown;
+    std::vector<RtLamps::Drawn> tile_lights;
+    for (const Tile& tile : batch) {
+        const RtLamps::Rect rect{tile.rect[0], tile.rect[1], tile.rect[2], tile.rect[3]};
+        if (tile.unknown) {
+            unknown.push_back(rect);
+        }
+        for (u32 k = 0; k < tile.count; ++k) {
+            const std::size_t at = std::size_t(tile.first_light) + std::size_t(k) * LightWords;
+            if (at + LightWords <= data.size()) {
+                RtLamps::Drawn drawn_light{{}, rect};
+                std::copy_n(data.begin() + std::ptrdiff_t(at), LightWords, drawn_light.record.begin());
+                tile_lights.push_back(drawn_light);
+            }
+        }
+    }
+    std::vector<RtLamps::Lamp> added;
+    if (!game_placed.empty() && !unknown.empty()) {
+        added = RtLamps::ForBatch(game_placed, tile_lights, drawn, camera.inv_view, unknown,
+                                  GameLightsPerBatch, game_count);
+    }
+    for (const auto& tile_light : tile_lights) {
+        drawn.Add(RtLamps::ViewToWorld(camera.inv_view, tile_light.record), tile_light.rect);
+    }
+    for (std::size_t i = 0; i < added.size(); ++i) {
+        const auto& light = added[i];
+        const std::size_t rows = batch.size() + light.cells.size();
+        if (data.size() + LightWords + TileWords * rows + 32 > DataWords) {
+            game_room_cut += u32(added.size() - i);
+            break;
+        }
+        const u32 first = u32(data.size());
+        data.insert(data.end(), light.record.begin(), light.record.end());
+        for (const auto& cell : light.cells) {
+            batch.push_back({{cell.x0, cell.y0, cell.x1, cell.y1}, first, 1, false});
+            ++game_rows;
+        }
+    }
+    spent();
+}
+
+void PointShadow::ProbeCone(const RtLamps::ConeRecord& cone, const std::vector<u32>& words) {
+    if (cones_logged >= MaxConesLogged) {
+        return;
+    }
+    RtLamps::Record record;
+    std::copy_n(words.begin() + std::ptrdiff_t(cone.record), LightWords, record.begin());
+    const std::array<float, 3> at{RtLamps::Word(record, 0), RtLamps::Word(record, 1), RtLamps::Word(record, 2)};
+    const auto camera = camera_motion.PassMatrices();
+    const auto world = RtLamps::ViewToWorld(camera.inv_view, record);
+    const std::array<s32, 3> key{s32(std::lround(world.position[0] * 10.0f)), s32(std::lround(world.position[1] * 10.0f)),
+                                 s32(std::lround(world.position[2] * 10.0f))};
+    if (std::ranges::find(cones_seen, key) != cones_seen.end()) {
+        return;
+    }
+    cones_seen.push_back(key);
+    ++cones_logged;
+    const auto probe = RtLamps::ProbeCone(cone.matrix, at);
+    std::printf("Ray traced lamps: spot at view (%.2f, %.2f, %.2f), world (%.2f, %.2f, %.2f); cone q at the spot "
+                "(%.3f, %.3f, %.3f, %.3f), 1 m along its axis (%.2f, %.2f, %.2f) (%.3f, %.3f, %.3f, %.3f), %s\n",
+                at[0], at[1], at[2], world.position[0], world.position[1], world.position[2], probe.apex[0],
+                probe.apex[1], probe.apex[2], probe.apex[3], probe.axis[0], probe.axis[1], probe.axis[2],
+                probe.ahead[0], probe.ahead[1], probe.ahead[2], probe.ahead[3],
+                !probe.valid ? "no axis"
+                : RtLamps::InCone(cone.matrix, {at[0] + probe.axis[0], at[1] + probe.axis[1], at[2] + probe.axis[2]})
+                    ? "inside"
+                    : "OUTSIDE");
 }
 
 void PointShadow::Flush(bool animate_noise) {
@@ -464,6 +708,8 @@ void PointShadow::Flush(bool animate_noise) {
     const auto uids = pending_uid;
     auto batch = std::move(tiles);
     tiles.clear();
+    auto cones = std::move(cone_records);
+    cone_records.clear();
     pending[0] = pending[1] = {};
     const auto depth_id = camera_motion.Depth();
     if (!depth_id) {
@@ -477,22 +723,26 @@ void PointShadow::Flush(bool animate_noise) {
     }
     auto& depth = *depth_ptr;
     std::array<VideoCore::Image*, 2> targets{target0, target1};
-    const bool reduced = scene_targets.Reduced() && scene_targets.Eligible(depth) &&
-                         scene_targets.Eligible(*targets[0]);
+    const bool reduced_depth = scene_targets.Reduced() && scene_targets.Eligible(depth);
+    const bool reduced = RtLamps::ProxyTargets(reduced_depth, scene_targets.Eligible(*targets[0]),
+                                               scene_targets.Eligible(*targets[1]));
     u32 width = targets[0]->info.size.width, height = targets[0]->info.size.height;
     if (reduced) {
         const auto size = scene_targets.ProxySize(*targets[0]);
         width = size.width;
         height = size.height;
     }
-    if (snapshot[0].width != width || snapshot[0].height != height) {
+    const vk::Format light_format = targets[0]->info.pixel_format;
+    const bool wide = light_format == WideTargetFormat;
+    if (snapshot[0].width != width || snapshot[0].height != height || snapshot[0].format != light_format ||
+        (wide && !pipeline16)) {
         return;
     }
 
     scheduler.EndRendering();
     const bool batch_merged = merged;
     merged = false;
-    const bool use_rays = ray_pipeline && rt_shadow.PrepareScene();
+    const bool use_rays = (wide ? bool(ray_pipeline16) : bool(ray_pipeline)) && rt_shadow.PrepareScene();
     if (!use_rays &&
         (batch_merged ||
          !BbSettings::Get().effects[BbSettings::EffectPointShadows].load(std::memory_order_relaxed))) {
@@ -501,6 +751,16 @@ void PointShadow::Flush(bool animate_noise) {
     std::array<s32, 4> covered{s32(width), s32(height), 0, 0};
     u32 table = 0;
     if (use_rays) {
+        for (const auto& cone : cones) {
+            if (cone.record + LightWords <= data.size() && data.size() + cone.matrix.size() <= DataWords) {
+                data[cone.record + RtLamps::ConeAt] = u32(data.size());
+                data.insert(data.end(), cone.matrix.begin(), cone.matrix.end());
+                ProbeCone(cone, data);
+            }
+        }
+        if (game_lights) {
+            AddGameLights(batch, width, height);
+        }
         table = u32(data.size());
         for (const Tile& tile : batch) {
             covered = {std::min(covered[0], tile.rect[0]), std::min(covered[1], tile.rect[1]),
@@ -575,7 +835,7 @@ void PointShadow::Flush(bool animate_noise) {
     vk::ImageView depth_view{};
     if (reduced) {
         VideoCore::ImageViewInfo target_info, depth_info;
-        target_info.format = TargetFormat;
+        target_info.format = light_format;
         depth_info.format = depth.info.pixel_format;
         for (int i = 0; i < 2; ++i) {
             target_views[i] = scene_targets
@@ -590,27 +850,39 @@ void PointShadow::Flush(bool animate_noise) {
             target_views[i] = Check<"create point shadow target view">(device.createImageView({
                 .image = targets[i]->GetImage(),
                 .viewType = vk::ImageViewType::e2D,
-                .format = TargetFormat,
+                .format = light_format,
                 .subresourceRange = ColorRange,
             }));
         }
-        depth_view = Check<"create point shadow depth view">(device.createImageView({
-            .image = depth.GetImage(),
-            .viewType = vk::ImageViewType::e2D,
-            .format = depth.info.pixel_format,
-            .subresourceRange = {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1},
-        }));
-        scheduler.DeferOperation([device, target_views, depth_view] {
+        vk::ImageView own_depth{};
+        if (reduced_depth) {
+            VideoCore::ImageViewInfo depth_info;
+            depth_info.format = depth.info.pixel_format;
+            depth_view = scene_targets.Read(depth_id, depth_info).view;
+            ++mixed_flushes;
+        } else {
+            own_depth = Check<"create point shadow depth view">(device.createImageView({
+                .image = depth.GetImage(),
+                .viewType = vk::ImageViewType::e2D,
+                .format = depth.info.pixel_format,
+                .subresourceRange = {vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1},
+            }));
+            depth_view = own_depth;
+        }
+        scheduler.DeferOperation([device, target_views, own_depth] {
             device.destroyImageView(target_views[0]);
             device.destroyImageView(target_views[1]);
-            device.destroyImageView(depth_view);
+            if (own_depth) {
+                device.destroyImageView(own_depth);
+            }
         });
         for (auto* target : targets) {
             runtime.Transit(target, vk::ImageLayout::eGeneral, Compute,
                             vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
         }
-        runtime.Transit(&depth, vk::ImageLayout::eGeneral, Compute,
-                        vk::AccessFlagBits2::eShaderRead);
+        if (!reduced_depth) {
+            runtime.Transit(&depth, vk::ImageLayout::eGeneral, Compute, vk::AccessFlagBits2::eShaderRead);
+        }
         runtime.FlushBarriers();
     }
 
@@ -628,13 +900,14 @@ void PointShadow::Flush(bool animate_noise) {
         .bias_m = bias_m,
         .rect = {},
     };
-    EffectPass::Mark(6, "point shadows");
+    EffectPass::Mark(use_rays ? 15 : 6, use_rays ? "ray traced lamps" : "point shadows");
     scheduler.RecordCrumb(
         {.name = "Point shadows"},
         [push, target_views, depth_view, sampler = *sampler, snap0 = *snapshot[0].view,
          snap1 = *snapshot[1].view, batch = std::move(batch), words = std::move(data),
-         buffer = light_data->Handle(), pipeline = use_rays ? *ray_pipeline : *pipeline,
-         layout = use_rays ? *ray_layout : *layout, use_rays, scene = rt_shadow.Scene(), covered,
+         buffer = light_data->Handle(),
+         pipeline = use_rays ? (wide ? *ray_pipeline16 : *ray_pipeline) : (wide ? *pipeline16 : *pipeline),
+         layout = use_rays ? (wide ? *ray_layout16 : *ray_layout) : (wide ? *layout16 : *layout), use_rays, scene = rt_shadow.Scene(), covered,
          table, tile_count = u32(batch.size()), history_prev, history_cur, history_cur_image,
          history_images, lay_out, clear_history](vk::CommandBuffer cmdbuf) mutable {
             for (int i = 0; i < 2; ++i) {

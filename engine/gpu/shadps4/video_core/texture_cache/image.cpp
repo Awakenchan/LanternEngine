@@ -11,6 +11,7 @@
 #include "common/assert.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -276,11 +277,16 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     backing->image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
     backing->image.Create(image_ci);
 
-    Vulkan::SetObjectName(instance.GetDevice(), GetImage(),
-                          "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width,
-                          info.size.height, info.size.depth, AmdGpu::NameOf(info.tile_mode),
-                          vk::to_string(info.pixel_format), info.guest_address, info.guest_size,
-                          info.resources.layers, info.resources.levels, info.num_samples);
+    if (VULKAN_HPP_DEFAULT_DISPATCHER.vkSetDebugUtilsObjectNameEXT) {
+        const std::string name = fmt::format(
+            "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width, info.size.height,
+            info.size.depth, AmdGpu::NameOf(info.tile_mode), vk::to_string(info.pixel_format),
+            info.guest_address, info.guest_size, info.resources.layers, info.resources.levels,
+            info.num_samples);
+        Vulkan::SetObjectName(instance.GetDevice(), GetImage(), std::string_view{name});
+        Vulkan::Breadcrumbs::NameBound(reinterpret_cast<u64>(static_cast<VkImage>(GetImage())),
+                                       name.c_str());
+    }
 }
 
 Image::~Image() = default;

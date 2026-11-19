@@ -133,7 +133,7 @@ if [[ -n ${scaled_output:-} ]]; then
     [[ $live == 1 ]] || live=0
 fi
 if [[ $live == 1 ]]; then
-    echo "Output ${scaled_output}: live resolution changes (live_resolution=0: startup patch)"
+    echo "Output ${scaled_output}: live resolution changes (live_resolution=1: live changes; 0 would patch the scene size at startup)"
 elif [[ -n ${scaled_output:-} ]]; then
     early=${BB_UPSCALE_EARLY:-}
     if [[ -z $early && -f $BB_CONFIG ]]; then
@@ -149,7 +149,7 @@ elif [[ -n ${scaled_output:-} ]]; then
     fi
     export BB_RENDER_RES=$scaled_render BB_OUTPUT_RES=$scaled_output BB_AUTO_RENDER_RES=1
     export BB_DMEM_MB=${BB_DMEM_MB:-9152}
-    echo "Output ${scaled_output}: scene ${scaled_render}, direct memory ${BB_DMEM_MB} MiB (live_resolution=1: live changes)"
+    echo "Output ${scaled_output}: scene ${scaled_render}, direct memory ${BB_DMEM_MB} MiB (live_resolution=0: startup patch; 1 would allow live changes)"
 fi
 "$PYTHON" scripts/patches.py --out "$out" --fps "$fps" --extra "${BB_PATCHES:-}" --settings "$BB_CONFIG" --game-dir "$game" --render-res "${BB_RENDER_RES:-}" --output-res "${BB_OUTPUT_RES:-}" \
     --patches-dir "${BB_PATCHES_DIR:-$data/patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}"

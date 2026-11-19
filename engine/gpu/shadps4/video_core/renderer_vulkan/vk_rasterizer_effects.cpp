@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -13,6 +14,8 @@
 #include <xxhash.h>
 
 #include "core/memory.h"
+#include "lantern_switches.h"
+#include "video_core/renderer_vulkan/rt_lamp_rules.h"
 #include "video_core/renderer_vulkan/vk_effect_shaders.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -22,43 +25,31 @@ namespace Vulkan {
 namespace {
 constexpr u64 ShadowResolveHash = 0xf55643de;
 constexpr u64 ShadowBlurHash = 0x11ffdfb5;
-constexpr u64 PointLightsFullHash = 0x9f9ef267;
 constexpr u64 HdrPostHash = 0xccbf44a6;
 constexpr u64 DirectionalTableHash = 0xd92266b9;
 constexpr u64 SceneTargetHash = 0x32e47788;
 constexpr u64 PointGridVertexHash = 0x8747a367;
 
-constexpr u32 PointLightCount(u64 hash) {
-    switch (hash) {
-    case 0x370174f7:
-    case 0x7cc2c044:
-        return 1;
-    case 0x186d69d5:
-    case 0x600f86b0:
-        return 2;
-    case 0xd22cbfd1:
-        return 3;
-    case 0x3105494c:
-        return 4;
-    case 0xd75fe2ff:
-        return 5;
-    case 0x07d07cf3:
-        return 6;
-    case 0xf2531727:
-        return 7;
-    case 0xc6edb19a:
-        return 8;
-    case 0xb59b4c4e:
-        return 9;
-    case 0x505ebdbe:
-        return 10;
-    case 0x22b357f3:
-        return 11;
-    case PointLightsFullHash:
-        return 12;
-    default:
-        return 0;
+u32 PointLightCount(u64 hash) {
+    return RtLamps::TileFamily(hash, false).count;
+}
+
+bool GameLamps() {
+    static const bool on = Lantern::Switches::Get().rt_game_lights;
+    return on;
+}
+
+RtLamps::Family LampFamily(const GraphicsPipeline* pipeline, u64 hash, bool families, bool extended) {
+    RtLamps::Family family = RtLamps::TileFamily(hash, families || extended);
+    const bool claimed = hash == ShadowResolveHash || hash == ShadowBlurHash || hash == HdrPostHash ||
+                         hash == DirectionalTableHash || hash == SceneTargetHash ||
+                         hash == EffectShaders::SsaoHash || hash == EffectShaders::SsrHash ||
+                         hash == EffectShaders::SsrCompositeHash || hash == EffectShaders::MotionBlurHash;
+    if (!family.Lamp() && extended && !claimed && (pipeline->GetGraphicsKey().mrt_mask & 3) == 3 &&
+        pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash == PointGridVertexHash) {
+        family.unknown = true;
     }
+    return family;
 }
 
 u32 PackedOffsets(const Shader::PushData& push) {
@@ -107,7 +98,7 @@ void Rasterizer::EffectsBeforeTargets(const GraphicsPipeline* pipeline) {
         ssr_temporal->Flush(upscaler->Jitter());
     }
     contact_shadow->Flush(hash == ShadowBlurHash);
-    if (PointLightCount(hash) == 0) {
+    if (!LampFamily(pipeline, hash, rt_shadow->Wanted(), GameLamps() && rt_shadow->Wanted()).Lamp()) {
         if (point_shadow->Pending()) {
             const auto& regs = Regs();
             const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
@@ -188,6 +179,9 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
     if (!rt_shadow->Wanted() || !dc.motion_geometry) {
         return;
     }
+    u64* const capture_clock = rt_shadow->CaptureClock();
+    const auto capture_start =
+        capture_clock ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
     const auto& fetch = pipeline->GetFetchShader();
@@ -236,6 +230,9 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
             draw.indices = address;
         }
     }
+    const bool rigid = rt_shadow->RigidWanted();
+    draw.pose.known = rigid && (draw.camera_pass || draw.shadow_pass) && vs.images.empty() && !vs.has_readconst &&
+                      !vs.uses_dma;
     for (const auto& resource : vs.buffers) {
         if (resource.IsSpecial()) {
             continue;
@@ -244,17 +241,45 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
         const u32 size = buffer.GetSize();
         if (!buffer.Valid() || !memory->IsValidGpuMapping(buffer.base_address, 0) ||
             memory->ClampRangeSize(buffer.base_address, size) != size) {
+            draw.pose.known = false;
             continue;
         }
         if (size == 864) {
             draw.constants = reinterpret_cast<const float*>(buffer.base_address);
-        } else if (buffer.GetStride() == 16) {
+            continue;
+        }
+        if (draw.pose.known) {
+            if (size > RtRules::PaletteHashLimit ||
+                buffer_cache.IsRegionGpuWrittenTracked(buffer.base_address, size)) {
+                draw.pose.known = false;
+            } else {
+                draw.pose.hash = XXH3_64bits_withSeed(reinterpret_cast<const void*>(buffer.base_address), size,
+                                                      draw.pose.hash ^ size);
+            }
+        }
+        if (buffer.GetStride() == 16) {
             const auto role = Motion::ClassifyBuffer(size);
             if (role == Motion::BufferRole::Skeleton) {
                 draw.skinned = true;
             } else if (role == Motion::BufferRole::SmallSkeleton) {
                 draw.palette = XXH3_64bits_withSeed(reinterpret_cast<const void*>(buffer.base_address),
                                                     size, draw.palette);
+                if (!draw.anchor) {
+                    draw.anchor = reinterpret_cast<const float*>(buffer.base_address);
+                }
+            }
+            if (rigid && role != Motion::BufferRole::Skeleton &&
+                RtRules::PaletteBuffer(size, resource.only_const_reads)) {
+                draw.bones.present = true;
+                if (buffer_cache.IsRegionGpuWrittenTracked(buffer.base_address, size)) {
+                    draw.bones.written = true;
+                } else if (!RtRules::PaletteHashed(size)) {
+                    draw.bones.pooled = true;
+                } else {
+                    draw.bones.hash = XXH3_64bits_withSeed(
+                        reinterpret_cast<const void*>(buffer.base_address), size, draw.bones.hash);
+                    draw.bones.bytes += size;
+                }
             }
         }
     }
@@ -263,6 +288,11 @@ void Rasterizer::EffectsCaptureDraw(const AmdGpu::Regs& regs, const GraphicsPipe
         dc.push_data.motion_param |= param << 16;
     } else {
         dc.push_data.motion_param = param;
+    }
+    if (capture_clock) {
+        *capture_clock += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - capture_start)
+                                  .count());
     }
 }
 
@@ -341,8 +371,8 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
         return;
     }
     const u64 hash = FragmentHash(pipeline);
-    const u32 tile_lights = PointLightCount(hash);
-    if (tile_lights != 0) {
+    const auto family = LampFamily(pipeline, hash, rt_shadow->Wanted(), GameLamps() && rt_shadow->Wanted());
+    if (family.Lamp()) {
         effect_tile = EffectTile(regs, pipeline, is_indexed, index_offset, first_vertex);
     }
     static_assert(offsetof(Shader::PushData, motion_param) == 120);
@@ -393,21 +423,29 @@ void Rasterizer::EffectsBeforeBind(const AmdGpu::Regs& regs, const GraphicsPipel
                  .constants_offset_word = PackedOffsets(dc.push_data),
                  .frame_index = shadow_frame++});
         }
-    } else if (tile_lights != 0) {
+    } else if (family.unknown) {
+        if (cb_descs[0].first && cb_descs[1].first) {
+            point_shadow->OnLightDraw(cb_descs[0].first, cb_descs[1].first,
+                                      {.shader = hash, .tile = effect_tile});
+        }
+    } else if (family.count != 0) {
         const auto& ps = pipeline->GetStage(Shader::SwStage::Fragment);
         if ((pipeline->GetGraphicsKey().mrt_mask & 3) == 3 && cb_descs[0].first &&
             cb_descs[1].first && ps.buffers.size() >= 2 && !ps.buffers[0].IsSpecial() &&
             !ps.buffers[1].IsSpecial()) {
             const VAddr constants = ps.buffers[0].GetSharp(ps).base_address;
             const VAddr lights = ps.buffers[1].GetSharp(ps).base_address;
-            const u64 light_bytes = u64(tile_lights) * 64;
+            const u64 light_bytes = u64(family.count) * family.stride * 4;
             if (memory->IsValidGpuMapping(constants, 0) && memory->ClampRangeSize(constants, 64) == 64 &&
                 memory->IsValidGpuMapping(lights, 0) &&
                 memory->ClampRangeSize(lights, light_bytes) == light_bytes) {
                 point_shadow->OnLightDraw(cb_descs[0].first, cb_descs[1].first,
                                           {.constants = reinterpret_cast<const u32*>(constants),
                                            .lights = reinterpret_cast<const u32*>(lights),
-                                           .count = tile_lights,
+                                           .count = family.count,
+                                           .stride = family.stride,
+                                           .radius_in_w = family.radius_in_w,
+                                           .shader = hash,
                                            .tile = effect_tile});
             }
         }

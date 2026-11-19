@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_gnm_hooks.h"
 #include "bbport_native_calls.h"
+#include "lantern_meter.h"
 #include "engine/gx_records.h"
 #include "engine/gx_trace.h"
 
@@ -438,6 +439,7 @@ bool TokensWanted() {
 }
 
 void NativeDraw(u64 cb, BbNativeCalls::DrawRecord r) {
+    Lantern::Meter::NoteDraw();
     const std::uint32_t index = native_index[r.kind];
     if (census) {
         __atomic_fetch_add(CounterAt(index), 1, __ATOMIC_RELAXED);

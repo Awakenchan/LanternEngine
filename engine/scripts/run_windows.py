@@ -361,14 +361,14 @@ def main():
                 live = run([caps, '--live-resolution'], capture=True, check=False) or '0'
             live = '1' if live == '1' else '0'
         if live == '1':
-            print(f'Output {scaled_output}: live resolution changes (live_resolution=0: startup patch)')
+            print(f'Output {scaled_output}: live resolution changes (live_resolution=1: live changes; 0 would patch the scene size at startup)')
         elif scaled_output:
             os.environ.update(BB_RENDER_RES=scaled_render, BB_OUTPUT_RES=scaled_output, BB_AUTO_RENDER_RES='1')
             if large_scene(scaled_render):
                 os.environ.setdefault('BB_DMEM_MB', '9152')
             dmem = os.environ.get('BB_DMEM_MB', '5056')
             print(f'Output {scaled_output}: scene {scaled_render}, direct memory {dmem} MiB '
-                  '(live_resolution=1: live changes)')
+                  '(live_resolution=0: startup patch; 1 would allow live changes)')
         run([PYTHON, SCRIPTS / 'patches.py', '--out', out, '--fps', fps, '--extra', os.environ.get('BB_PATCHES', ''),
              '--settings', config, '--game-dir', merged, '--render-res', os.environ.get('BB_RENDER_RES', ''),
              '--output-res', os.environ.get('BB_OUTPUT_RES', ''),

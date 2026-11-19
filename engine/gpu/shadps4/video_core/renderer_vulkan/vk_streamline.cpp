@@ -31,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_optiscaler.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "lantern_switches.h"
 
 namespace Vulkan {
 
@@ -886,7 +887,8 @@ void DlssFrameGen::BeforePresent(const DlssFrameInfo* info, bool menu_open, bool
         return;
     }
     auto& s = BbSettings::Get();
-    const bool wanted = s.frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenDlss;
+    const bool wanted = s.frame_gen.load(std::memory_order_relaxed) == BbSettings::FrameGenDlss &&
+                        !s.fsr_fg_running.load(std::memory_order_relaxed);
     const bool on = wanted && info->inputs && tag_ui && !menu_open && (!hdr || DlssFrameGenHdr());
     if (wanted) {
         // bbport: why no frames are generated right now, said once per change.
@@ -1046,11 +1048,7 @@ void DlssFrameGen::AfterPresent(const DlssFrameInfo* info) {
                                     std::memory_order_relaxed);
     }
     // BB_FRAME_STATS: what DLSS-G did over the last 5 seconds.
-    static const bool stats = [] {
-        const char* env = std::getenv("BB_FRAME_STATS");
-        return env && env[0] == '1';
-    }();
-    if (stats) {
+    if (Lantern::Switches::Get().frame_stats) {
         ++stats_frames;
         stats_presented += state.numFramesActuallyPresented;
         if (stats_start == std::chrono::steady_clock::time_point{}) {

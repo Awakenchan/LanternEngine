@@ -12,7 +12,7 @@ import unittest
 
 
 class RestartResolutionTests(unittest.TestCase):
-    def run_restarts(self, explicit=False, live=False, ini_extra='', caps=None, bare_path=False):
+    def run_restarts(self, explicit=False, live=False, ini_extra='', caps=None, bare_path=False, output=None):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)
             out = data / 'out'
@@ -65,8 +65,10 @@ class RestartResolutionTests(unittest.TestCase):
                 for name in ('bash', 'dirname', 'mkdir', 'realpath'):
                     (tools / name).symlink_to(shutil.which(name))
                 env['PATH'] = str(tools)
-            subprocess.run([shutil.which('bash'), 'run.sh'], cwd=ROOT, env=env,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30)
+            result = subprocess.run([shutil.which('bash'), 'run.sh'], cwd=ROOT, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30)
+            if output is not None:
+                output.append(result.stdout.decode(errors='replace'))
             return [json.loads(line) for line in (data / 'environments').read_text().splitlines()]
 
     def test_outputs_other_than_1080p_patch_the_render_size_and_restarts_recompute_it(self):
@@ -89,6 +91,24 @@ class RestartResolutionTests(unittest.TestCase):
         self.assertIsNone(self.run_restarts(ini_extra='live_resolution=auto\n', caps=1)[0]['BB_RENDER_RES'])
         self.assertEqual(self.run_restarts(ini_extra='live_resolution=auto\n', caps=0)[0]['BB_RENDER_RES'],
                          '852x480')
+
+    def test_live_resolution_log_names_the_value_in_use(self):
+        startup, live = [], []
+        self.run_restarts(ini_extra='live_resolution=0\n', output=startup)
+        self.run_restarts(live=True, output=live)
+        self.assertIn('(live_resolution=0: startup patch; 1 would allow live changes)', startup[0])
+        self.assertNotIn('live_resolution=1:', startup[0])
+        self.assertIn('(live_resolution=1: live changes; 0 would patch the scene size at startup)', live[0])
+        self.assertNotIn('live_resolution=0:', live[0])
+
+    def test_live_resolution_log_wording_matches_in_every_launcher(self):
+        sources = {name: (ROOT / name).read_text(encoding='utf-8')
+                   for name in ('run.sh', 'scripts/run_windows.py', 'start/main.cpp')}
+        for name, text in sources.items():
+            self.assertIn('(live_resolution=0: startup patch; 1 would allow live changes)', text, name)
+            self.assertIn('(live_resolution=1: live changes; 0 would patch the scene size at startup)', text, name)
+            self.assertNotIn('(live_resolution=1: live changes)', text, name)
+            self.assertNotIn('(live_resolution=0: startup patch)', text, name)
 
     def test_live_resolution_without_sed_or_grep(self):
         self.assertEqual(self.run_restarts(ini_extra='live_resolution=0\n', caps=1,

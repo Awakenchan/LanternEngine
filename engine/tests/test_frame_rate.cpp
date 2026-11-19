@@ -7,6 +7,11 @@
 #include <malloc.h>
 #endif
 
+std::int64_t g_test_realtime_us = 0;
+extern "C" std::uint64_t host_realtime_ns(void) {
+    return std::uint64_t(g_test_realtime_us) * 1000u;
+}
+
 namespace BbEngine {
 void host_log(const char* format, ...) {
     va_list args;
@@ -55,6 +60,9 @@ std::uint8_t* Image(std::size_t size) {
     SetFloat(image, kSlopeSites[1].offset, 0.65f);
     return image;
 }
+
+std::int64_t g_test_deadline = 0;
+void TestWait(std::int64_t deadline) { g_test_deadline = deadline; }
 
 const Site* First(SiteKind kind, bool code) {
     for (const Site& s : kSites)
@@ -137,7 +145,21 @@ int main() {
         if (w.list == Ninety || w.list == Sprint) std::memcpy(fresh + w.offset, kListBlob + w.at, w.size);
     g_target = 120.0f;
     g_uncapped = false;
-    ApplyLists(fresh, size);
+    const ListCounts counts = ApplyLists(fresh, size);
+    int entries = 0, repeats = 0;
+    for (std::size_t i = 0; i < std::size(kListWrites); ++i) {
+        const ListWrite& w = kListWrites[i];
+        if (w.list != Ninety && w.list != Sprint) continue;
+        ++entries;
+        for (std::size_t j = 0; j < i; ++j)
+            if ((kListWrites[j].list == Ninety || kListWrites[j].list == Sprint) && kListWrites[j].offset == w.offset) {
+                ++repeats;
+                break;
+            }
+    }
+    Check(repeats == 1, "the 90 FPS list names one site twice (0x18bc511)");
+    Check(counts.written == entries - repeats && counts.already == repeats && counts.kept == 0,
+          "a site the list names twice is written once and counted as already in place, as one write after another did");
     bool all = true;
     for (const ListWrite& w : kListWrites)
         if ((w.list == Ninety || w.list == Sprint) && std::memcmp(fresh + w.offset, kListBlob + w.at + w.size, w.size) != 0)
@@ -160,8 +182,8 @@ int main() {
     Check(ApplyWallSpeed(sixty, size) == 0, "the wall check is written once");
     std::free(sixty);
 
-    std::uint8_t* world = static_cast<std::uint8_t*>(std::calloc(size, 1));
     const std::uint8_t* game_room = GameBytes(kWorldCave, kWorldCaveSize);
+    std::uint8_t* world = static_cast<std::uint8_t*>(std::calloc(size, 1));
     Check(game_room != nullptr, "the game's bytes of the world step's spare room are known");
     if (game_room) {
         std::memcpy(world + kWorldCave, game_room, kWorldCaveSize);
@@ -191,6 +213,86 @@ int main() {
         Check(!ApplyWorldStep(world, size), "a world step room that is not the game's is left");
     }
     std::free(world);
+
+    {
+        constexpr std::uint8_t kGameWorldStep[] = {0xc0, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x45, 0xb8,
+                                                   0x89, 0x88, 0x08, 0x3d, 0x49, 0x8b, 0x85, 0xc8};
+        constexpr std::uint8_t kGameLockFail[] = {0x0f, 0x85, 0xc5, 0x00, 0x00, 0x00};
+        constexpr std::uint8_t kGameLongestStep[] = {0x89, 0x88, 0x08, 0x3d};
+        g_code.clear();
+        g_data.clear();
+        std::uint8_t* real = Image(size);
+        std::memcpy(real + kWorldStep - 5, kGameWorldStep, sizeof kGameWorldStep);
+        std::memcpy(real + kWorldLockFail, kGameLockFail, sizeof kGameLockFail);
+        std::memcpy(real + kLongestStep, kGameLongestStep, sizeof kGameLongestStep);
+        if (game_room) std::memcpy(real + kWorldCave, game_room, kWorldCaveSize);
+        const std::vector<std::uint8_t> jump = WorldJump();
+        const std::uint8_t* uncapped_jump = nullptr;
+        for (const ListWrite& w : kListWrites)
+            if (w.list == Uncapped && w.offset == kWorldStep && w.size == jump.size()) uncapped_jump = kListBlob + w.at + w.size;
+        Check(uncapped_jump && std::memcmp(uncapped_jump, jump.data(), jump.size()) == 0,
+              "the engine's world step jump is the uncapped list's bytes");
+        Check(BbEngine::FrameRate::Install(real, size), "native frame rate installs over the game's 1/30 world step");
+        Check(std::memcmp(real + kWorldStep, jump.data(), jump.size()) == 0, "the world step jump stays in place of the step value");
+        Check(std::fabs(FloatAt(real, code_step->offset) - 1.0f / 120) < 1e-7f, "with the world step, code steps at 1/120");
+        Check(std::fabs(FloatAt(real, data_step->offset) - 1.0f / 120) < 1e-7f, "with the world step, data steps at 1/120");
+    }
+
+    {
+        const std::size_t timer_size = kFlipper + 8;
+        auto* paced = static_cast<std::uint8_t*>(std::calloc(timer_size, 1));
+        alignas(8) std::uint8_t timer[0x300] = {};
+        const std::uintptr_t timer_at = reinterpret_cast<std::uintptr_t>(timer);
+        std::memcpy(paced + kFlipper, &timer_at, sizeof timer_at);
+        const float target = 1.0f / 120;
+        std::memcpy(timer + kTimerTarget, &target, 4);
+        std::uint8_t* saved_image = g_image;
+        g_image = paced;
+        g_target = 120.0f;
+        LanternFrameClock::SetWaiter(TestWait);
+        g_last_start = 0;
+        const std::int64_t vblank = 8333333;
+        const auto stamp = [&] {
+            std::int64_t v;
+            std::memcpy(&v, timer + kTimerStamp, 8);
+            return v;
+        };
+        g_test_realtime_us = 5000000000;
+        PaceFrameStart();
+        Check(stamp() == 0, "no flip clock published: the game's stamp is left");
+        LanternFrameClock::Publish(LanternFrameClock::SteadyNs() + 1000000, vblank, vblank);
+        PaceFrameStart();
+        Check(g_last_start != 0 && stamp() == g_test_realtime_us - 8333, "first paced frame: one period");
+        bool whole = true, steady = true;
+        std::int64_t previous = g_last_start;
+        for (int i = 0; i < 50; ++i) {
+            g_test_realtime_us += 8333;
+            PaceFrameStart();
+            const std::int64_t step = g_test_realtime_us - stamp();
+            whole = whole && step == 8333;
+            if (i >= 20) steady = steady && g_last_start - previous == vblank;
+            previous = g_last_start;
+        }
+        const std::int64_t anchor = [] {
+            LanternFrameClock::Grid grid;
+            LanternFrameClock::Current(grid);
+            return grid.anchor;
+        }();
+        Check(whole, "every step the game measures is one display period");
+        Check(steady, "once settled, frames start one display period apart");
+        Check(LanternFrameClock::FloorDiv(g_last_start - anchor, vblank) * vblank == g_last_start - anchor,
+              "an early frame settles onto a flip slot");
+        Check(g_test_deadline == g_last_start, "the wait is for the frame's own start");
+        const float slow = 1.0f / 30;
+        std::memcpy(timer + kTimerTarget, &slow, 4);
+        std::memset(timer + kTimerStamp, 0, 8);
+        PaceFrameStart();
+        Check(stamp() == 0 && g_last_start == 0, "a game target other than the frame rate keeps the game's own limiter");
+        LanternFrameClock::Clear();
+        LanternFrameClock::SetWaiter(nullptr);
+        g_image = saved_image;
+        std::free(paced);
+    }
 
     if (failures) return 1;
     std::puts("frame rate: ok");

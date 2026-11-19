@@ -33,6 +33,11 @@ constexpr auto kDebounce = std::chrono::milliseconds(400);
 constexpr auto kInterval = std::chrono::milliseconds(250);
 constexpr auto kSettle = std::chrono::milliseconds(1500);
 constexpr const char* kNotVerified = "the engine's executable was not verified";
+#ifdef LANTERN_HOOK_MUTANTS
+constexpr bool kMutants = true;
+#else
+constexpr bool kMutants = false;
+#endif
 
 constexpr std::uint8_t kSigRow[] = {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x41,0x89,0xf4,
     0x49,0x89,0xfe,0x31,0xc9,0x45,0x85,0xe4,0x0f,0x88,0xf2,0x00,0x00,0x00};
@@ -95,7 +100,7 @@ struct Cheat {
     Clock::time_point pending_since{};
     bool snapped = false, weapons = false;
     std::uint64_t goods_cap = 0, goods_file = 0, weapon_cap = 0, weapon_file = 0;
-    std::vector<Byte> bytes;
+    std::vector<Byte> bytes{};
     int base_cap = 0;
     int floor = -1;
     bool floor_logged = false;
@@ -403,7 +408,10 @@ bool Write(Patch& p, const std::vector<std::uint8_t>& want) {
     }
     if (!change) return true;
     if (p.code) {
-        if (!WriteCode(reinterpret_cast<void*>(p.bytes[0].at), want.data(), want.size())) return false;
+        std::vector<std::uint8_t> now(p.bytes.size());
+        for (std::size_t i = 0; i < p.bytes.size(); ++i) now[i] = p.bytes[i].now;
+        const CodePatch patch{kMutants ? g_image : reinterpret_cast<std::uint8_t*>(g_slide), std::size_t(p.bytes[0].at - g_slide), now, want};
+        if (WriteCode(patch) != WriteResult::Applied) return false;
         for (std::size_t i = 0; i < p.bytes.size(); ++i) p.bytes[i].now = want[i];
         return true;
     }
@@ -436,7 +444,7 @@ struct Extra {
     bool disabled = false;
     int active = 0, pending = 0;
     Clock::time_point pending_since{};
-    Patch patch;
+    Patch patch{};
     int failures = 0;
 };
 Extra g_extras[] = {

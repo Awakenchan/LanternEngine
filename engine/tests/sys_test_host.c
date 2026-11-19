@@ -17,6 +17,7 @@ WEAK int bbgpu_window_in_background(void) { return 0; }
 WEAK void bbgpu_save_backups_write(int begin) { (void)begin; }
 WEAK int bbgpu_overlay_captures_input(void) { return 0; }
 WEAK void bbgpu_anti_lag_before_input(void) {}
+WEAK void bbgpu_pacing_pad_read(void) {}
 WEAK int bbgpu_menu_buttons(uint32_t *confirm, uint32_t *back) { (void)confirm; (void)back; return 0; }
 WEAK int bbgpu_pc_input(BbPcPad *pad, const _Bool *keys, int count, int gamepad) { (void)pad; (void)keys; (void)count; (void)gamepad; return 0; }
 WEAK int bbgpu_text_input_begin(const char *initial, const char *prompt) { (void)initial; (void)prompt; return 0; }

@@ -82,6 +82,18 @@ namespace BloodborneLauncher.Core
 
         public sealed record SignInState(SignIn State, string Detail);
 
+        public static SignInState ClassifyWhoAmI(int status, string? reply)
+        {
+            var read = ClassifyWhoAmI(reply);
+            return read.State switch
+            {
+                SignIn.Expired when status is 200 or 401 => read,
+                SignIn.Valid when status is >= 200 and < 300 => read,
+                SignIn.Unknown => read,
+                _ => new SignInState(SignIn.Unknown, ""),
+            };
+        }
+
         public static SignInState ClassifyWhoAmI(string? reply)
         {
             JsonObject? json = null;

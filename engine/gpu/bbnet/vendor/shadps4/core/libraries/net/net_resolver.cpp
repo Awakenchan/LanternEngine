@@ -20,6 +20,7 @@
 #include "core/libraries/net/net_resolver.h"
 #include "core/net/guest_net.h"
 #include "core/net/host_net.h"
+#include "test_sandbox.h"
 
 #ifndef _WIN32
 #include <netdb.h>
@@ -81,6 +82,9 @@ s32 Lookup(std::string hostname, bool allow_literal, std::vector<u32>* addrs) {
         }
     }
     if (!IsOnline()) {
+        return ORBIS_NET_ERROR_RESOLVER_ENODNS;
+    }
+    if (!LanternSandbox::AllowHost(hostname, "guest name lookup")) {
         return ORBIS_NET_ERROR_RESOLVER_ENODNS;
     }
     addrinfo hints{};

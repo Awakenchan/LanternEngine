@@ -98,6 +98,13 @@ public:
     u32 GetReadbackQueueFamilyIndex() const {
         return readback_family_index;
     }
+    struct FsrFgQueues {
+        vk::Queue present, acquire, async;
+        u32 present_family = NoFamily, acquire_family = NoFamily, async_family = NoFamily;
+    };
+    const FsrFgQueues& GetFsrFgQueues() const {
+        return fsr_fg_queues;
+    }
     /// bbport: memory can be exported as a dma-buf (guest memory, BbGuestMemory).
     bool IsGuestMemoryExportSupported() const {
         return guest_memory_export;
@@ -658,6 +665,7 @@ private:
     bool guest_memory_export{};
     bool guest_memory_import{};
     u32 readback_family_index = NoFamily;
+    FsrFgQueues fsr_fg_queues{};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

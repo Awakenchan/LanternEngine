@@ -42,6 +42,7 @@ typedef struct {
     uint32_t buttons;
     uint8_t lx, ly, rx, ry, l2, r2, touch_count;
     struct { uint16_t x, y; uint8_t id; } touch[2];
+    uint8_t actions;
 } BbPcPad;
 
 int bbgpu_pc_input(BbPcPad* pad, const bool* keys, int nkeys, int gamepad_present);

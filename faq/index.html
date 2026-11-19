@@ -483,7 +483,7 @@ GPU fault: 3 addresses
 <span class="w">STOP: GPU library assertion failed</span>
 bb-probe exited with code 23
 - the game exited (code 23) -</pre>
-            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.42</span></div>
+            <div class="ui-status" aria-hidden="true"><i></i><span class="grow" id="crash-status">Session: 42 min</span><span>v0.9.43</span></div>
             <div class="ui-back" id="crash-back">
               <div class="ui-modal" role="dialog" aria-label="The game crashed">
                 <h4>The game crashed</h4>
@@ -542,14 +542,14 @@ bb-probe exited with code 23
                   <div class="ui-row3"><span class="ui-btn">Close</span><span class="ui-btn ring">Copy report</span><span class="ui-btn def">Use safe mode</span></div>
                 </div>
               </div>
-              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.42</span></div>
+              <div class="ui-status"><i></i><span class="grow">Crash report copied to the clipboard.</span><span>v0.9.43</span></div>
             </div>
           </div>
           <div class="shot">
             <div data-ui role="img" aria-label="The launcher's More, Log page with the Copy, Export and Clear buttons">
               <div class="ui-pills sub"><span>Mods</span><span>Cheats</span><span>Engine</span><span class="on">Log</span></div>
               <div class="ui-tools"><span class="ui-tog" aria-pressed="true"></span><span>Follow new output</span><span class="grow"></span><span class="ui-btn">Copy</span><span class="ui-btn ring">Export…</span><span class="ui-btn">Clear</span></div>
-              <pre class="ui-log">Lantern Engine 0.9.42
+              <pre class="ui-log">Lantern Engine v0.9.43
 GPU: NVIDIA GeForce RTX 3070 Ti
 Shaders: 4,812 pipelines ready
 Loading: begins
@@ -677,7 +677,7 @@ Loading: begins
           <summary>Does it work on Linux?</summary>
           <div class="answer">
             <p>Yes. Get the <code>linux-x64.tar.gz</code> package, unpack it, and open <b>Lantern Engine</b>, or run <code>./lantern.sh /path/to/CUSA03173</code> from a terminal. It runs natively on Wayland and X11.</p>
-            <p>DLSS Super Resolution works on Linux on RTX cards with NVIDIA's driver. DLSS Frame Generation is Windows only.</p>
+            <p>DLSS Super Resolution works on Linux on RTX cards with NVIDIA's driver. DLSS Frame Generation and FSR Frame Generation (AMD) are Windows only.</p>
           </div>
         </details>
       </div>
@@ -743,6 +743,19 @@ Loading: begins
           </div>
         </details>
         <details>
+          <summary>Frame start pacing and Low latency</summary>
+          <div class="answer">
+            <p><span class="k">Engine switches › Performance › Frame start pacing</span> is on by default: at a fixed frame rate each game frame starts in step with your display's refresh. Fixed frame rates may feel different than before. Turn it off there, or live from the FPS counter section of the Insert menu.</p>
+            <p><span class="k">Engine switches › Performance › Low latency</span> is off by default. It lowers input lag: the game no longer prepares its next frame while the GPU draws the last one, and at most one frame waits to be shown. It can lower the frame rate.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Lamp fog falloff</summary>
+          <div class="answer">
+            <p><span class="k">Graphics › Lamp fog falloff</span>, with <b>Fog around lamps</b> on. <b>Classic</b> (the default) is the lamp fog as before. <b>Inverse-square</b> gives a bright, tight glow at each flame that falls off fast and costs a little more GPU time; <b>Lamp fog glow size</b> sets how big the glow is. Both are in the Insert menu too. By @fromsoftserve.</p>
+          </div>
+        </details>
+        <details>
           <summary>Presentation mode (VSync)</summary>
           <div class="answer">
             <p>On the <b>Display</b> page, <b>Presentation mode</b>:</p>
@@ -760,7 +773,9 @@ Loading: begins
             <p><span class="k">Graphics › Frame generation</span> adds generated frames between the game's own. It needs an upscaler (or TAA) on.</p>
             <ul>
               <li><b>DLSS</b> frame generation: NVIDIA RTX 40 and 50 series, with Hardware-accelerated GPU scheduling on in Windows. RTX 50 can generate several frames, and <b>dynamic</b> frame generation picks how many for your refresh rate.</li>
-              <li><b>FSR 3.1</b> frame generation: any GPU. Not in menus or movies.</li>
+              <li><b>FSR 3.1</b> frame generation: any GPU. Not in menus, movies or with HDR output. Frames stay locked to your display's refresh, and with the Uncapped frame rate the game runs at half your refresh rate so every generated frame is shown.</li>
+              <li><b>FSR Frame Generation (AMD)</b>: AMD's own FSR SDK frame generation, Windows only. FSR 4 frame generation on Radeon RX 9000 with Windows 11, FSR 3.1 on other GPUs. A change applies when the game next starts. If it can't run on your PC, the game uses the built-in FSR 3.1 and the log says why. AMD Anti-Lag 2 is off while it runs. Nobody has played it yet, so tell us how it runs.</li>
+              <li>At a fixed frame rate, frame generation caps the game at your refresh rate divided by the multiplier, so no generated frame is dropped.</li>
               <li><b>NVIDIA Reflex</b> lowers input lag, and also keeps NVIDIA cards at their boost clocks.</li>
             </ul>
             <p>Frame generation feels best when the game already runs at 50–60 FPS or more.</p>
@@ -795,7 +810,7 @@ Loading: begins
           <div class="answer">
             <p>The first time the game shows something new, the engine builds its shaders, which can cause a short hitch. It only happens once: shaders are saved and built at the start the next time.</p>
             <ul>
-              <li>After an engine update the first start can take longer: it recompiles the saved shaders before the game starts, and the start says so. Updating from 0.9.41 to 0.9.42 keeps them.</li>
+              <li>After an engine update the first start can take longer: it recompiles the saved shaders before the game starts, and the start says so. 0.9.43 rebuilds them once, on its first start.</li>
               <li>A small <b>Building shaders</b> note shows in the corner while it happens. A stutter <i>with</i> the note is shader building; one <i>without</i> it is loading.</li>
               <li>You can share shaders: <span class="k">Settings › Shader catalog › Export catalog</span>, and a friend with the same kind of graphics card adds it with <span class="k">Add catalog</span>.</li>
             </ul>
@@ -878,6 +893,7 @@ Loading: begins
             <p>In <b>Controls</b>, click an action and press the new key or mouse button.</p>
             <p>The <b>+</b> next to an action adds another key or a combination like <b>Shift+E</b> or <b>Ctrl+Mouse4</b>, up to five per action. A combination wins over its plain key.</p>
             <p>Mouse sensitivity goes down to <b>-10</b> for high-DPI mice; each step below 0 is 20% slower. Mouse side buttons are bound in the <b>Elden Ring style</b> profile.</p>
+            <p>Controller: in the <b>Controller</b> column, <b>Dodge</b>, <b>Backstep</b> and <b>Sprint</b> can each get a pad button of their own, like the keyboard keys. They are unbound by default and need <b>PC controls</b> on; with PC controls off a bound button acts as Circle.</p>
           </div>
         </details>
         <details>
@@ -901,7 +917,7 @@ Loading: begins
   <section id="coop">
     <div class="sec-head">
       <h2 class="rv">Seamless co-op</h2>
-      <p class="lead rv" style="--d:80ms">Play the host's world together, up to 5 hunters, in a private encrypted room. Everyone in a room needs 0.9.42. It's still being worked on: expect bugs, and report them in #issues on our Discord.</p>
+      <p class="lead rv" style="--d:80ms">Play the host's world together, up to 5 hunters, in a private encrypted room. Everyone in a room needs 0.9.42 or newer. It's still being worked on: expect bugs, and report them in #issues on our Discord.</p>
     </div>
     <div class="qa rv" style="--d:120ms">
       <div class="qa-list">
@@ -915,7 +931,7 @@ Loading: begins
               <li>You don't need a Hunter's Dream account, open ports or Insight.</li>
               <li>Everything between you is encrypted. Nobody else can join unless the host opens the room.</li>
             </ul>
-            <p>Everyone needs <b>Lantern Engine 0.9.42</b> and Bloodborne 1.09. The room checks the version when you join, and a hunter on an older version is told to update.</p>
+            <p>Everyone needs <b>Lantern Engine 0.9.42</b> or newer and Bloodborne 1.09. The room checks the version when you join, and a hunter on an older version is told to update. 0.9.43 keeps the same rooms, invite codes and keys.</p>
           </div>
         </details>
         <details>
@@ -940,7 +956,7 @@ Loading: begins
               <li>The host picks <b>Start summon</b>. Guests pick <b>Send sign</b>.</li>
               <li>The screen shows how it goes: looking, found, connecting, connected. Guests arrive beside the host.</li>
             </ol>
-            <p>The bells work too: anywhere, even after the area boss is dead, and with no Insight. If summons give up too soon on a slow connection, raise <b>Summon sign timeout</b> on the Online page.</p>
+            <p>The bells work too: anywhere, even after the area boss is dead, and with no Insight. With free bells on, a summon no longer gives you +1 Insight. If summons give up too soon on a slow connection, raise <b>Summon sign timeout</b> on the Online page.</p>
           </div>
         </details>
         <details>
@@ -966,6 +982,9 @@ Loading: begins
               <li><b>Bosses:</b> killing a boss keeps the session. Every hunter in the fight gets the kill, the boss's drop and its rewards in their own save.</li>
               <li><b>Boss health</b> scales with the party as in the game: 2.5x with 3 cooperators, 3.0x with 4.</li>
               <li><b>Chalice dungeons</b> work with the party too.</li>
+              <li><b>Story doors</b>: when a guest takes a story warp, they wait up to 15 seconds for the host to travel instead of going alone.</li>
+              <li><b>Boss trophies</b>: a host's boss counts for you when you were in the fight, even after a slow load right after it. Trophies only count your own progress, never the host's world while you're in it.</li>
+              <li><b>Spectate and party wipe</b> (experimental, off by default) moved to the <b>Online</b> page, in the Seamless co-op group.</li>
             </ul>
           </div>
         </details>
@@ -979,6 +998,7 @@ Loading: begins
               <li>Guests keep their own stats and level.</li>
               <li>A guest's save keeps what was done while they were in the host's world. It never gets the host's earlier progress.</li>
               <li>An NPC is one character for the whole room: killing or angering one does it for everyone.</li>
+              <li><b>NPCs in the host's world</b>: NPCs and their quests are where the host has them, even for a quest you haven't reached. Quest steps you take there are not saved to your own world, and things that need Insight follow the host's Insight while you're there. Your own Insight never changes.</li>
             </ul>
             <p>Since 0.9.40 guests get the map's items and chests, their full enemy drops, and NPCs that talk through windows. We haven't played this with two hunters ourselves yet, so please tell us in #issues if a guest still misses items.</p>
           </div>
@@ -1014,6 +1034,8 @@ Loading: begins
               <li><b>"This room is full (5 of 5 hunters)"</b>: the room already holds the host and 4 cooperators. Someone has to leave first.</li>
               <li>A hunter whose game crashed or lost its connection shows as <b>reconnecting</b> and then <b>left</b>. Their place doesn't block anyone new, and quitting frees it at once.</li>
               <li>Press <b>Test</b> on the Online page to check the connection.</li>
+              <li>A new host got <b>"Open the Online page once…"</b> at Play in 0.9.42 unless an invite was pasted first. 0.9.43 makes your room when you press Play.</li>
+              <li>If a room's keys can't be set up, the game refuses to join or host and says why in the log.</li>
               <li>Use the <b>same gameplay mods</b> as the host, or none. Different mods can make items go missing for a guest.</li>
               <li>With <b>Play online</b> off, the game is fully offline: no room, and cheats work.</li>
               <li>To report a problem, post <b>both</b> players' logs (<span class="k">Game output › Export…</span>) in #issues, and say who was host.</li>
@@ -1143,6 +1165,31 @@ Loading: begins
     </div>
     <div class="bands">
       <div class="band rv" data-find>
+        <div class="q"><q>Characters and objects jitter when they move</q></div>
+        <div class="answer"><p>When the game ran short of motion data, it picked different objects every frame. It now picks the same ones, characters first.</p></div>
+        <span class="st tip">Try 0.9.43</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>The picture turns pixelated after lamp travel or a death</q></div>
+        <div class="answer"><p>The upscaler now starts fresh on lamp arrival and respawn, and frames it used to skip are handled. If you still see it, the log says when it happens: post it in #issues.</p></div>
+        <span class="st tip">Try 0.9.43</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Shadows, volumetric light or ray tracing switch off until I restart</q></div>
+        <div class="answer"><p>Each of them turned itself off for the rest of the session after one unexpected frame, for example at an area load. That frame is now skipped and they stay on, and the log says when it happens.</p></div>
+        <span class="st tip">Try 0.9.43</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>Lamp fog stays behind where a torch was</q></div>
+        <div class="answer"><p>Torches no longer leave lamp fog behind when they move, duplicate or die. By Randy Kim (@rhkim1292).</p></div>
+        <span class="st tip">Try 0.9.43</span>
+      </div>
+      <div class="band rv" data-find>
+        <div class="q"><q>"failed to acquire Bloodborne server information" on The Hunter's Dream</q><span class="who">Slow connections.</span></div>
+        <div class="answer"><p>The game now waits longer to connect, so a slow connection no longer shows it. By @RockingSisyphus. An expired sign-in now plays signed out, and a busy server is no longer read as signed out.</p></div>
+        <span class="st tip">Try 0.9.43</span>
+      </div>
+      <div class="band rv" data-find>
         <div class="q"><q>The game freezes a few seconds or minutes in and never comes back</q><span class="who">RTX 5070 Ti, RTX 3050, RX 6800.</span></div>
         <div class="answer"><p>On CPUs with 12 or more threads, two engine threads could wait for each other. That can't happen since 0.9.42. PCs that 0.9.40 or 0.9.41 switched to the PC memory model off after such a freeze get it back at the next start, and you can remove <code>LANTERN_MOTION_WORKER=0</code> from <span class="k">Settings › Extra variables</span> if you were told to add it.</p></div>
         <span class="st fixed">Fixed in 0.9.42</span>
@@ -1179,7 +1226,7 @@ Loading: begins
       </div>
       <div class="band rv" data-find>
         <div class="q"><q>Frame generation even pacing feels uneven at 3x</q></div>
-        <div class="answer"><p>Even pacing now uses the multiplier that actually reaches the screen, so a 3x setting that delivers 2x paces for 2x. This is only with <span class="k">Graphics › Frame generation: even pacing</span> on.</p></div>
+        <div class="answer"><p>Even pacing now uses the multiplier that actually reaches the screen, so a 3x setting that delivers 2x paces for 2x. This is only with <span class="k">Graphics › Frame generation: even pacing (Uncapped)</span> on.</p></div>
         <span class="st fixed">Fixed in 0.9.42</span>
       </div>
       <div class="band rv" data-find>
@@ -1369,7 +1416,13 @@ Loading: begins
           <li>Ultrawide: the image is still stretched for some players.</li>
           <li>Cainhurst: the noblewomen's skirts disappear.</li>
           <li>Crashes at random places on an i9-14900KF, with no pattern that points at the engine yet.</li>
-          <li>Linux, 6 GB graphics card: characters and objects can turn black after the first death until they are hit.</li>
+          <li>Linux, 6 GB graphics card: characters and objects can turn black after the first death until they are hit. 0.9.43 has a fix that hasn't been played on Linux yet.</li>
+          <li>Ray tracing can lag while you turn the camera, and some lamps don't cast ray traced shadows.</li>
+          <li>Linux: changing the screen aspect in the game menu crashes the game.</li>
+          <li>NVIDIA: a GPU crash in the full-screen pass, since 0.9.37. If it happens, play again and send the log from the next crash: it has more detail.</li>
+          <li>Seamless co-op: endless revive trading in a boss fight.</li>
+          <li>Frame drops in the Hunter's Nightmare.</li>
+          <li>New launcher texts may not be translated yet.</li>
         </ul>
       </div>
     </div>
@@ -1395,24 +1448,24 @@ Loading: begins
           <div data-ui class="upd" id="upd-ui">
             <p class="upd-label">Updates</p>
             <div class="upd-card">
-              <div class="upd-row"><div>Launcher updates<small>You have v0.9.42, the latest (v0.9.42)</small></div>
+              <div class="upd-row"><div>Launcher updates<small>You have v0.9.43, the latest (v0.9.43)</small></div>
                 <span class="upd-ctl"><span class="ui-btn"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1M13.5 2.5v3h-3"/></svg>Check now</span></span></div>
               <div class="upd-row col"><div>Update channel</div>
                 <div class="upd-seg" data-on="beta" role="group" aria-label="Update channel"><button type="button" data-ch="stable" aria-pressed="false">Stable</button><button type="button" data-ch="beta" aria-pressed="true">Beta</button></div></div>
               <div class="upd-row"><div>Check for updates at start</div><button type="button" class="ui-tog" aria-pressed="true" aria-label="Check for updates at start"></button></div>
-              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.42. 133 versions to choose from</small></div>
+              <div class="upd-row"><div>Version<small id="upd-say">You have v0.9.43. 100 versions to choose from</small></div>
                 <span class="upd-ctl">
-                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.42 · stable (installed)</span><span aria-hidden="true">⌄</span></button>
+                  <button type="button" class="ui-btn upd-select" id="upd-pick" aria-haspopup="listbox" aria-expanded="false"><span id="upd-val">v0.9.43 (installed)</span><span aria-hidden="true">⌄</span></button>
                   <button type="button" class="ui-btn" id="upd-install" disabled><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2v9M4.5 7.5 8 11l3.5-3.5M3 14h10"/></svg>Install</button>
                   <div class="upd-list" id="upd-list" role="listbox" aria-label="Version">
-                    <button type="button" role="option" aria-selected="true" data-v="v0.9.42 · stable (installed)">v0.9.42 · stable (installed)</button>
+                    <button type="button" role="option" aria-selected="true" data-v="v0.9.43 (installed)">v0.9.43 (installed)</button>
+                    <button type="button" role="option" aria-selected="false" data-v="v0.9.42 · stable">v0.9.42 · stable</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.41 · stable">v0.9.41 · stable</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.40 · stable">v0.9.40 · stable</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 31">v0.9.39 beta 31</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 30">v0.9.39 beta 30</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.39 beta 29">v0.9.39 beta 29</button>
                     <button type="button" role="option" aria-selected="false" data-v="v0.9.38 · stable">v0.9.38 · stable</button>
-                    <button type="button" role="option" aria-selected="false" data-v="v0.9.37 · stable">v0.9.37 · stable</button>
                   </div>
                 </span></div>
             </div>
@@ -1435,6 +1488,12 @@ Loading: begins
           <div class="answer">
             <p>Betas are test builds that come before a stable release. They have the newest fixes and features, and sometimes new bugs. Use one if a problem you have is fixed in it, or if you want to help test. Stay on stable if you just want to play.</p>
             <p>Your settings, saves, mods and logs are kept when you switch between beta and stable.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Why does the launcher ask about tested settings?</summary>
+          <div class="answer">
+            <p>Each beta asks once whether to use the settings it was tested with, because a beta can run differently with other settings. Your own are saved first. <span class="k">Settings › Beta tested settings › Back to mine</span> brings them back, and <span class="k">Use tested</span> applies the tested ones later.</p>
           </div>
         </details>
       </div>
@@ -1469,7 +1528,7 @@ Loading: begins
   </section>
 
   <section id="beta-current">
-    <div class="sec-head"><h2>No beta right now</h2><p class="lead">The newest version is the stable <a href="https://github.com/Awakenchan/LanternEngine/releases">0.9.42</a>, which has everything from the 0.9.39 betas and the fixes since 0.9.41; on the beta channel the launcher installs it too.</p></div>
+    <div class="sec-head"><h2>Current beta: none newer than 0.9.43</h2><p class="lead">What 0.9.43 changes since 0.9.42 (<a href="https://github.com/Awakenchan/LanternEngine/releases/tag/v0.9.43">release notes</a>).</p></div>
     <div class="qa" id="beta-qa" hidden>
       <div class="qa-list" id="beta-notes"></div>
       <div class="pane" aria-live="polite"></div>
@@ -1519,7 +1578,7 @@ Loading: begins
       </div>
       <div class="tile t-ver">
         <span>Newest version</span>
-        <b id="newest">0.9.42</b>
+        <b id="newest">0.9.43</b>
         <a href="https://github.com/Awakenchan/LanternEngine/releases" id="newest-link">Release notes</a>
       </div>
       <div class="tile t-word">
@@ -1837,7 +1896,7 @@ Loading: begins
       var v = o.getAttribute('data-v');
       document.getElementById('upd-val').textContent = v;
       install.disabled = /installed/.test(v);
-      updSay.textContent = install.disabled ? 'You have v0.9.42. 133 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.42.';
+      updSay.textContent = install.disabled ? 'You have v0.9.43. 100 versions to choose from' : 'Install puts ' + v.replace(' · stable', '') + ' in place of v0.9.43.';
       openList(false);
     });
   });

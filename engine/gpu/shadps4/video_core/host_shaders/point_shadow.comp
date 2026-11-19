@@ -3,14 +3,20 @@
 #version 450
 #extension GL_EXT_scalar_block_layout : require
 
+#ifdef LIGHT_RGBA16F
+#define LIGHT_FORMAT rgba16f
+#else
+#define LIGHT_FORMAT r11f_g11f_b10f
+#endif
+
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(scalar, set = 0, binding = 0) readonly buffer Data { uint d[]; } data;
 layout(set = 0, binding = 1) uniform sampler2D depth_tex;
-layout(set = 0, binding = 2, r11f_g11f_b10f) uniform image2D cur0;
-layout(set = 0, binding = 3, r11f_g11f_b10f) uniform readonly image2D snap0;
-layout(set = 0, binding = 4, r11f_g11f_b10f) uniform image2D cur1;
-layout(set = 0, binding = 5, r11f_g11f_b10f) uniform readonly image2D snap1;
+layout(set = 0, binding = 2, LIGHT_FORMAT) uniform image2D cur0;
+layout(set = 0, binding = 3, LIGHT_FORMAT) uniform readonly image2D snap0;
+layout(set = 0, binding = 4, LIGHT_FORMAT) uniform image2D cur1;
+layout(set = 0, binding = 5, LIGHT_FORMAT) uniform readonly image2D snap1;
 
 layout(push_constant) uniform Constants {
     uint first_light;
@@ -111,9 +117,11 @@ void main() {
         return;
     }
     const vec3 s0 = imageLoad(snap0, px).rgb;
-    const vec3 c0 = imageLoad(cur0, px).rgb;
+    const vec4 c0v = imageLoad(cur0, px);
+    const vec3 c0 = c0v.rgb;
     const vec3 s1 = imageLoad(snap1, px).rgb;
-    const vec3 c1 = imageLoad(cur1, px).rgb;
+    const vec4 c1v = imageLoad(cur1, px);
+    const vec3 c1 = c1v.rgb;
     if (all(lessThanEqual(c0, s0)) && all(lessThanEqual(c1, s1))) {
         return;
     }
@@ -166,6 +174,6 @@ void main() {
     float k = strength * fade;
     float scale = mix(1.0, v, k);
 
-    imageStore(cur0, px, vec4(s0 + max(c0 - s0, vec3(0.0)) * scale, 1.0));
-    imageStore(cur1, px, vec4(s1 + max(c1 - s1, vec3(0.0)) * scale, 1.0));
+    imageStore(cur0, px, vec4(s0 + max(c0 - s0, vec3(0.0)) * scale, c0v.a));
+    imageStore(cur1, px, vec4(s1 + max(c1 - s1, vec3(0.0)) * scale, c1v.a));
 }

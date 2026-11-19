@@ -70,6 +70,26 @@ int main() {
         }
     }
 
+    Expect(FixedRateLimit(90, true, 2, 90) == 45, "fixed 90 on 90 Hz with 2x: the game at 45, 90 shown");
+    Expect(FixedRateLimit(120, true, 2, 144) == 72, "fixed 120 on 144 Hz with 2x: the game at 72");
+    Expect(FixedRateLimit(60, true, 2, 144) == 60, "a fixed rate under the refresh share stays");
+    Expect(FixedRateLimit(120, true, 3, 240) == 80, "3x on 240 Hz: 80");
+    Expect(FixedRateLimit(120, true, 4, 60) == 120, "a share under 20 FPS is not used");
+    Expect(FixedRateLimit(90, true, 1, 90) == 90, "nothing generated: the fixed rate");
+    Expect(FixedRateLimit(90, false, 2, 90) == 90, "frame generation off: the fixed rate");
+    Expect(FixedRateLimit(90, true, 2, 0) == 90, "unknown refresh: the fixed rate");
+    for (std::uint32_t base : {30u, 45u, 60u, 90u, 120u, 144u}) {
+        for (std::uint32_t refresh : {60u, 75u, 90u, 120u, 144u, 165u, 240u}) {
+            for (int delivered = 2; delivered <= 4; ++delivered) {
+                const std::uint32_t game = FixedRateLimit(base, true, delivered, refresh);
+                const bool share_used = refresh / std::uint32_t(delivered) >= 20;
+                Expect(game <= base, "never faster than the chosen rate");
+                Expect(!share_used || game * std::uint32_t(delivered) <= refresh,
+                       "shown frames never outrun the display");
+            }
+        }
+    }
+
     if (failures) {
         std::printf("frame-gen-cap-test: %d failure(s)\n", failures);
         return 1;

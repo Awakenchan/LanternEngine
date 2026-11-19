@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "render_guard.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "engine_state.h"
 #include <atomic>
@@ -10,8 +11,7 @@ namespace {
 #define GUEST_ABI __attribute__((sysv_abi))
 
 constexpr std::uint64_t kBindTarget = 0x25c2100;
-const std::uint8_t kBindPrologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                      0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0x68, 0x01, 0x00, 0x00};
+constexpr const auto& kBindPrologue = HookEntries::kRenderGuardBindPrologue;
 constexpr std::uint64_t kSurfaceWidth = 0x259f870;
 constexpr std::size_t kWidthSlot = 0x48, kSurface = 0x40;
 
@@ -28,7 +28,7 @@ bool Surfaceless(std::uint64_t target) {
     return Read(target + kSurface, &surface) && !surface;
 }
 
-GUEST_ABI std::int64_t BindTarget(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BindTarget(std::uint64_t, std::uint64_t* saved) noexcept {
     const std::uint64_t depth = saved[4], color = saved[3];
     if (!color || (!Surfaceless(depth) && !Surfaceless(color))) return 0;
     const int n = g_skipped.fetch_add(1);
@@ -41,12 +41,15 @@ GUEST_ABI std::int64_t BindTarget(std::uint64_t, const std::uint64_t* saved) {
 
 bool Install(std::uint8_t* image, std::size_t size) {
     Hook hook;
-    if (!Prepare(hook, image, size, kBindTarget - 0x400000, kBindPrologue, BindTarget)) {
+    if (!Prepare(hook, image, size, kBindTarget - 0x400000, SiteKind::Entry, kBindPrologue, BindTarget)) {
         host_log("Render guard off: the render-target bind differs from 1.09");
         return false;
     }
     g_width = reinterpret_cast<std::uint64_t>(image) + (kSurfaceWidth - 0x400000);
-    Commit(std::span{&hook, 1});
+    if (const WriteResult result = Commit(std::span{&hook, 1}); result != WriteResult::Applied) {
+        host_log("Render guard off: the render-target bind could not be written (%s)", Describe(result));
+        return false;
+    }
     return true;
 }
 }

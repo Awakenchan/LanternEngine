@@ -175,6 +175,12 @@ namespace BloodborneLauncher.Core
                 Settings.Set("game_dir", guess);
             }
 
+            if (Paths.IsPortDir(Paths.PortDir) && OnlineSettings.MigrateIniOnce(Settings, Paths.IniPath) is var migration &&
+                migration.State != OnlineSettings.IniMigration.AlreadyDone)
+            {
+                ReportOnlineMigration(migration);
+                if (migration.Settled) SaveSoon();
+            }
             Ini.Load();
             // The DLSS model moved from the launcher's settings to lantern.ini (dlss_preset), where the
             // in-game menu changes it live: an older launcher's choice is carried over once.
@@ -184,8 +190,21 @@ namespace BloodborneLauncher.Core
                 Settings.Set("dlss_preset", "k");
                 SaveSoon();
             }
+            if (Paths.IsPortDir(Paths.PortDir) && Ini.Raw("dlss_preset")?.ToLowerInvariant() is "e" or "f")
+            {
+                Ini.Set("dlss_preset", "auto");
+                SaveSoon();
+            }
             _iniWarned = false;
             PortChanged?.Invoke();
+        }
+
+        private void ReportOnlineMigration(OnlineSettings.IniMigrationResult result)
+        {
+            if (result.State == OnlineSettings.IniMigration.Migrated)
+                Log(L.T("The SuperMedo and shadNet online settings were removed from lantern.ini: online play is The Hunter's Dream's or seamless co-op."), LogLevel.Info);
+            else if (result.State is OnlineSettings.IniMigration.Unreadable or OnlineSettings.IniMigration.WriteFailed)
+                Log(L.F($"lantern.ini could not be updated for this version's online settings ({result.Detail}); it is tried again at the next start."), LogLevel.Warn);
         }
 
         private bool _settingsRedraw;
@@ -194,6 +213,7 @@ namespace BloodborneLauncher.Core
         {
             var changed = Settings.ReloadIfChanged();
             if (changed) SettingsReloaded?.Invoke();
+            changed |= Ini.ReloadIfChanged();
             changed |= _settingsRedraw;
             _settingsRedraw = false;
             return changed;

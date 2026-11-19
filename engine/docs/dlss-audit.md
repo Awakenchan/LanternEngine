@@ -19,10 +19,12 @@ Streamline's `ProgrammingGuide.md`, `ProgrammingGuideDLSS.md`, `ProgrammingGuide
 | All input jittered | 8.1: "all input to DLSS is properly jittered", secondary passes too | Sprites of 4-6 indices are not; full-screen lighting reconstructs from the unjittered camera | **Wrong, not fixed** |
 | Exposure | 3.9, 3.10: exposure texture preferred, auto-exposure allowed | HDR: auto-exposure; LDR: none or the menu's | Correct |
 | Pre-exposure | 3.9.2: only if the engine uses one | Not used | Not applicable |
-| Reset | 3.13: first frame after a major transition | Setting changes and frames without the upscaler; no camera cuts | **Wrong, fixed**: a jump of half the render width in a frame resets too |
+| Reset | 3.13: first frame after a major transition | Setting changes and frames without the upscaler; no camera cuts | **Wrong, fixed**: a jump of half the render width in a frame resets too, and so do a load request clearing (lamp arrival, respawn, also with fast loading) and seamless co-op's revive and move to safe ground, which have no loading screen |
 | Mip bias | 3.5: log2(render/display) - 1, may be eased | Same on G-buffer passes, toggle and slider | Correct |
-| Bias mask | 3.15: "should not be used", only preset F reads it | Sent with every preset when the reactive mask is on | **Wrong, fixed**: preset F only |
-| Presets | 3.12: A-D removed, G-I reserved, E and F deprecated | Menu: auto, J, K, L, M, E, F, default | Correct; E and F still offered |
+| Bias mask | 3.15: "should not be used", only preset F reads it | Sent with every preset when the reactive mask is on | **Wrong, fixed**: never sent; F is no longer offered |
+| Presets | 3.12: A-D removed, G-I reserved, E and F deprecated; K for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance, K throughout on RTX 20 and 30 | Menu: auto, J, K, L, M, default; a saved E or F runs auto; auto follows NVIDIA per mode and GPU generation (device ID below 0x2600: RTX 20 and 30) | Correct |
+| Colour input | No NaN or Inf: one spreads through the history | Motion vectors cleaned; the HDR scene colour checked for NaN and Inf in the motion pass, such pixels written black | Correct |
+| Command buffer state | Vulkan: the evaluate call may change pipeline, descriptors and push constants | Every draw and dispatch binds its own; dynamic state is marked dirty after the evaluate | Correct |
 | Application or project ID | 2.5, 5.2.1: NVIDIA's ID, else project ID with engine type and version | NVIDIA's sample ID 231313132 | **Wrong, not fixed by default**: `BB_DLSS_PROJECT_ID=1` uses the project ID; see Check boots |
 | Render sizes | 3.2.2: optimal settings query | Own sizes, multiples of 4 (1708 where 66.7% is 1707) | Deviation, not fixed |
 | Resource states | 3.4: inputs sampled, output storage | Same | Correct |

@@ -17,6 +17,8 @@
 
 #include "bbport_copy.h"
 #include "bbport_platform.h"
+#include "lantern_meter.h"
+#include "video_core/renderer_vulkan/vk_gpu_busy.h"
 #include "bbport_sections.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_toggles.h"
@@ -28,11 +30,59 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_optiscaler.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_submit_result.h"
 #include "bbport_threads.h"
 
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
+
+std::atomic<u32>& SubmitResult::EngineReports() {
+    static std::atomic<u32> reports{0};
+    return reports;
+}
+
+void SubmitResult::EngineSink::DeviceLost(Site site) {
+    Breadcrumbs::ReportDeviceLost(SiteName(site));
+}
+
+void SubmitResult::EngineSink::Report(Site site, Outcome outcome, std::int32_t code) {
+    LOG_CRITICAL(Render_Vulkan,
+                 "GPU {} failed: {} ({}, VkResult {}): the engine stops (exit code {}); the GPU "
+                 "did not take this work, and everything waiting for it would never finish",
+                 SiteName(site), vk::to_string(static_cast<vk::Result>(code)),
+                 OutcomeName(outcome), code, kStopExitCode);
+}
+
+SubmitResult::RetryCounters& SubmitResult::EngineRetries() {
+    static RetryCounters counters;
+    return counters;
+}
+
+void SubmitResult::EngineSink::Retry(Site site, Outcome first, Relief relief, std::int32_t code,
+                                     const RetryCounters& counters) {
+    const char* what =
+        relief == Relief::Stuck ? "the GPU did not finish its work in 2 s, not retried"
+        : relief != Relief::Relieved ? "waiting for the GPU failed, not retried"
+        : code == kSuccess
+            ? "waited for the GPU to finish its work, retried once: submitted"
+            : "waited for the GPU to finish its work, retried once: failed again";
+    LOG_WARNING(Render_Vulkan,
+                "GPU {} {} (LANTERN_SUBMIT_OOM_RETRY): {}; VRAM counts as full for the next 30 s; "
+                "retries {}, recovered {} (lines after {} not printed)",
+                SiteName(site), OutcomeName(first), what,
+                counters.retries.load(std::memory_order_relaxed),
+                counters.recovered.load(std::memory_order_relaxed), kMaxRetryLines);
+}
+
+void SubmitResult::EngineSink::Stuck(Site site) {
+    Breadcrumbs::ReportStuck(SiteName(site));
+}
+
+void SubmitResult::EngineSink::Stop(Site, Outcome) {
+    assert_fail_impl();
+    BbPlatform::TerminateProcessNow(kStopExitCode);
+}
 
 namespace {
 // bbport: ProducerScope state of this thread: the producer function it is in (any scheduler).
@@ -117,10 +167,16 @@ u32 RecordingThreadCount() {
     return available >= 12 ? 3 : available >= 8 ? 2 : 1;
 }
 
-vk::CommandBuffer BeginCommandBuffer(CommandPool& pool) {
+vk::CommandBuffer BeginCommandBuffer(const Scheduler* owner, CommandPool& pool) {
     const vk::CommandBuffer cmdbuf = pool.Commit();
     Check(cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+    GpuBusy::Begin(owner, cmdbuf);
     return cmdbuf;
+}
+
+void EndCommandBuffer(const Scheduler* owner, vk::CommandBuffer cmdbuf) {
+    GpuBusy::End(owner, cmdbuf);
+    Check(cmdbuf.end());
 }
 
 } // namespace
@@ -171,6 +227,9 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
         if (async_submit) {
             std::printf("GPU: submissions go out from the recording threads (BB_ASYNC_SUBMIT)\n");
         }
+    }
+    if (const char* retry = std::getenv("LANTERN_SUBMIT_OOM_RETRY")) {
+        oom_retry = retry[0] == '1';
     }
     AllocateWorkerCommandBuffers();
     priority_pending_ops_thread =
@@ -609,7 +668,7 @@ void Scheduler::MaybeSplit() {
     }
     if (async_submit) {
         // Its recording thread ends the segment's command buffer (the pool is that thread's).
-        Record([](vk::CommandBuffer cmdbuf) { Check(cmdbuf.end()); });
+        Record([this](vk::CommandBuffer cmdbuf) { EndCommandBuffer(this, cmdbuf); });
     }
     HandOver();
     ++current_segment;
@@ -758,6 +817,7 @@ void Scheduler::SyncRecording() {
         return;
     }
     KickRecording(true);
+    BbStats::sync_recording_calls.fetch_add(1, std::memory_order_relaxed);
     BbStats::WaitTimer timer{BbStats::sync_recording_ns};
     std::unique_lock lk{recorder_mutex};
     recorder_idle_cv.wait(lk, [this] { return RecordingIdle(); });
@@ -784,14 +844,14 @@ void Scheduler::EnterDirectMode() {
             batch->handed[current_segment] == 0 && full_chunks.empty() && CurrentChunk().Empty();
         if (!untouched) {
             // Its recording thread ends the segment's command buffer (the pool is that thread's).
-            Record([](vk::CommandBuffer cmdbuf) { Check(cmdbuf.end()); });
+            Record([this](vk::CommandBuffer cmdbuf) { EndCommandBuffer(this, cmdbuf); });
             HandOver();
             ++current_segment;
         }
         if (!direct_pool) {
             direct_pool = std::make_unique<CommandPool>(instance, &work_semaphore);
         }
-        current_cmdbuf = BeginCommandBuffer(*direct_pool);
+        current_cmdbuf = BeginCommandBuffer(this, *direct_pool);
         batch->segments[current_segment] = current_cmdbuf;
         segment_bytes = 0;
         direct_mode = true;
@@ -804,7 +864,7 @@ void Scheduler::EnterDirectMode() {
     // The recording threads are idle: this thread may use the segment's command pool.
     auto& cmdbuf = batch->segments[current_segment];
     if (!cmdbuf) {
-        cmdbuf = BeginCommandBuffer(*workers[current_segment % workers.size()]->pool);
+        cmdbuf = BeginCommandBuffer(this, *workers[current_segment % workers.size()]->pool);
     }
     current_cmdbuf = cmdbuf;
 }
@@ -815,7 +875,7 @@ void Scheduler::LeaveDirectSegment() {
         is_rendering = false;
         resume_rendering = true;
     }
-    Check(current_cmdbuf.end());
+    EndCommandBuffer(this, current_cmdbuf);
     current_cmdbuf = vk::CommandBuffer{};
     direct_mode = false;
     direct_segment = false;
@@ -841,6 +901,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
         return !worker.queue.empty() || OrderedReady();
     };
     while (true) {
+        Lantern::Meter::NotePlace();
         // The thread of the segment being recorded spins briefly before sleeping: its next
         // chunk usually follows within microseconds, and a sleeping thread costs the producer
         // a wake-up syscall per kick. With few hardware threads (Steam Deck: 8) the spin would
@@ -913,7 +974,7 @@ void Scheduler::RecorderThread(std::stop_token stoken, u32 index) {
         // submission, after SyncRecording(). Only this thread uses the pool meanwhile.
         auto& cmdbuf = chunk->batch->segments[chunk->segment];
         if (!cmdbuf) {
-            cmdbuf = BeginCommandBuffer(*worker.pool);
+            cmdbuf = BeginCommandBuffer(this, *worker.pool);
         }
         chunk->Execute(cmdbuf);
         {
@@ -1008,6 +1069,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
         };
         current_cmdbuf = command_pool.Commit();
         Check(current_cmdbuf.begin(begin_info));
+        GpuBusy::Begin(this, current_cmdbuf);
         // bbport: the first segment (worker 0, whose pool this is) of the next submission.
         if (!batch) {
             batch = AcquireBatch();
@@ -1030,6 +1092,26 @@ void Scheduler::AllocateWorkerCommandBuffers() {
         new (profiler_scope) tracy::VkCtxScope{profiler_ctx, &scope_loc, current_cmdbuf, true};
     }
 #endif
+}
+
+SubmitResult::Relief Scheduler::RelieveSubmitMemory() {
+    return SubmitResult::Relieve(
+        submitted_tick.load(std::memory_order_acquire),
+        [this](u64 tick) {
+            const vk::Semaphore timeline = work_semaphore.Handle();
+            const vk::SemaphoreWaitInfo wait_info = {
+                .semaphoreCount = 1,
+                .pSemaphores = &timeline,
+                .pValues = &tick,
+            };
+            const vk::Result result =
+                instance.GetDevice().waitSemaphores(&wait_info, SubmitResult::kReliefWaitNs);
+            if (result == vk::Result::eSuccess) {
+                work_semaphore.Refresh();
+            }
+            return static_cast<std::int32_t>(result);
+        },
+        SubmitResult::EngineRetries());
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
@@ -1077,7 +1159,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         recorded_submissions.fetch_add(1, std::memory_order_relaxed);
     }
     for (u32 i = 0; i < num_cmdbufs; ++i) {
-        Check(cmdbufs[i].end());
+        EndCommandBuffer(this, cmdbufs[i]);
     }
 
     const vk::Semaphore timeline = work_semaphore.Handle();
@@ -1106,15 +1188,23 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
-    for (auto& operation : info.before_submit) {
-        operation();
+    SubmitResult::EngineSink sink;
+    SubmitResult::Recovery recovery{oom_retry, static_cast<bool>(info.fence),
+                                    SubmitResult::EngineRetries(),
+                                    [this] { return RelieveSubmitMemory(); }};
+    const SubmitResult::Outcome outcome = SubmitResult::SubmitAfter(
+        info.before_submit, SubmitResult::Site::QueueSubmit,
+        [&](SubmitResult::Attempt attempt) {
+            if (attempt == SubmitResult::Attempt::First) {
+                ImGui::Core::TextureManager::Submit();
+            }
+            return static_cast<std::int32_t>(
+                instance.GetGraphicsQueue().submit(submit_info, info.fence));
+        },
+        recovery, SubmitResult::EngineReports(), sink);
+    if (outcome != SubmitResult::Outcome::Submitted) {
+        return;
     }
-    ImGui::Core::TextureManager::Submit();
-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-    if (submit_result == vk::Result::eErrorDeviceLost) {
-        Breadcrumbs::ReportDeviceLost("submit");
-    }
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
     submitted_tick.store(signal_value, std::memory_order_release);
     submitted_tick.notify_all();
 
@@ -1139,12 +1229,12 @@ void Scheduler::SubmitAsync(SubmitInfo& info) {
     // Every segment's command buffer is ended by its recording thread (the pool is its own);
     // MaybeSplit ended the earlier ones. A direct segment is this thread's.
     if (direct_segment) {
-        Check(current_cmdbuf.end());
+        EndCommandBuffer(this, current_cmdbuf);
         current_cmdbuf = vk::CommandBuffer{};
         direct_mode = false;
         direct_segment = false;
     } else {
-        Record([](vk::CommandBuffer cmdbuf) { Check(cmdbuf.end()); });
+        Record([this](vk::CommandBuffer cmdbuf) { EndCommandBuffer(this, cmdbuf); });
     }
     // Guest memory copies into staging this submission reads: on the copy threads by then.
     BbCopy::FlushBatch();
@@ -1186,14 +1276,20 @@ void Scheduler::SubmitAsync(SubmitInfo& info) {
         };
         {
             std::scoped_lock lk{submit_mutex};
-            for (auto& operation : info.before_submit) {
-                operation();
+            SubmitResult::EngineSink sink;
+            SubmitResult::Recovery recovery{oom_retry, static_cast<bool>(info.fence),
+                                            SubmitResult::EngineRetries(),
+                                            [this] { return RelieveSubmitMemory(); }};
+            const SubmitResult::Outcome outcome = SubmitResult::SubmitAfter(
+                info.before_submit, SubmitResult::Site::QueueSubmitAsync,
+                [&](SubmitResult::Attempt) {
+                    return static_cast<std::int32_t>(
+                        instance.GetGraphicsQueue().submit(submit_info, info.fence));
+                },
+                recovery, SubmitResult::EngineReports(), sink);
+            if (outcome != SubmitResult::Outcome::Submitted) {
+                return;
             }
-            const auto result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-            if (result == vk::Result::eErrorDeviceLost) {
-                Breadcrumbs::ReportDeviceLost("submit");
-            }
-            ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during submit");
         }
         submitted_tick.store(signal_value, std::memory_order_release);
         submitted_tick.notify_all();

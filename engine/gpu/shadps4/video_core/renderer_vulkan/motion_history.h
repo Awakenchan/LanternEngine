@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -11,6 +12,25 @@
 #include <vector>
 
 namespace Vulkan::Motion {
+
+#ifdef LANTERN_MOTION_HISTORY_MUTANTS
+enum class Mutant : int {
+    None = 0,
+    NoIncumbency,
+    NoCharacterPriority,
+    PerDraw,
+    StillKeepsReservation,
+    RevalidateBurst,
+    kCount
+};
+inline int g_mutant = 0;
+inline bool Is(Mutant m) {
+    return g_mutant == int(m);
+}
+#define LANTERN_MH_MUTANT(name) (::Vulkan::Motion::Is(::Vulkan::Motion::Mutant::name))
+#else
+#define LANTERN_MH_MUTANT(name) false
+#endif
 
 struct VertexRange {
     uint32_t first{}, count{};
@@ -72,6 +92,12 @@ public:
         uint64_t hits{}, scans{}, stale{};
     } stats;
 
+    static uint64_t Phase(const Key& key) {
+        if (LANTERN_MH_MUTANT(RevalidateBurst)) {
+            return 0;
+        }
+        return (uint64_t(KeyHash{}(key)) >> 32) % Revalidate;
+    }
     template <class Scan>
     Result Get(const Key& key, uint64_t frame, Scan&& scan) {
         auto& entry = entries[key];
@@ -87,7 +113,7 @@ public:
             ++stats.stale; // the cached result was wrong for up to Revalidate frames
         }
         entry.result = fresh;
-        entry.verified = frame;
+        entry.verified = entry.valid ? frame : frame - Phase(key);
         entry.valid = true;
         return entry.result;
     }
@@ -229,8 +255,11 @@ public:
     };
     struct Stats {
         uint64_t draws{}, stored{}, loaded{}, unmatched{}, exhausted{}, invalid{}, still{},
-            held{};
+            held{}, exhausted_characters{};
     } stats;
+    struct Totals {
+        uint64_t draws{}, exhausted{}, exhausted_characters{}, exhausted_vertices{};
+    } totals;
 
     // A small skeleton (weapon, prop; most are static world pieces) only needs history
     // while its bone palette changes: with last frame's bones its motion is the camera's.
@@ -270,7 +299,12 @@ public:
             state.hold = prev->hold - 1;
             ++stats.held;
         }
-        gate_current.emplace(key, state);
+        if (!moving && prev && !LANTERN_MH_MUTANT(StillKeepsReservation)) {
+            Release(prev->object);
+        }
+        GateState& slot = gate_current[key];
+        slot = state;
+        gate_slot = moving ? &slot : nullptr;
         stats.still += moving ? 0 : 1;
         return moving;
     }
@@ -282,12 +316,25 @@ public:
         gate_previous.swap(gate_current);
         gate_current.clear();
         gate_occurrences.clear();
+        gate_slot = nullptr;
+        prev_objects.swap(objects);
+        objects.clear();
+        object_ids.clear();
+        pending = {};
+        for (auto& object : prev_objects) {
+            object.tier = Tier(object.character, object.admitted);
+            object.claimed = false;
+            pending[object.tier] += object.demand;
+        }
+        promised = 0;
         ++frame;
         used = 0;
     }
 
-    Allocation Prepare(const Draw& draw) {
+    Allocation Prepare(const Draw& draw, uint64_t object = 0, bool character = false) {
+        GateState* const gate = std::exchange(gate_slot, nullptr);
         ++stats.draws;
+        ++totals.draws;
         Key key{draw, 0};
         key.occurrence = occurrences[key]++;
         const uint64_t count = uint64_t(draw.vertices.count) * draw.instances;
@@ -296,33 +343,103 @@ public:
             ++stats.invalid;
             return {};
         }
-        const auto* prev = previous.find(key);
+        const Slot* prev = previous.find(key);
         Allocation result{0, 0, draw.vertices.count, draw.instances,
                           draw.vertices.first, draw.first_instance};
-        if (prev) {
-            result.load = *prev;
+        if (prev && prev->store) {
+            result.load = prev->store;
             ++stats.loaded;
         } else {
             ++stats.unmatched;
         }
-        if (count <= capacity - used) {
+        if (!object || LANTERN_MH_MUTANT(PerDraw)) {
+            object = uint64_t(Hash{}(key)) | (uint64_t(1) << 63);
+        }
+        const ObjectState* last = prev && prev->object < prev_objects.size()
+                                      ? &prev_objects[prev->object]
+                                      : nullptr;
+        if (last) {
+            Release(prev->object);
+        }
+        uint32_t index;
+        if (const uint32_t* found = object_ids.find(object)) {
+            index = *found;
+        } else {
+            index = uint32_t(objects.size());
+            object_ids.emplace(object, index);
+            ObjectState& fresh = objects.emplace_back();
+            fresh.character = character && !LANTERN_MH_MUTANT(NoCharacterPriority);
+            const bool incumbent = last && last->admitted && !LANTERN_MH_MUTANT(NoIncumbency);
+            const uint64_t expected = last ? std::max(last->demand, count) : count;
+            const uint32_t tier = Tier(fresh.character, incumbent);
+            uint64_t ahead = 0;
+            for (uint32_t t = 0; t < tier; ++t) {
+                ahead += pending[t];
+            }
+            fresh.admitted = uint64_t(used) + promised + expected + ahead <= capacity;
+            if (fresh.admitted) {
+                fresh.remaining = expected;
+                promised += expected;
+            }
+        }
+        ObjectState& owner = objects[index];
+        owner.demand += count;
+        if (owner.admitted) {
+            const uint64_t charge = std::min(count, owner.remaining);
+            owner.remaining -= charge;
+            promised -= charge;
+        }
+        if (owner.admitted && count <= capacity - used) {
             result.store = 1 + uint32_t(frame & 1) * capacity + used;
             used += uint32_t(count);
-            current.emplace(key, result.store);
             ++stats.stored;
         } else {
             ++stats.exhausted;
+            ++totals.exhausted;
+            totals.exhausted_vertices += count;
+            if (character) {
+                ++stats.exhausted_characters;
+                ++totals.exhausted_characters;
+            }
+        }
+        current.emplace(key, Slot{result.store, index});
+        if (gate) {
+            gate->object = index;
         }
         return result;
     }
 
     uint32_t Used() const { return used; }
+    uint32_t Capacity() const { return capacity; }
 
 private:
+    static constexpr uint32_t NoObject = UINT32_MAX;
+    static uint32_t Tier(bool character, bool incumbent) {
+        return (character ? 0u : 2u) + (incumbent ? 0u : 1u);
+    }
+    void Release(uint32_t index) {
+        if (index >= prev_objects.size() || prev_objects[index].claimed) {
+            return;
+        }
+        ObjectState& object = prev_objects[index];
+        object.claimed = true;
+        pending[object.tier] -= object.demand;
+    }
     struct Key {
         Draw draw;
         uint32_t occurrence;
         bool operator==(const Key&) const = default;
+    };
+    struct Slot {
+        uint32_t store{}, object{NoObject};
+    };
+    struct ObjectState {
+        uint64_t demand{}, remaining{};
+        uint32_t tier{};
+        bool character{}, admitted{}, claimed{};
+    };
+    struct IdHash {
+        size_t operator()(uint64_t id) const { return size_t(id ^ (id >> 32)); }
     };
     struct Hash {
         size_t operator()(const Key& key) const {
@@ -338,7 +455,12 @@ private:
     uint32_t capacity{}, used{};
     uint32_t hold{}; ///< frames a small skeleton keeps its history after a change (SetHold)
     uint64_t frame{};
-    FlatMap<Key, uint32_t, Hash> previous, current, occurrences;
+    FlatMap<Key, Slot, Hash> previous, current;
+    FlatMap<Key, uint32_t, Hash> occurrences;
+    std::vector<ObjectState> objects, prev_objects;
+    FlatMap<uint64_t, uint32_t, IdHash> object_ids;
+    std::array<uint64_t, 4> pending{};
+    uint64_t promised{};
     struct GateHash {
         size_t operator()(const GateKey& key) const {
             uint64_t h = 0;
@@ -351,9 +473,11 @@ private:
     struct GateState {
         uint64_t palette{};
         uint32_t hold{}; ///< further frames this draw keeps its history (Moving)
+        uint32_t object{NoObject};
     };
     FlatMap<GateKey, GateState, GateHash> gate_previous, gate_current;
     FlatMap<GateKey, uint32_t, GateHash> gate_occurrences;
+    GateState* gate_slot{};
 };
 
 } // namespace Vulkan::Motion

@@ -3,8 +3,22 @@
 #include <cstdio>
 #include "gpu/shadps4/video_core/renderer_vulkan/ui_composition.h"
 
+namespace {
+enum class Format { eUndefined, eR8G8B8A8Unorm, eR8G8B8A8Srgb, eB8G8R8A8Unorm, eB8G8R8A8Srgb, eR16G16B16A16Sfloat, eA2B10G10R10UnormPack32 };
+}
+
 int main() {
     using namespace Vulkan::UiComposition;
+    static_assert(FrameFormat(Format::eR8G8B8A8Unorm) && FrameFormat(Format::eR8G8B8A8Srgb));
+    static_assert(!FrameFormat(Format::eUndefined) && !FrameFormat(Format::eB8G8R8A8Unorm) &&
+                  !FrameFormat(Format::eB8G8R8A8Srgb) && !FrameFormat(Format::eR16G16B16A16Sfloat) &&
+                  !FrameFormat(Format::eA2B10G10R10UnormPack32));
+    for (const auto format : {Format::eUndefined, Format::eR8G8B8A8Unorm, Format::eR8G8B8A8Srgb, Format::eB8G8R8A8Unorm,
+                              Format::eB8G8R8A8Srgb, Format::eR16G16B16A16Sfloat, Format::eA2B10G10R10UnormPack32}) {
+        const bool finished_frame = FrameFormat(format);
+        const bool ui_draw = format == Format::eR8G8B8A8Unorm || format == Format::eR8G8B8A8Srgb;
+        assert(finished_frame == ui_draw);
+    }
     assert(Choose(true, true, false, true) == Background::Copy);
     assert(Choose(true, true, false, false) == Background::Copy);
     assert(Choose(true, true, true, true) == Background::Temporal);
@@ -66,5 +80,5 @@ int main() {
     assert(!SceneHasUiViewportSize(2560, 1440, ParseUiSize(nullptr)));
     assert(!SceneHasUiViewportSize(2296, 960, ParseUiSize("3360x1440")));
     assert(!SceneHasUiViewportSize(3440, 1440, ParseUiSize("3360x1440")));
-    std::puts("UI composition: PASS (menu without camera, HUD, FSR off, viewport scaling)");
+    std::puts("UI composition: PASS (menu without camera, HUD, FSR off, viewport scaling, frame formats)");
 }

@@ -15,6 +15,7 @@ namespace BloodborneLauncher.Views
         private readonly TextBlock _changedHint;
         private readonly Control _enginePreset;
         private readonly Dictionary<string, ToggleSwitch> _features = new();
+        private readonly Dictionary<string, (string Title, ToggleSwitch Toggle)> _toggles = new();
         private bool _syncing;
 
         public EnginePage() : base(L.T("Engine"), L.T("The engine preset, its features and every engine switch, in one place."))
@@ -31,28 +32,28 @@ namespace BloodborneLauncher.Views
                 L.T("New is the current engine. Legacy runs it the way 0.9.33 did: try it if the game crashes or draws something wrong"),
                 EnginePreset.Choices, () => EnginePreset.Current(S), v => EnginePreset.Apply(S, v), changed: SyncFeatures);
             var exp = Advanced(L.T("Experimental engine features"));
-            SettingToggle(SymbolRegular.Code24, L.T("Legacy shader compiler"),
+            Toggle(SymbolRegular.Code24, L.T("Legacy shader compiler"),
                 L.T("Off by default: the native compiler reads constant data through the GPU's constant cache. On compiles the game's shaders the way 0.9.33 did: try it if something draws wrong. Switching recompiles every shader once"),
                 "legacy_shaders", exp);
-            SettingToggle(SymbolRegular.Broom24, L.T("VRAM cleanup"),
+            Toggle(SymbolRegular.Broom24, L.T("VRAM cleanup"),
                 L.T("Frees video memory held by textures the GPU drew, so long sessions don't fill up VRAM and slow down. Recommended: on"),
                 "exp_vram_cleanup", exp);
-            SettingToggle(SymbolRegular.Timer24, L.T("Precise frame pacing"),
+            Toggle(SymbolRegular.Timer24, L.T("Precise frame pacing"),
                 L.T("A high-resolution timer and even spacing between frames: steadier frame times and less VRR flicker. Uses a little CPU. On by default"),
                 "exp_frame_pacing", exp);
             Feature(SymbolRegular.Storage24, L.T("Use more VRAM for textures"),
                 L.T("Keeps textures in video memory up to 80% of the card instead of about 40%, so they aren't thrown out and loaded again (the cause of most stutters on 8 GB cards)"),
                 "exp_vram_budget", exp);
-            SettingToggle(SymbolRegular.TopSpeed24, L.T("Graphics threads first"),
+            Toggle(SymbolRegular.TopSpeed24, L.T("Graphics threads first"),
                 L.T("Runs the engine's graphics threads at a higher CPU priority than the game's other threads, so a frame isn't held up behind them. On by default"),
                 "exp_thread_priority", exp);
-            SettingToggle(SymbolRegular.Sleep24, L.T("Shorter sleep spin"),
+            Toggle(SymbolRegular.Sleep24, L.T("Shorter sleep spin"),
                 L.T("The game's many short sleeps busy-wait only as long as the timer needs (about 0.2–0.4 ms instead of 0.6 ms), leaving that CPU time to the graphics threads. On by default"),
                 "exp_sleep_spin", exp);
-            SettingToggle(SymbolRegular.FlashFlow24, L.T("Background shader compiling"),
+            Toggle(SymbolRegular.FlashFlow24, L.T("Background shader compiling"),
                 L.T("New shaders compile on helper threads instead of freezing the frame: much shorter hitches when you reach a new area. On by default"),
                 "exp_async_pipelines", exp);
-            SettingToggle(SymbolRegular.EyeOff24, L.T("Occlusion culling"),
+            Toggle(SymbolRegular.EyeOff24, L.T("Occlusion culling"),
                 L.T("Off by default. The game skips objects hidden behind walls: higher FPS in dense areas, but objects and floors can appear late or flicker"),
                 "exp_occlusion", exp);
             Feature(SymbolRegular.FastForward24, L.T("Faster draw thread"),
@@ -61,32 +62,32 @@ namespace BloodborneLauncher.Views
             Feature(SymbolRegular.Shapes24, L.T("No shader freezes"),
                 L.T("While a new shader compiles, the objects that need it appear a moment later instead of the game freezing. New: turn it off if something stays missing"),
                 "exp_compile_skip", exp);
-            SettingToggle(SymbolRegular.ArrowForward24, L.T("Fast loading"),
+            Toggle(SymbolRegular.ArrowForward24, L.T("Fast loading"),
                 L.T("Loading screens run at 30 FPS: fewer frames leave the CPU to the loading work itself. Not before cutscenes. On by default"),
                 "exp_fast_loading", exp);
-            SettingToggle(SymbolRegular.Flash24, L.T("Fewer memory write checks"),
+            Toggle(SymbolRegular.Flash24, L.T("Fewer memory write checks"),
                 L.T("Memory the game rewrites before almost every use is no longer watched for changes, saving up to about 2 ms a frame in busy areas. On by default"),
                 "exp_hot_pages", exp);
-            SettingToggle(SymbolRegular.Storage24, L.T("PC memory model"),
+            Toggle(SymbolRegular.Storage24, L.T("PC memory model"),
                 L.T("The GPU reads the game's memory where it is instead of copies, so far less memory is watched and copied: more of the CPU and GPU used. On by default; turn it off if textures look wrong or the game stutters"),
                 "exp_guest_in_place", exp);
-            SettingToggle(SymbolRegular.Code24, L.T("Native draw calls"),
+            Toggle(SymbolRegular.Code24, L.T("Native draw calls"),
                 L.T("The game's draw calls reach the engine directly instead of as console GPU commands it decodes again. On by default; turn it off if something stops drawing"),
                 "exp_native_calls", exp);
-            SettingToggle(SymbolRegular.ShieldCheckmark24, L.T("Effect trail crash fix"),
+            Toggle(SymbolRegular.ShieldCheckmark24, L.T("Effect trail crash fix"),
                 L.T("For crashes while drawing effect trails on newer Intel CPUs (Witch of Hemwick, for example): stops the crash, and that kind of trail is not drawn. Off by default"),
                 "exp_sfx_workaround", exp);
-            SettingToggle(SymbolRegular.Camera24, L.T("Camera easing for high FPS"),
+            Toggle(SymbolRegular.Camera24, L.T("Camera easing for high FPS"),
                 L.T("With the FPS++ follow camera only: its eases converted for 60 FPS and above. Off by default"),
                 "exp_camera_easing", exp);
-            SettingToggle(SymbolRegular.Run24, L.T("Sharper motion (FSR 4)"),
+            Toggle(SymbolRegular.Run24, L.T("Sharper motion (FSR 4)"),
                 L.T("Uses FSR 4's balanced model at Performance and Ultra Performance: fewer trails behind moving characters, a little more GPU time"),
                 "fsr4_balanced", exp);
 
-            foreach (var group in EngineSwitches.Groups.Where(g => EngineSwitches.All.Any(x => x.Group == g)))
+            foreach (var group in EngineSwitches.Groups.Where(g => EngineSwitches.InGroup(g).Any()))
             {
                 Group(L.T(group));
-                foreach (var item in EngineSwitches.All.Where(x => x.Group == group))
+                foreach (var item in EngineSwitches.InGroup(group))
                     AddSwitch(item);
             }
             Group(L.T("About"));
@@ -98,7 +99,14 @@ namespace BloodborneLauncher.Views
         public override void OnShown() => ShowChanged();
 
         private void Feature(SymbolRegular icon, string title, string hint, string key, Panel into) =>
-            _features[key] = SettingToggle(icon, title, hint, key, into, changed: SyncPreset);
+            _features[key] = Toggle(icon, title, hint, key, into, SyncPreset);
+
+        private ToggleSwitch Toggle(SymbolRegular icon, string title, string hint, string key, Panel into, Action? changed = null)
+        {
+            var toggle = SettingToggle(icon, title, hint, key, into, changed);
+            _toggles[key] = (title, toggle);
+            return toggle;
+        }
 
         private void SyncFeatures()
         {
@@ -123,7 +131,6 @@ namespace BloodborneLauncher.Views
             EngineSwitches.Performance => SymbolRegular.TopSpeed24,
             EngineSwitches.Memory => SymbolRegular.Storage24,
             EngineSwitches.Upscalers => SymbolRegular.ZoomIn24,
-            EngineSwitches.Online => SymbolRegular.Globe24,
             EngineSwitches.Input => SymbolRegular.XboxController24,
             EngineSwitches.Sound => SymbolRegular.Speaker224,
             EngineSwitches.Fixes => SymbolRegular.ShieldCheckmark24,
@@ -202,8 +209,22 @@ namespace BloodborneLauncher.Views
 
         private void ResetAll()
         {
-            if (!EngineSwitches.Changed(S).Any()) return;
-            if (!Prompt.Confirm(L.T("Reset engine switches"), L.T("Every switch on this page goes back to the engine's default."), L.T("Reset all"))) return;
+            var switches = EngineSwitches.OnEnginePage.Where(x => EngineSwitches.Changed(S).Any(c => c.Name == x.Env)).Select(x => x.Title);
+            var features = EngineFeatures.Changed(S).Select(k => _toggles.TryGetValue(k, out var t) ? t.Title : k);
+            var names = features.Concat(switches).ToList();
+            if (names.Count == 0)
+            {
+                Prompt.Tell(L.T("Nothing to reset"), L.T("Every engine feature and engine switch on this page is already at its default."));
+                return;
+            }
+            const int shown = 12;
+            var list = string.Join("\n", names.Take(shown).Select(n => "• " + n));
+            if (names.Count > shown) list += "\n" + L.F($"and {names.Count - shown} more");
+            if (!Prompt.Confirm(L.T("Reset engine switches"), L.T("These go back to their defaults:") + "\n\n" + list, L.T("Reset all"))) return;
+            EngineFeatures.Reset(S);
+            foreach (var (key, (_, toggle)) in _toggles)
+                toggle.IsChecked = S.Bool(key);
+            SyncPreset();
             EngineSwitches.ResetAll(S);
             foreach (var reset in _resets)
                 reset();

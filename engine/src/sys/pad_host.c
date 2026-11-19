@@ -3,6 +3,7 @@
 #include "pad.h"
 #include "gpu/bbgpu.h"
 #include "gpu/shim/input/input.h"
+#include "gpu/shim/lantern_diag_c.h"
 #include <SDL3/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,13 +13,13 @@ enum {
     IN_CROSS, IN_CIRCLE, IN_SQUARE, IN_TRIANGLE, IN_L1, IN_R1, IN_L2, IN_R2, IN_L3, IN_R3,
     IN_OPTIONS, IN_TOUCHPAD, IN_TOUCHPAD_RIGHT, IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT,
     IN_MOVE_UP, IN_MOVE_DOWN, IN_MOVE_LEFT, IN_MOVE_RIGHT, IN_LOOK_UP, IN_LOOK_DOWN, IN_LOOK_LEFT, IN_LOOK_RIGHT,
-    IN_MENU_CONFIRM, IN_MENU_BACK, IN_COUNT
+    IN_MENU_CONFIRM, IN_MENU_BACK, IN_DODGE, IN_BACKSTEP, IN_SPRINT, IN_COUNT
 };
 
 static const char *const input_names[IN_COUNT] = {
     "cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3", "options", "touchpad",
     "touchpad_right", "up", "down", "left", "right", "move_up", "move_down", "move_left", "move_right",
-    "look_up", "look_down", "look_left", "look_right", "menu_confirm", "menu_back",
+    "look_up", "look_down", "look_left", "look_right", "menu_confirm", "menu_back", "dodge", "backstep", "sprint",
 };
 
 static const uint32_t input_buttons[IN_COUNT] = {
@@ -61,6 +62,7 @@ static SDL_JoystickID spare_ids[SPARE_PADS];
 static int sdl_state;
 static uint8_t connections;
 static int gamepad_type;
+static uint8_t pad_actions;
 
 static uint8_t stick_byte(int16_t value) {
     int v = (value + 32768) >> 8;
@@ -521,6 +523,8 @@ static void read_gamepad(SDL_Gamepad *g, PadData *pad) {
         if (i == IN_TOUCHPAD_RIGHT) touch_right = v > PRESSED;
         else if (v > PRESSED) pad->buttons |= input_buttons[i];
     }
+    for (int i = IN_DODGE; i <= IN_SPRINT; ++i)
+        if (gamepad_value(g, i, in_menu || menu_buttons_held) > PRESSED) pad_actions |= (uint8_t)(1u << (i - IN_DODGE));
     if (in_menu) {
         if (menu_down & 1) pad->buttons |= menu_confirm;
         if (menu_down & 2) pad->buttons |= menu_back;
@@ -537,7 +541,8 @@ static void pc_layer(PadData *pad, const bool *keys, int gamepad_present) {
     int key_count = 0;
     if (keys) SDL_GetKeyboardState(&key_count);
     BbPcPad pc = {.buttons = pad->buttons, .lx = pad->left_x, .ly = pad->left_y, .rx = pad->right_x,
-                  .ry = pad->right_y, .l2 = pad->l2, .r2 = pad->r2, .touch_count = pad->touch_count};
+                  .ry = pad->right_y, .l2 = pad->l2, .r2 = pad->r2, .touch_count = pad->touch_count,
+                  .actions = pad_actions};
     for (int i = 0; i < pad->touch_count && i < 2; ++i) {
         pc.touch[i].x = pad->touches[i].x;
         pc.touch[i].y = pad->touches[i].y;
@@ -554,8 +559,11 @@ static void pc_layer(PadData *pad, const bool *keys, int gamepad_present) {
         pad->touch_count = pc.touch_count;
         for (int i = 0; i < pc.touch_count && i < 2; ++i)
             pad->touches[i] = (PadTouch){.x = pc.touch[i].x, .y = pc.touch[i].y, .id = pc.touch[i].id};
-    } else if (keys) {
-        apply_keyboard(pad, keys);
+    } else {
+        static int told;
+        if (pad_actions && !told++) printf("Runtime: controls: pad.dodge, pad.backstep and pad.sprint press Circle with PC controls off\n");
+        if (pad_actions) pad->buttons |= PAD_CIRCLE;
+        if (keys) apply_keyboard(pad, keys);
     }
 }
 
@@ -566,9 +574,8 @@ typedef struct {
 } GuestHeapStats;
 
 static void report_guest_heap(void) {
-    static int enabled = -1;
     static uint64_t last;
-    if (enabled < 0) enabled = getenv("BB_FRAME_STATS") != NULL;
+    const int enabled = lantern_switch_c(LANTERN_SW_ID_frame_stats) != 0;
     uint64_t now = pad_now_us();
     if (!enabled || now - last < 5000000) return;
     last = now;
@@ -594,6 +601,7 @@ void pad_host_sample(PadData *pad) {
     pad->connected = 1;
     pad->connected_count = connections ? connections : 1;
     pad->timestamp = pad_now_us();
+    pad_actions = 0;
     SDL_Gamepad *g = current_gamepad();
     ensure_bindings();
     if (bbgpu_overlay_captures_input()) return;

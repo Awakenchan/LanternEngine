@@ -55,7 +55,36 @@ Require(OnlineStatus.ClassifyWhoAmI("<html>502 Bad Gateway</html>").State == Onl
 Require(OnlineStatus.ClassifyWhoAmI("{\"error\":\"x\"}").State == OnlineStatus.SignIn.Unknown, "No ResKind");
 Require(OnlineStatus.ClassifyWhoAmI("{\"ResKind\":\"0\"}").State == OnlineStatus.SignIn.Unknown, "ResKind as text");
 Require(OnlineStatus.ClassifyWhoAmI(null).State == OnlineStatus.SignIn.Unknown, "No reply");
+const string busy = "{\"ResKind\":1,\"Message\":\"busy\"}";
+Require(OnlineStatus.ClassifyWhoAmI(429, busy).State == OnlineStatus.SignIn.Unknown, "429 with ResKind 1 is not a refusal");
+Require(OnlineStatus.ClassifyWhoAmI(503, busy).State == OnlineStatus.SignIn.Unknown, "503 with ResKind 1 is not a refusal");
+Require(OnlineStatus.ClassifyWhoAmI(500, busy).State == OnlineStatus.SignIn.Unknown, "500 with ResKind 1 is not a refusal");
+var refused401 = OnlineStatus.ClassifyWhoAmI(401, "{\"ResKind\":1,\"Message\":\"expired\"}");
+Require(refused401.State == OnlineStatus.SignIn.Expired && refused401.Detail == "expired", "401 with ResKind 1 is a refusal");
+Require(OnlineStatus.ClassifyWhoAmI(200, "{\"ResKind\":3,\"Message\":\"token expired\"}").State == OnlineStatus.SignIn.Expired, "200 with ResKind 3 is a refusal");
+Require(OnlineStatus.ClassifyWhoAmI(200, "{\"ResKind\":0,\"OnlineId\":\"Hunter_1\"}").State == OnlineStatus.SignIn.Valid, "200 with an id is signed in");
+Require(OnlineStatus.ClassifyWhoAmI(503, "{\"ResKind\":0,\"OnlineId\":\"Hunter_1\"}").State == OnlineStatus.SignIn.Unknown, "503 with an id is not signed in");
+Require(OnlineStatus.ClassifyWhoAmI(401, "<html>401</html>").State == OnlineStatus.SignIn.Unknown, "401 without an account reply is unknown");
 Require(OnlineStatus.SignInLine(new OnlineStatus.SignInState(OnlineStatus.SignIn.Unknown, "")) == "could not be checked", "Unknown line");
 Require(OnlineStatus.SignInLine(null) == "checking…", "Checking line");
 
-Console.WriteLine("PASS: room full refusal, online rules line, whoami classification");
+var hostRoom = "";
+var hostPassword = "";
+Require(SeamlessPlay.NeedsHostRoom(true, false, hostRoom, hostPassword), "A host on the room server without a room gets one at Play");
+hostRoom = SeamlessPlay.RandomText(SeamlessPlay.RoomLength);
+hostPassword = SeamlessPlay.RandomText(SeamlessPlay.PasswordLength);
+Require(hostRoom.Length == 20 && hostPassword.Length == 24 && hostRoom != hostPassword, "Room and password are made at their lengths");
+Require(hostRoom.All(c => "abcdefghjkmnpqrstuvwxyz23456789".Contains(c)), "Room uses the invite letters");
+Require(!SeamlessPlay.NeedsHostRoom(true, false, hostRoom, hostPassword), "A host with a room keeps it");
+Require(!SeamlessPlay.Missing(true, false, "", hostRoom, hostPassword, ""), "A host on the room server with no pasted invite passes");
+Require(SeamlessPlay.Missing(true, false, "", hostRoom, "", ""), "A host room without its password is not ready");
+Require(SeamlessPlay.Missing(true, false, "pasted", "", "", ""), "An old pasted invite does not stand in for the host room");
+Require(SeamlessPlay.Missing(false, false, "", hostRoom, hostPassword, ""), "A guest on the room server without an invite is stopped");
+Require(!SeamlessPlay.Missing(false, false, "pasted", "", "", ""), "A guest with an invite passes");
+Require(!SeamlessPlay.NeedsHostRoom(false, false, "", ""), "A guest never gets a host room");
+Require(!SeamlessPlay.Missing(true, true, "", "", "", ""), "A direct host passes");
+Require(!SeamlessPlay.NeedsHostRoom(true, true, "", ""), "A direct host gets no room");
+Require(SeamlessPlay.Missing(false, true, "pasted", hostRoom, hostPassword, ""), "A direct guest without the host's address is stopped");
+Require(!SeamlessPlay.Missing(false, true, "", "", "", "192.0.2.1"), "A direct guest with an address passes");
+
+Console.WriteLine("PASS: room full refusal, online rules line, whoami classification, seamless Play check");

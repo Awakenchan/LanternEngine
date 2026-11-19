@@ -27,11 +27,20 @@ public:
     using Job = std::function<void()>;
 
     void Push(const void* owner, Job job) {
+        unfinished.fetch_add(1, std::memory_order_acq_rel);
+        Job counted = [this, job = std::move(job)] {
+            job();
+            unfinished.fetch_sub(1, std::memory_order_acq_rel);
+        };
         {
             std::scoped_lock lk{mutex};
-            jobs.push_back({owner, std::move(job)});
+            jobs.push_back({owner, std::move(counted)});
         }
         cv.notify_one();
+    }
+
+    [[nodiscard]] std::uint64_t Unfinished() const noexcept {
+        return unfinished.load(std::memory_order_acquire);
     }
 
     /// A compile thread: the oldest job (waits for one).
@@ -69,6 +78,7 @@ private:
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<Entry> jobs;
+    std::atomic<std::uint64_t> unfinished{0};
 };
 
 /// Whether a draw of a pipeline still compiling may be left out now. `first_skip_ns`: when one

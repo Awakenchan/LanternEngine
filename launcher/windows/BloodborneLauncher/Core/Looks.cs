@@ -61,6 +61,8 @@ namespace BloodborneLauncher.Core
             Amount("graphics_ssr_intensity", 0, 3, 1),
             Amount("graphics_volumetric_intensity", 0, 3, 1),
             Amount("graphics_point_fog_intensity", 0, 3, 1),
+            Amount(GlowSizeKey, 0.03, 0.2, 0.08),
+            Level(FalloffKey, 1),
             Level("graphics_shadow_resolution", 2),
             Level("graphics_local_shadow_resolution", 2),
             Level("graphics_motion_blur_quality", 1),
@@ -68,6 +70,9 @@ namespace BloodborneLauncher.Core
         };
 
         public const string UpscalerKey = "upscaler";
+        public const string FalloffKey = "graphics_point_fog_falloff";
+        public const string GlowSizeKey = "graphics_point_fog_glow_size";
+        private const string FalloffInverseSquare = "1";
         private const string UpscalerOff = "off";
 
         private static readonly Dictionary<string, Knob> ByKey = Knobs.ToDictionary(k => k.Key, StringComparer.Ordinal);
@@ -102,13 +107,21 @@ namespace BloodborneLauncher.Core
         public static string Folder => Path.Combine(Paths.ConfigDir, "looks");
         private static string PreviousFile => Path.Combine(Path.GetDirectoryName(Paths.IniPath)!, "looks-previous.json");
 
+        public static double SnapToOne(double value) => Math.Abs(value - 1) < 0.005 ? 1 : value;
+
         public static string Current(Knob knob, IniFile ini) => ini.Get(knob.Key, knob.Default);
 
         public static string ValueIn(Look look, Knob knob) =>
             look.Values.TryGetValue(knob.Key, out var value) ? value : knob.Default;
 
+        private static bool InverseSquare(string falloff) =>
+            ByKey.TryGetValue(FalloffKey, out var knob) && Normal(knob, falloff) == FalloffInverseSquare;
+
+        private static bool Counts(Knob knob, string falloff) => knob.Key != GlowSizeKey || InverseSquare(falloff);
+
         public static bool IsCurrent(Look look, IniFile ini) =>
-            Knobs.All(knob => Same(knob, ValueIn(look, knob), Current(knob, ini))) &&
+            Knobs.All(knob => !Counts(knob, ValueIn(look, ByKey[FalloffKey])) ||
+                              Same(knob, ValueIn(look, knob), Current(knob, ini))) &&
             (!look.Values.TryGetValue(UpscalerKey, out var upscaler) || ini.Get(UpscalerKey) == upscaler);
 
         private static bool Same(Knob knob, string a, string b) =>
@@ -134,8 +147,9 @@ namespace BloodborneLauncher.Core
         public static Look FromCurrent(IniFile ini, string name, string author)
         {
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
+            var falloff = Current(ByKey[FalloffKey], ini);
             foreach (var knob in Knobs)
-                if (Normal(knob, Current(knob, ini)) is { } value && !Same(knob, value, knob.Default))
+                if (Counts(knob, falloff) && Normal(knob, Current(knob, ini)) is { } value && !Same(knob, value, knob.Default))
                     values[knob.Key] = value;
             return new Look(Clean(name, MaxName), Clean(author, MaxAuthor), values);
         }
@@ -143,8 +157,10 @@ namespace BloodborneLauncher.Core
         public static string ToJson(Look look, bool indented = true)
         {
             var values = new JsonObject();
+            var falloff = ValueIn(look, ByKey[FalloffKey]);
             foreach (var knob in Knobs)
-                if (look.Values.TryGetValue(knob.Key, out var value))
+                if (Counts(knob, falloff) && (knob.Key != FalloffKey || InverseSquare(falloff)) &&
+                    look.Values.TryGetValue(knob.Key, out var value))
                     values[knob.Key] = value;
             var root = new JsonObject { ["lantern_look"] = Version, ["name"] = look.Name, ["author"] = look.Author, ["values"] = values };
             return root.ToJsonString(new JsonSerializerOptions { WriteIndented = indented });

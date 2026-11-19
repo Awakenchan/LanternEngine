@@ -4,14 +4,21 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_ray_query : require
 
+#ifdef LIGHT_RGBA16F
+#define LIGHT_FORMAT rgba16f
+#else
+#define LIGHT_FORMAT r11f_g11f_b10f
+#endif
+
 layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const uint RAY_MASK = 0xffu;
 
 layout(scalar, set = 0, binding = 0) readonly buffer Data { uint d[]; } data;
 layout(set = 0, binding = 1) uniform sampler2D depth_tex;
-layout(set = 0, binding = 2, r11f_g11f_b10f) uniform image2D cur0;
-layout(set = 0, binding = 3, r11f_g11f_b10f) uniform readonly image2D snap0;
-layout(set = 0, binding = 4, r11f_g11f_b10f) uniform image2D cur1;
-layout(set = 0, binding = 5, r11f_g11f_b10f) uniform readonly image2D snap1;
+layout(set = 0, binding = 2, LIGHT_FORMAT) uniform image2D cur0;
+layout(set = 0, binding = 3, LIGHT_FORMAT) uniform readonly image2D snap0;
+layout(set = 0, binding = 4, LIGHT_FORMAT) uniform image2D cur1;
+layout(set = 0, binding = 5, LIGHT_FORMAT) uniform readonly image2D snap1;
 layout(set = 0, binding = 6) uniform accelerationStructureEXT scene;
 layout(set = 0, binding = 7, rgba16f) uniform readonly image2D history_prev;
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D history_cur;
@@ -32,10 +39,16 @@ layout(push_constant) uniform Constants {
 };
 
 const float LAMP_CLEARANCE = 0.35;
+const float FACING_FLOOR = 0.1;
 
 const uint MAX_GROUP_TILES = 256u;
+const uint MAX_KEEP = 3u;
+
+const float MARCH_LENGTH = 2.5;
+const uint MARCH_STEPS = 12u;
 
 shared mat4 shared_inverse;
+shared mat4 shared_projection;
 shared uint group_tiles[MAX_GROUP_TILES];
 shared uint group_count;
 
@@ -48,7 +61,7 @@ vec3 viewPosAt(vec2 uv, float depth) {
 }
 
 vec3 surfaceNormal(vec2 uv, vec3 P) {
-    const vec2 px = 1.0 / size;
+    const vec2 px = 1.0 / vec2(textureSize(depth_tex, 0));
     vec3 best[2];
     for (int axis = 0; axis < 2; ++axis) {
         const vec2 step_uv = axis == 0 ? vec2(px.x, 0.0) : vec2(0.0, px.y);
@@ -65,7 +78,59 @@ vec3 surfaceNormal(vec2 uv, vec3 P) {
     return dot(n, P) > 0.0 ? -n : n;
 }
 
-float visibility(vec3 origin, float reach, vec3 L) {
+float viewZAt(vec2 uv, float depth) {
+    const vec4 c = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    const vec4 v = shared_inverse * c;
+    return v.z / v.w;
+}
+
+float marchVisibility(vec3 P, vec3 L, vec2 uv0, float jitter) {
+    const vec3 to = L - P;
+    const float dist = length(to);
+    const float reach = min(dist - LAMP_CLEARANCE, MARCH_LENGTH);
+    if (!(reach > 0.05)) {
+        return 1.0;
+    }
+    const vec3 dir = to / dist;
+    uint count = MARCH_STEPS;
+    const vec4 tip = shared_projection * vec4(P + dir * reach, 1.0);
+    if (tip.w > 0.0) {
+        const float span = length((tip.xy / tip.w * vec2(0.5, -0.5) + 0.5 - uv0) * size);
+        if (span < 1.0) {
+            return 1.0;
+        }
+        count = clamp(uint(span / 2.0), 4u, MARCH_STEPS);
+    }
+    for (uint i = 0u; i < count; ++i) {
+        float t = (float(i) + 0.5 + jitter) / float(count);
+        t *= t;
+        const float s = 0.03 + t * reach;
+        const vec3 Q = P + dir * s;
+        if (!(Q.z > 0.0)) {
+            break;
+        }
+        const vec4 n4 = shared_projection * vec4(Q, 1.0);
+        if (!(n4.w != 0.0)) {
+            break;
+        }
+        const vec2 uv = n4.xy / n4.w * vec2(0.5, -0.5) + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            break;
+        }
+        const float sd = textureLod(depth_tex, uv, 0.0).x;
+        if (!(sd < 1.0) || !(sd > 0.0)) {
+            continue;
+        }
+        const float diff = Q.z - viewZAt(uv, sd);
+        const float bias = bias_m + 0.006 * P.z + 0.03 * s;
+        if (diff > bias && diff < thickness_m) {
+            return 0.0;
+        }
+    }
+    return 1.0;
+}
+
+float visibility(vec3 origin, float reach, vec3 L, vec3 P, vec2 uv0, float jitter) {
     const vec3 ray_to = L - origin;
     const float ray_len = length(ray_to);
     const float tmax = ray_len - LAMP_CLEARANCE;
@@ -73,11 +138,36 @@ float visibility(vec3 origin, float reach, vec3 L) {
         return 1.0;
     }
     rayQueryEXT query;
-    rayQueryInitializeEXT(query, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xffu,
+    rayQueryInitializeEXT(query, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, RAY_MASK,
                           origin, reach * 0.5, ray_to / ray_len, tmax);
     rayQueryProceedEXT(query);
-    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0
-                                                                                                  : 0.0;
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        return 0.0;
+    }
+    return marchVisibility(P, L, uv0, jitter);
+}
+
+float facing(vec3 n, vec3 to_light) {
+    if (!(dot(n, n) > 0.0)) {
+        return 1.0;
+    }
+    return FACING_FLOOR + (1.0 - FACING_FLOOR) * max(dot(n, to_light), 0.0) / max(length(to_light), 1e-6);
+}
+
+const uint CONE_MARK = 0x53504f54u;
+const uint CONE_BIT = 0x80000000u;
+
+bool outsideCone(uint at, vec3 P) {
+    if (data.d[at + 15u] != CONE_MARK) {
+        return false;
+    }
+    const uint m = data.d[at + 14u];
+    if (m == 0u || m > uint(data.d.length()) || uint(data.d.length()) - m < 16u) {
+        return false;
+    }
+    const vec4 p = vec4(P, 1.0);
+    const vec4 q = vec4(dot(row(m), p), dot(row(m + 4u), p), dot(row(m + 8u), p), dot(row(m + 12u), p));
+    return !(q.z > 0.0) || !(q.w > 0.0) || dot(q.xy, q.xy) > q.w * q.w;
 }
 
 bool inside(uint tile, ivec2 lo, ivec2 hi) {
@@ -96,6 +186,7 @@ shared uint group_trace;
 void main() {
     if (gl_LocalInvocationIndex == 0u) {
         shared_inverse = transpose(mat4(row(0u), row(4u), row(8u), row(12u)));
+        shared_projection = inverse(shared_inverse);
         group_count = 0u;
         group_trace = 0u;
     }
@@ -123,11 +214,16 @@ void main() {
     const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     bool live = px.x >= rect.x && px.y >= rect.y && px.x < rect.z && px.y < rect.w;
     vec3 s0 = vec3(0.0), c0 = vec3(0.0), s1 = vec3(0.0), c1 = vec3(0.0);
+    float a0 = 1.0, a1 = 1.0;
     if (live) {
         s0 = imageLoad(snap0, px).rgb;
-        c0 = imageLoad(cur0, px).rgb;
+        const vec4 c0v = imageLoad(cur0, px);
+        c0 = c0v.rgb;
+        a0 = c0v.a;
         s1 = imageLoad(snap1, px).rgb;
-        c1 = imageLoad(cur1, px).rgb;
+        const vec4 c1v = imageLoad(cur1, px);
+        c1 = c1v.rgb;
+        a1 = c1v.a;
         live = !(all(lessThanEqual(c0, s0)) && all(lessThanEqual(c1, s1)));
     }
     const vec2 uv = (vec2(px) + 0.5) / size;
@@ -151,9 +247,16 @@ void main() {
     }
 
     float wsum = 0.0;
-    const bool exact = steps == 0u;
-    float top_w = 0.0;
-    vec3 top_l = vec3(0.0);
+    const bool cones = (steps & CONE_BIT) != 0u;
+    const uint pick = steps & ~CONE_BIT;
+    const bool exact = pick == 0u;
+    const uint keep = min(pick, MAX_KEEP);
+    float top_w[MAX_KEEP];
+    vec3 top_l[MAX_KEEP];
+    for (uint j = 0u; j < MAX_KEEP; ++j) {
+        top_w[j] = 0.0;
+        top_l[j] = vec3(0.0);
+    }
     float rest_w = 0.0;
     vec3 rest_l = vec3(0.0);
     float vsum = 0.0;
@@ -161,6 +264,8 @@ void main() {
     float reach = 0.0;
     vec3 origin = vec3(0.0);
     uint seed = (uint(px.x) * 1973u + uint(px.y) * 9277u + frame_index * 26699u) | 1u;
+    const float jitter = fract(52.9829189 * fract(dot(vec2(px) + float(frame_index & 63u) * 7.13,
+                                                      vec2(0.06711056, 0.00583715))));
     if (live) {
         n = surfaceNormal(uv, P);
         reach = bias_m + 0.0015 * P.z;
@@ -185,12 +290,12 @@ void main() {
             const vec3 L = vec3(word(at), word(at + 1u), word(at + 2u));
             const vec3 to_light = L - P;
             const float t2 = dot(to_light, to_light) * inv_r2;
-            if (t2 >= 1.0) {
+            if (t2 >= 1.0 || (cones && outsideCone(at, P))) {
                 continue;
             }
             const vec3 col = vec3(word(at + 4u), word(at + 5u), word(at + 6u));
             float w = 1.0 - t2;
-            w *= w * dot(col, vec3(0.299, 0.587, 0.114));
+            w *= w * dot(col, vec3(0.299, 0.587, 0.114)) * facing(n, to_light);
             if (!(w > 1e-5)) {
                 continue;
             }
@@ -201,11 +306,15 @@ void main() {
             }
             float cand_w = w;
             vec3 cand_l = L;
-            if (w > top_w) {
-                cand_w = top_w;
-                cand_l = top_l;
-                top_w = w;
-                top_l = L;
+            for (uint j = 0u; j < keep; ++j) {
+                if (cand_w > top_w[j]) {
+                    const float held_w = top_w[j];
+                    const vec3 held_l = top_l[j];
+                    top_w[j] = cand_w;
+                    top_l[j] = cand_l;
+                    cand_w = held_w;
+                    cand_l = held_l;
+                }
             }
             if (cand_w > 0.0) {
                 rest_w += cand_w;
@@ -278,23 +387,27 @@ void main() {
                         const vec3 L = vec3(word(at), word(at + 1u), word(at + 2u));
                         const vec3 to_light = L - P;
                         const float t2 = dot(to_light, to_light) * inv_r2;
-                        if (t2 >= 1.0) {
+                        if (t2 >= 1.0 || (cones && outsideCone(at, P))) {
                             continue;
                         }
                         const vec3 col = vec3(word(at + 4u), word(at + 5u), word(at + 6u));
                         float w = 1.0 - t2;
-                        w *= w * dot(col, vec3(0.299, 0.587, 0.114));
+                        w *= w * dot(col, vec3(0.299, 0.587, 0.114)) * facing(n, to_light);
                         if (!(w > 1e-5)) {
                             continue;
                         }
-                        vsum += w * visibility(origin, reach, L);
+                        vsum += w * visibility(origin, reach, L, P, uv, jitter);
                     }
                 }
             }
         } else {
-            vsum = top_w * visibility(origin, reach, top_l);
+            for (uint j = 0u; j < keep; ++j) {
+                if (top_w[j] > 0.0) {
+                    vsum += top_w[j] * visibility(origin, reach, top_l[j], P, uv, jitter);
+                }
+            }
             if (rest_w > 0.0) {
-                vsum += rest_w * visibility(origin, reach, rest_l);
+                vsum += rest_w * visibility(origin, reach, rest_l, P, uv, jitter);
             }
         }
         ratio = clamp(vsum / wsum, 0.0, 1.0);
@@ -307,6 +420,6 @@ void main() {
         imageStore(history_cur, px, vec4(ratio, P.z, stable, 1.0));
     }
     const float scale = mix(1.0, ratio, strength * fade);
-    imageStore(cur0, px, vec4(s0 + max(c0 - s0, vec3(0.0)) * scale, 1.0));
-    imageStore(cur1, px, vec4(s1 + max(c1 - s1, vec3(0.0)) * scale, 1.0));
+    imageStore(cur0, px, vec4(s0 + max(c0 - s0, vec3(0.0)) * scale, a0));
+    imageStore(cur1, px, vec4(s1 + max(c1 - s1, vec3(0.0)) * scale, a1));
 }

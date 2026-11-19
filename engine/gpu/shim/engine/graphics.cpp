@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "graphics.h"
+#include "fog_scale.h"
+#include "hook_entries.h"
 #include "engine_hooks.h"
 #include "bbport_platform.h"
 #include "bbport_settings.h"
+#include "bbport_toggles.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -10,31 +13,28 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 namespace BbEngine::Graphics {
 namespace {
 #define GUEST_ABI __attribute__((sysv_abi))
 
 constexpr std::size_t kRenderView = 0x229e990;
-constexpr std::uint8_t kRenderViewEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                             0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0xa8, 0x0e, 0x00, 0x00};
+constexpr const auto& kRenderViewEntry = HookEntries::kGraphicsRenderViewEntry;
 constexpr std::size_t kSsaoSwitch = 0x2968, kBlurSwitch = 0x2969, kAaSwitch = 0x296a;
 
 constexpr std::size_t kSsaoDraw = 0xe669d0;
-constexpr std::uint8_t kSsaoDrawEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                           0x41, 0x54, 0x53, 0x48, 0x81, 0xec, 0xa8, 0x02, 0x00, 0x00};
+constexpr const auto& kSsaoDrawEntry = HookEntries::kGraphicsSsaoDrawEntry;
 constexpr std::size_t kSsaoScale = 0x14c + 0x44, kSsaoOffset = 0x14c + 0x48;
 
 constexpr std::size_t kShadowSetup = 0xeac210;
-constexpr std::uint8_t kShadowSetupEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x48,
-                                              0x83, 0xec, 0x18, 0x49, 0x89, 0xf6, 0x48, 0x89, 0xfb};
+constexpr const auto& kShadowSetupEntry = HookEntries::kGraphicsShadowSetupEntry;
 constexpr std::size_t kShadowDistances[] = {0x38, 0x3c, 0x44, 0x48};
 constexpr std::size_t kCascadeRange = 0xeac540, kCascadeRangeTail = 0xeac657;
 constexpr std::uint8_t kCascadeRangeEntry[] = {
     0xc5, 0xf8, 0x28, 0x02, 0xc5, 0xf8, 0x29, 0x06, 0xc5, 0xf8, 0x28, 0x42, 0x10,
     0xc5, 0xf8, 0x29, 0x46, 0x10};
-constexpr std::uint8_t kCascadeRangeStores[] = {
-    0xc5, 0xfa, 0x11, 0x46, 0x54, 0xc5, 0xf2, 0x5d, 0x42, 0x58, 0xc5, 0xfa, 0x11, 0x46, 0x58};
+constexpr const auto& kCascadeRangeStores = HookEntries::kGraphicsCascadeRangeStores;
 constexpr float kCascadeBlend = 0.1f;
 constexpr std::size_t kDirectionalSizeTable = 0x48a9668, kDirectionalSizeDefault = 0xeac238;
 constexpr std::uint32_t kDirectionalSizes[] = {2048, 1024, 2048, 4096};
@@ -72,24 +72,26 @@ int LocalShadowQuality() {
 }
 
 constexpr std::size_t kYebisRecord = 0x21d4860;
-constexpr std::uint8_t kYebisRecordEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-                                              0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x28, 0x4d, 0x89, 0xcd};
+constexpr const auto& kYebisRecordEntry = HookEntries::kGraphicsYebisRecordEntry;
 constexpr std::size_t kYebisBlockLoad = 0x21d4888;
 constexpr std::uint8_t kLeaRax[] = {0x48, 0x8d, 0x05};
 constexpr std::size_t kHue = 0xc4, kSaturation = 0xc8, kValue = 0xcc, kVignette = 0xd0, kGlare = 0xdc,
                       kContrast = 0x248;
 
 constexpr std::size_t kFogRebuild = 0x22da690;
-constexpr std::uint8_t kFogRebuildEntry[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41,
-                                             0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x68};
+constexpr const auto& kFogRebuildEntry = HookEntries::kGraphicsFogRebuildEntry;
 constexpr std::size_t kFogJump = 0x22daadf, kFogPadding = 0x22daaf3, kTableUpload = 0xe2e6b0;
 constexpr std::uint8_t kPadding[] = {0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0};
-constexpr std::size_t kFogMap = 0x248, kFogTable = 0x250, kFogCount = 0x258, kFogStride = 0x60 / 4;
-constexpr int kFogOpacities[] = {0, 8, 12};
+constexpr std::size_t kFogMap = 0x248, kFogTable = 0x250, kFogCount = 0x258;
+constexpr std::size_t kUploadBuffer = 0x70, kUploadSize = 0x2c, kUploadKind = 0x38, kUploadFlags = 0x3b;
+constexpr std::uint8_t kUploadCopy = 1, kUploadOther = 4;
 
 bool g_enabled = false;
 std::uint8_t* g_post_block = nullptr;
+std::atomic<std::uint64_t> g_yebis_records{0};
 thread_local std::uint64_t t_fog_manager = 0;
+thread_local std::vector<std::uint8_t> t_fog_scratch;
+std::atomic<bool> g_fog_kind_said{false}, g_fog_size_said{false};
 
 template <typename T> bool Peek(std::uint64_t at, T* out) {
     return at && BbPlatform::ReadProcessMemory(reinterpret_cast<const void*>(at), out, sizeof(T));
@@ -140,7 +142,7 @@ std::array<Renderer, 8> g_renderers;
 std::mutex g_renderer_mutex;
 int g_blur_said = -1;
 
-GUEST_ABI std::int64_t BeforeRenderView(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BeforeRenderView(std::uint64_t, std::uint64_t* saved) noexcept {
     const std::uint64_t r = saved[0];
     if (!r) return 0;
     std::scoped_lock lock(g_renderer_mutex);
@@ -170,7 +172,7 @@ GUEST_ABI std::int64_t BeforeRenderView(std::uint64_t, const std::uint64_t* save
     return 0;
 }
 
-GUEST_ABI std::int64_t BeforeSsaoDraw(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BeforeSsaoDraw(std::uint64_t, std::uint64_t* saved) noexcept {
     const std::uint64_t object = saved[5];
     if (!object) return 0;
     const float k = Setting(BbSettings::Get().graphics_ao_strength, 0.0f, 5.0f);
@@ -180,7 +182,7 @@ GUEST_ABI std::int64_t BeforeSsaoDraw(std::uint64_t, const std::uint64_t* saved)
     return 0;
 }
 
-GUEST_ABI std::int64_t BeforeShadowSetup(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BeforeShadowSetup(std::uint64_t, std::uint64_t* saved) noexcept {
     const std::uint64_t block = saved[4];
     if (!block) return 0;
     const float k = Setting(BbSettings::Get().graphics_shadow_scale, 0.25f, 8.0f);
@@ -189,7 +191,7 @@ GUEST_ABI std::int64_t BeforeShadowSetup(std::uint64_t, const std::uint64_t* sav
     return 0;
 }
 
-GUEST_ABI std::int64_t BeforeCascadeRangeStores(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BeforeCascadeRangeStores(std::uint64_t, std::uint64_t* saved) noexcept {
     const unsigned cascade = unsigned(saved[1]);
     if (cascade == 0 || cascade > 3 || !saved[5] || !saved[3]) return 0;
     float near = 0, previous = 0, camera_near = 0;
@@ -199,11 +201,12 @@ GUEST_ABI std::int64_t BeforeCascadeRangeStores(std::uint64_t, const std::uint64
         !std::isfinite(near) || !std::isfinite(previous) || !std::isfinite(camera_near) ||
         near <= previous || camera_near > near) return 0;
     near = std::max(camera_near, near - kCascadeBlend * (near - previous));
-    std::memcpy(const_cast<std::uint8_t*>(SavedXmm(saved, 0)), &near, sizeof near);
+    std::memcpy(SavedXmm(saved, 0), &near, sizeof near);
     return 0;
 }
 
-GUEST_ABI std::int64_t BeforeYebisRecord(std::uint64_t, const std::uint64_t*) {
+GUEST_ABI std::int64_t BeforeYebisRecord(std::uint64_t, std::uint64_t*) noexcept {
+    if (BbStats::enabled) g_yebis_records.fetch_add(1, std::memory_order_relaxed);
     if (!g_post_block) return 0;
     const bool on = On();
     const auto& s = BbSettings::Get();
@@ -221,27 +224,37 @@ GUEST_ABI std::int64_t BeforeYebisRecord(std::uint64_t, const std::uint64_t*) {
     return 0;
 }
 
-GUEST_ABI std::int64_t BeforeFogRebuild(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BeforeFogRebuild(std::uint64_t, std::uint64_t* saved) noexcept {
     t_fog_manager = saved[5];
     return 0;
 }
 
-GUEST_ABI std::int64_t BeforeFogUpload(std::uint64_t, const std::uint64_t* saved) {
+GUEST_ABI std::int64_t BeforeFogUpload(std::uint64_t, std::uint64_t* saved) noexcept {
     const std::uint64_t manager = t_fog_manager;
     t_fog_manager = 0;
     const float k = Setting(BbSettings::Get().graphics_fog, 0.0f, 5.0f);
-    std::uint64_t map = 0, table = 0;
-    std::uint32_t count = 0;
-    if (!On() || k == 1 || !Peek(manager + kFogMap, &map) || !Peek(manager + kFogTable, &table) ||
-        !Peek(manager + kFogCount, &count) || map != saved[5] || table != saved[3] || !table || !count ||
-        count > 4096) return 0;
-    auto* fog = reinterpret_cast<float*>(table);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        for (const int o : kFogOpacities) {
-            float& a = fog[i * kFogStride + o];
-            a = k > 1 ? std::min(a * k, std::max(a, 1.0f)) : a * k;
-        }
+    if (FogScale::Untouched(On(), k)) return 0;
+    std::uint64_t map = 0, table = 0, buffer = 0, view = 0;
+    std::uint32_t count = 0, upload = 0;
+    std::uint8_t kind = 0, flags = 0;
+    if (!Peek(manager + kFogMap, &map) || !Peek(manager + kFogTable, &table) || !Peek(manager + kFogCount, &count) ||
+        map != saved[5] || table != saved[3] || !table || !count || count > FogScale::kMaxBlocks ||
+        !Peek(map + kUploadBuffer, &buffer) || !Peek(buffer, &view) || !view) return 0;
+    if (!Peek(view + kUploadSize, &upload) || !Peek(view + kUploadKind, &kind) || !Peek(view + kUploadFlags, &flags) ||
+        (!(flags & kUploadOther) && kind != kUploadCopy)) {
+        if (!g_fog_kind_said.exchange(true)) std::printf("Engine: fog left at the game's own for an upload of kind %u\n", unsigned(kind));
+        return 0;
     }
+    const std::size_t bytes = FogScale::CopyBytes(count, upload);
+    if (!bytes) {
+        if (!g_fog_size_said.exchange(true))
+            std::printf("Engine: fog left at the game's own: %u blocks, %u bytes is over the copy's %zu\n", count, upload,
+                        FogScale::kMaxBytes);
+        return 0;
+    }
+    if (t_fog_scratch.size() < bytes) t_fog_scratch.resize(bytes);
+    saved[3] = reinterpret_cast<std::uint64_t>(
+        FogScale::ScaleCopy(reinterpret_cast<const std::uint8_t*>(table), count, bytes, k, t_fog_scratch.data()));
     return 0;
 }
 
@@ -258,22 +271,25 @@ bool RedirectFogUpload(std::uint8_t* image, std::size_t size, std::uint8_t** stu
     *stub = TailStub(BeforeFogUpload, reinterpret_cast<std::uint64_t>(image + kTableUpload));
     return *stub != nullptr;
 }
-void CommitFogUpload(std::uint8_t* image, std::uint8_t* stub) {
-    std::uint8_t* p = image + kFogPadding;
+struct FogUpload {
+    std::array<std::uint8_t, sizeof kPadding> jump{};
+    std::array<std::uint8_t, 4> rel{}, old_rel{};
+    std::array<CodePatch, 2> patches{};
+};
+void FogUploadPatches(std::uint8_t* image, std::uint8_t* stub, FogUpload& fog) {
     const auto to = reinterpret_cast<std::uint64_t>(stub);
-    *p++ = 0x49;
-    *p++ = 0xbb;
-    std::memcpy(p, &to, 8);
-    p += 8;
-    *p++ = 0x41;
-    *p++ = 0xff;
-    *p = 0xe3;
+    fog.jump = {0x49, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0x41, 0xff, 0xe3};
+    std::memcpy(fog.jump.data() + 2, &to, 8);
     const auto rel = std::int32_t(std::int64_t(kFogPadding) - std::int64_t(kFogJump + 5));
-    std::memcpy(image + kFogJump + 1, &rel, 4);
+    std::memcpy(fog.rel.data(), &rel, 4);
+    std::memcpy(fog.old_rel.data(), image + kFogJump + 1, 4);
+    fog.patches = {CodePatch{image, kFogPadding, kPadding, fog.jump}, CodePatch{image, kFogJump + 1, fog.old_rel, fog.rel}};
 }
 }
 
 bool Enabled() { return g_enabled; }
+
+std::uint64_t YebisRecords() { return g_yebis_records.load(std::memory_order_relaxed); }
 
 float DirectionalShadowBlend() {
     return g_cascade_overlap.load(std::memory_order_relaxed) ? kCascadeBlend : 0.0f;
@@ -292,9 +308,11 @@ bool InstallDirectionalShadowResolution(std::uint8_t* image, std::size_t size) {
     if (quality == 0) return false;
     const std::uint32_t atlas = 2048u << quality;
     const std::array<std::uint32_t, 4> sizes{atlas, atlas, atlas, atlas};
-    if (!WriteCode(image + kDirectionalSizeTable, sizes.data(), sizeof sizes) ||
-        !WriteCode(image + kDirectionalSizeDefault + 1, &atlas, sizeof atlas)) {
-        std::printf("Engine: directional shadow resolution incomplete: cannot write native allocation settings\n");
+    const CodePatch patches[] = {
+        {image, kDirectionalSizeTable, AsCode(std::span(kDirectionalSizes)), AsCode(std::span(sizes))},
+        {image, kDirectionalSizeDefault + 1, std::span(kDirectionalSizeCode).subspan(1, sizeof atlas), AsCode(std::span(&atlas, 1))}};
+    if (const WriteResult result = WriteCode(patches); result != WriteResult::Applied) {
+        std::printf("Engine: directional shadow resolution off: native allocation settings %s\n", Describe(result));
         return false;
     }
     std::printf("Engine: directional shadow atlas %ux%u, four %ux%u cascades (restart to change)\n",
@@ -310,11 +328,14 @@ bool InstallDirectionalShadows(std::uint8_t* image, std::size_t size) {
     }
     Hook hook;
     if (!image || !Matches(image, size, kCascadeRange, kCascadeRangeEntry, sizeof kCascadeRangeEntry) ||
-        !Prepare(hook, image, size, kCascadeRangeTail, kCascadeRangeStores, BeforeCascadeRangeStores)) {
+        !Prepare(hook, image, size, kCascadeRangeTail, SiteKind::Inside, kCascadeRangeStores, BeforeCascadeRangeStores)) {
         std::printf("Engine: directional overlap off: cascade code does not match 1.09 or hook unavailable\n");
         return false;
     }
-    Commit(std::span<Hook>{&hook, 1});
+    if (const WriteResult result = Commit(std::span<Hook>{&hook, 1}); result != WriteResult::Applied) {
+        std::printf("Engine: directional overlap off: cascade code %s\n", Describe(result));
+        return false;
+    }
     g_cascade_overlap.store(true, std::memory_order_relaxed);
     std::printf("Engine: directional cascades overlap by 10%%; authored splits and atlas size retained\n");
     return true;
@@ -339,11 +360,15 @@ bool InstallLocalShadowSoftness(std::uint8_t* image, std::size_t size, bool poin
         return false;
     }
     const float radius = LocalShadowQuality() == 1 ? 3.2f : 6.4f;
-    for (const auto at : {point ? kPointShadowRadius : 0, spot ? kSpotShadowRadius : 0}) {
-        if (at && !WriteCode(image + at, &radius, sizeof radius)) {
-            std::printf("Engine: local-shadow filter tuning incomplete: cannot write filter radius at %zx\n", at);
-            return false;
-        }
+    const auto original = AsCode(std::span(&kOriginalLocalShadowRadius, 1));
+    const auto wanted = AsCode(std::span(&radius, 1));
+    std::array<CodePatch, 2> patches;
+    std::size_t count = 0;
+    if (point) patches[count++] = {image, kPointShadowRadius, original, wanted};
+    if (spot) patches[count++] = {image, kSpotShadowRadius, original, wanted};
+    if (const WriteResult result = WriteCode(std::span<const CodePatch>(patches).first(count)); result != WriteResult::Applied) {
+        std::printf("Engine: local-shadow filter tuning off: filter radius %s\n", Describe(result));
+        return false;
     }
     std::printf("Engine: local-shadow filter radius %.1f texels (point %s, spotlight %s); high-resolution maps kept\n",
                 radius, point ? "on" : "unchanged", spot ? "on" : "unchanged");
@@ -363,8 +388,9 @@ bool InstallLocalShadows(std::uint8_t* image, std::size_t size) {
     const std::uint32_t base = quality == 1 ? 1024u : 2048u;
     std::array<std::uint8_t, 5> resolution{0xb8};
     std::memcpy(resolution.data() + 1, &base, sizeof base);
-    if (!WriteCode(image + kLocalShadowSize, resolution.data(), resolution.size())) {
-        std::printf("Engine: higher-resolution point shadows off: cannot write the pool size\n");
+    const CodePatch pool{image, kLocalShadowSize, std::span(kLocalShadowSizeRead).first(resolution.size()), resolution};
+    if (const WriteResult result = WriteCode(pool); result != WriteResult::Applied) {
+        std::printf("Engine: higher-resolution point shadows off: the pool size %s\n", Describe(result));
         return false;
     }
     std::printf("Engine: native point-shadow faces %u/%u/%u/%u; other pools untouched by point patch\n",
@@ -383,8 +409,9 @@ bool InstallSpotShadows(std::uint8_t* image, std::size_t size) {
         return false;
     }
     const std::uint8_t resolution[] = {0x31, 0xc0, 0xb4, std::uint8_t(quality == 1 ? 8 : 16)};
-    if (!WriteCode(image + kSpotShadowSize, resolution, sizeof resolution)) {
-        std::printf("Engine: higher-resolution spotlight shadows off: cannot write the pool size\n");
+    const CodePatch pool{image, kSpotShadowSize, std::span(kSpotShadowSizeRead).first(sizeof resolution), resolution};
+    if (const WriteResult result = WriteCode(pool); result != WriteResult::Applied) {
+        std::printf("Engine: higher-resolution spotlight shadows off: the pool size %s\n", Describe(result));
         return false;
     }
     const unsigned base = quality == 1 ? 2048u : 4096u;
@@ -405,25 +432,35 @@ bool Install(std::uint8_t* image, std::size_t size) {
     if (block > size - (kContrast + 4)) return false;
 
     std::array<Hook, 5> hooks;
-    const bool ready = Prepare(hooks[0], image, size, kRenderView, kRenderViewEntry, BeforeRenderView) &&
-                       Prepare(hooks[1], image, size, kYebisRecord, kYebisRecordEntry, BeforeYebisRecord) &&
-                       Prepare(hooks[2], image, size, kSsaoDraw, kSsaoDrawEntry, BeforeSsaoDraw) &&
-                       Prepare(hooks[3], image, size, kShadowSetup, kShadowSetupEntry, BeforeShadowSetup);
+    const bool ready = Prepare(hooks[0], image, size, kRenderView, SiteKind::Entry, kRenderViewEntry, BeforeRenderView) &&
+                       Prepare(hooks[1], image, size, kYebisRecord, SiteKind::Entry, kYebisRecordEntry, BeforeYebisRecord) &&
+                       Prepare(hooks[2], image, size, kSsaoDraw, SiteKind::Entry, kSsaoDrawEntry, BeforeSsaoDraw) &&
+                       Prepare(hooks[3], image, size, kShadowSetup, SiteKind::Entry, kShadowSetupEntry, BeforeShadowSetup);
     if (!ready) {
         for (auto& h : hooks) Discard(h);
         std::printf("Engine: picture tuning off: the game's code is not 1.09's\n");
         return false;
     }
     std::uint8_t* fog_stub = nullptr;
-    const bool fog = Prepare(hooks[4], image, size, kFogRebuild, kFogRebuildEntry, BeforeFogRebuild) &&
+    const bool fog = Prepare(hooks[4], image, size, kFogRebuild, SiteKind::Entry, kFogRebuildEntry, BeforeFogRebuild) &&
                      RedirectFogUpload(image, size, &fog_stub);
     if (!fog) {
         Discard(hooks[4]);
         FreeStub(fog_stub);
     }
     g_post_block = image + block;
-    Commit(hooks);
-    if (fog) CommitFogUpload(image, fog_stub);
+    FogUpload upload;
+    if (fog) FogUploadPatches(image, fog_stub, upload);
+    const WriteResult result = Commit(std::span(hooks).first(fog ? hooks.size() : hooks.size() - 1),
+                                      fog ? std::span<const CodePatch>(upload.patches) : std::span<const CodePatch>{});
+    if (result != WriteResult::Applied) {
+        if (result == WriteResult::NotApplied) {
+            FreeStub(fog_stub);
+            g_post_block = nullptr;
+        }
+        std::printf("Engine: picture tuning off: the game's code %s\n", Describe(result));
+        return false;
+    }
     g_enabled = true;
     std::printf("Engine: picture tuning ready (%s, live): AA, SSAO, AO strength, shadow distance, bloom, saturation, "
                 "vignette, brightness, contrast, hue%s\n",

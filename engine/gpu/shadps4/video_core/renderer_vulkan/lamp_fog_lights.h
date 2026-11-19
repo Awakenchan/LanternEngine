@@ -11,12 +11,19 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace LampFog {
+
+#ifndef LANTERN_LAMP_FOG_MUTANT
+#define LANTERN_LAMP_FOG_MUTANT 0
+#endif
+inline constexpr int kMutant = LANTERN_LAMP_FOG_MUTANT;
+inline constexpr int kMutants = 11;
 
 using Light = std::array<uint32_t, 16>;
 
@@ -182,12 +189,16 @@ public:
     static constexpr float ShortLived = 2.0f, ShortLivedNear = 15.0f, FlashBrightness = 1.4f;
     // The light is judged in the moments after the game drops it, not later when the camera comes by.
     static constexpr float FlashWindow = 0.1f;
-    // A spawned light can jump further in one frame than a light can move (an idle enemy's torch
-    // moved 1.7 m at once), so the game's list has it in a new place as it leaves the old one. The
-    // old entry was left behind as a standing lamp, with the light's colour, when the enemy died.
-    // A spawned light with nothing to match takes over an entry of the same kind that was listed a
-    // moment ago and is within this distance.
-    static constexpr float JumpDistance = 3.0f, JumpWindow = 0.1f;
+    // A spawned light can turn up somewhere else than where it was last listed: an idle enemy's
+    // torch jumped 1.7 m in one frame, and the game leaves enemies' torches out of its list for
+    // seconds at a time (up to 10 s and more) while they walk. A new entry left the old one behind
+    // as a standing lamp at the spawn point or along the way, glowing after the enemy had gone or
+    // died. A spawned light with nothing to match takes over the nearest entry of the same kind
+    // that is not listed this frame, within this distance plus this speed for every second the
+    // entry has gone unlisted, up to the most. It has moved: it counts as carried from then on.
+    static constexpr float JumpDistance = 3.0f, JumpSpeed = 1.5f, JumpMost = 10.0f;
+    static constexpr float JumpWindow = 0.5f, HueSlack = 0.15f;
+    static constexpr int DarkListings = 2;
     // Word 7 of a record is 20 or more (20, 50, 1000) on the map's own lights and 1 or less on the
     // lights the game spawns.
     static constexpr float MapLightWord = 5.0f;
@@ -229,45 +240,110 @@ public:
             known.since_seen += seconds;
         }
         std::vector<bool> matched(remembered.size());
-        for (const auto& light : seen) {
-            if (!Readable(light)) {
+        const size_t none = remembered.size();
+        std::vector<std::array<float, 3>> worlds(seen.size());
+        std::vector<float> sames(seen.size());
+        std::vector<size_t> claims(seen.size(), none);
+        std::vector<bool> readable(seen.size()), taken(seen.size());
+        for (size_t j = 0; j < seen.size(); ++j) {
+            readable[j] = Readable(seen[j]);
+            if (!readable[j]) {
                 continue;
             }
-            const auto view = Position(light);
-            const auto world = Transform(camera.view_to_world, view);
-            const float same =
-                SameLight + SameLightPerMetre * std::sqrt(DistanceSquared(view, {0, 0, 0}));
-            const float radius = Radius(light);
-            size_t nearest = remembered.size();
-            float nearest_distance = same * same;
+            const auto view = Position(seen[j]);
+            worlds[j] = Transform(camera.view_to_world, view);
+            sames[j] = SameLight + SameLightPerMetre * std::sqrt(DistanceSquared(view, {0, 0, 0}));
+        }
+        const auto claim_own = [&](size_t j) {
+            const float radius = Radius(seen[j]);
+            float nearest_distance = sames[j] * sames[j];
             for (size_t i = 0; i < matched.size(); ++i) {
-                const float distance = DistanceSquared(world, remembered[i].world);
+                const float distance = DistanceSquared(worlds[j], remembered[i].world);
                 const float known_radius = Radius(remembered[i].record);
                 if (!matched[i] && distance <= nearest_distance &&
                     std::abs(radius - known_radius) <=
                         SameRadius * std::max(radius, known_radius)) {
-                    nearest = i;
+                    claims[j] = i;
                     nearest_distance = distance;
                 }
             }
-            if (nearest == remembered.size() && Spawned(light)) {
-                float jump_distance = JumpDistance * JumpDistance;
+            if (claims[j] != none) {
+                matched[claims[j]] = true;
+            }
+        };
+        const auto take_over = [&](size_t j) {
+            const auto& light = seen[j];
+            if (claims[j] != none || !Spawned(light)) {
+                return;
+            }
+            for (const bool torch_tier : {true, false}) {
+                if (claims[j] != none || (kMutant == 9 && !torch_tier)) {
+                    break;
+                }
+                float best = std::numeric_limits<float>::max();
                 for (size_t i = 0; i < matched.size(); ++i) {
-                    const float distance = DistanceSquared(world, remembered[i].world);
-                    if (!matched[i] && remembered[i].since_seen <= JumpWindow &&
-                        distance <= jump_distance && SameKind(light, remembered[i].record)) {
-                        nearest = i;
-                        jump_distance = distance;
+                    const auto& candidate = remembered[i];
+                    if (matched[i] || !SameKind(light, candidate.record)) {
+                        continue;
+                    }
+                    const bool torch = Torch(candidate);
+                    if (kMutant != 9 && torch != torch_tier) {
+                        continue;
+                    }
+                    const bool rooted = Rooted(candidate);
+                    if (rooted && candidate.since_seen > JumpWindow && !(kMutant == 8 && Dark(light))) {
+                        continue;
+                    }
+                    const bool wide =
+                        kMutant == 4 || torch || (Dark(light) && (!rooted || kMutant == 8));
+                    const float reach =
+                        kMutant == 1 || !wide
+                            ? JumpDistance
+                            : std::min(JumpMost, JumpDistance + JumpSpeed * candidate.since_seen);
+                    const float distance = DistanceSquared(worlds[j], candidate.world);
+                    if (distance <= reach * reach && distance < best) {
+                        claims[j] = i;
+                        best = distance;
                     }
                 }
             }
-            if (nearest != remembered.size()) {
-                matched[nearest] = true;
+            if (claims[j] != none) {
+                matched[claims[j]] = true;
+                taken[j] = true;
+            }
+        };
+        for (size_t j = 0; j < seen.size(); ++j) {
+            if (readable[j]) {
+                claim_own(j);
+                if constexpr (kMutant == 6) {
+                    take_over(j);
+                }
+            }
+        }
+        if constexpr (kMutant != 6) {
+            for (size_t j = 0; j < seen.size(); ++j) {
+                if (readable[j]) {
+                    take_over(j);
+                }
+            }
+        }
+        for (size_t j = 0; j < seen.size(); ++j) {
+            if (!readable[j]) {
+                continue;
+            }
+            const auto& light = seen[j];
+            const auto& world = worlds[j];
+            const float same = sames[j];
+            const size_t nearest = claims[j];
+            const bool taken_over = taken[j];
+            if (nearest != none) {
                 auto& known = remembered[nearest];
+                const auto left = known.world;
                 // Only while listed: a moving light the game dropped has not come to rest.
                 if (DistanceSquared(world, known.settled) > same * same) {
                     known.settled = world;
                     known.since_moved = 0.0f;
+                    known.moved = true;
                 } else {
                     known.since_moved += seconds;
                 }
@@ -276,12 +352,21 @@ public:
                 known.since_seen = 0.0f;
                 known.listed_for += seconds;
                 known.flash = false;
+                known.dark_listings += Spawned(light) && Dark(light);
                 // The estimate of where a light is moves by up to `same`, more the further off it
                 // was seen: strayed further than that from where it began, with room to spare.
                 known.slack = std::max(known.slack, same);
-                if (DistanceSquared(world, known.origin) >
-                    CarriedFactor * CarriedFactor * known.slack * known.slack) {
+                if (taken_over) {
                     known.carried = true;
+                    ReleaseTwins(nearest, left, same, matched);
+                } else if (!known.carried &&
+                           DistanceSquared(world, known.origin) >
+                               CarriedFactor * CarriedFactor * known.slack * known.slack) {
+                    known.carried = true;
+                    ReleaseTwins(nearest, known.origin, known.slack, matched);
+                }
+                if (Spawned(light)) {
+                    FollowTwins(nearest, light, same, matched);
                 }
             } else if (remembered.size() < MaxRemembered) {
                 // Long past the hold it would take to count as moving.
@@ -290,6 +375,7 @@ public:
                                       .settled = world,
                                       .origin = world,
                                       .slack = same,
+                                      .dark_listings = Spawned(light) && Dark(light),
                                       .colour = Limited(light),
                                       .since_moved = MovedRecently});
             }
@@ -346,6 +432,8 @@ private:
         std::array<float, 3> origin{};
         float slack = 0.0f;
         bool carried = false;
+        bool moved = false;
+        int dark_listings = 0;
         // Seconds the game has listed it, and whether it was a flash when the game dropped it: it
         // goes as a moving light does, until it is listed again.
         float listed_for = 0.0f;
@@ -358,6 +446,38 @@ private:
         bool wanted = true, shown = false;
     };
 
+
+    static bool Torch(const Known& known) {
+        return known.carried || known.moved ||
+               known.dark_listings >= (kMutant == 11 ? 1 : DarkListings);
+    }
+
+    static bool Rooted(const Known& known) {
+        return kMutant != 5 && !Torch(known) && known.listed_for >= ShortLived;
+    }
+
+    static bool SameHue(const Light& a, const Light& b) {
+        const auto colour = [](const Light& light) {
+            return std::array<float, 3>{std::bit_cast<float>(light[4]), std::bit_cast<float>(light[5]),
+                                        std::bit_cast<float>(light[6])};
+        };
+        const auto x = colour(a), y = colour(b);
+        const float x_most = std::max({x[0], x[1], x[2]}), y_most = std::max({y[0], y[1], y[2]});
+        if (!(x_most > 0.0f) || !(y_most > 0.0f)) {
+            return false;
+        }
+        for (size_t i = 0; i < x.size(); ++i) {
+            if (!(std::abs(x[i] / x_most - y[i] / y_most) <= HueSlack)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool Dark(const Light& light) {
+        return !(std::max({std::bit_cast<float>(light[4]), std::bit_cast<float>(light[5]),
+                           std::bit_cast<float>(light[6])}) > 0.0f);
+    }
 
     static bool Moving(const Known& known) {
         return known.carried || known.flash || known.since_moved < MovedRecently;
@@ -440,18 +560,51 @@ private:
         return std::bit_cast<float>(light[7]) < MapLightWord;
     }
 
-    // The same word 7, about the same reach and about the same colour.
+    // The same word 7 and about the same reach. Not the colour: the game turns a torch's colour
+    // to nothing in about a third of the frames it lists it.
     static bool SameKind(const Light& a, const Light& b) {
-        if (a[7] != b[7] || std::abs(Radius(a) - Radius(b)) > SameRadius * std::max(Radius(a), Radius(b))) {
-            return false;
+        return a[7] == b[7] &&
+               std::abs(Radius(a) - Radius(b)) <= SameRadius * std::max(Radius(a), Radius(b));
+    }
+
+    // The game can list one torch twice in a frame (0.1 m apart, reaches 1% apart), and the second
+    // copy gets an entry of its own. While one copy is listed, the entries of its kind beside it
+    // that are not take its colour, and go dark with it: the game fades a torch to nothing before
+    // it drops it, its holder dead or not, but a copy dropped earlier, while the torch was lit,
+    // kept glowing where an enemy was killed without moving.
+    void FollowTwins(size_t listed, const Light& light, float within,
+                     const std::vector<bool>& matched) {
+        if constexpr (kMutant == 3) {
+            return;
         }
-        for (size_t i = 4; i < 7; ++i) {
-            const float x = std::bit_cast<float>(a[i]), y = std::bit_cast<float>(b[i]);
-            if (!(std::abs(x - y) <= 0.25f * std::max(x, y) + 0.05f)) {
-                return false;
+        for (size_t i = 0; i < matched.size(); ++i) {
+            auto& twin = remembered[i];
+            if (i != listed && !matched[i] && SameKind(twin.record, light) &&
+                (kMutant == 7 || (Torch(remembered[listed]) &&
+                                  (Torch(twin) || (kMutant != 10 && SameHue(twin.record, light))))) &&
+                DistanceSquared(twin.world, remembered[listed].world) <= within * within) {
+                std::copy_n(light.begin() + 4, 3, twin.record.begin() + 4);
             }
         }
-        return true;
+    }
+
+    // And once an entry is found to have moved, the copies of its kind that are not listed this
+    // frame and lie within `within` of where it was go as moving lights do, instead of staying
+    // where the torch stood. Only then: lights of one kind that stand together and do not move
+    // (the five at the Central Yharnam lamp) stay.
+    void ReleaseTwins(size_t moved, const std::array<float, 3>& was, float within,
+                      const std::vector<bool>& matched) {
+        if constexpr (kMutant == 2) {
+            return;
+        }
+        for (size_t i = 0; i < matched.size(); ++i) {
+            auto& twin = remembered[i];
+            if (i != moved && !matched[i] && !Rooted(twin) &&
+                SameKind(twin.record, remembered[moved].record) &&
+                DistanceSquared(twin.world, was) <= within * within) {
+                twin.carried = true;
+            }
+        }
     }
 
     static float Radius(const Light& light) {

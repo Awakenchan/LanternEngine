@@ -1633,13 +1633,20 @@ namespace BloodborneLauncher
             var ini = ws.Ini;
             // A connected Hunter's Dream account plays in its own co-op pool (the engine's thd backend);
             // decided here, not only when the Online page is opened.
-            ini.Set("online_pool", s.HuntersDreamToken.Length > 0 && s.Str("hd_name").Length > 0 ? "huntersdream" : "");
+            OnlineSettings.ChoosePool(ini, s);
             var seamlessRoom = ini.Get("seamless_enabled") == "1";
             if (seamlessRoom)
             {
                 var host = ini.Get("seamless_role", "guest") == "host";
                 var direct = ini.Get("seamless_direct") == "1";
-                var missing = direct ? !host && ini.Get("seamless_direct_host").Length == 0 : ini.Get("seamless_room").Length == 0;
+                if (SeamlessPlay.NeedsHostRoom(host, direct, ini.Get("seamless_host_room"), s.SeamlessHostPassword))
+                {
+                    ini.Set("seamless_host_room", SeamlessPlay.RandomText(SeamlessPlay.RoomLength));
+                    s.SeamlessHostPassword = SeamlessPlay.RandomText(SeamlessPlay.PasswordLength);
+                    ws.SaveNow();
+                }
+                var missing = SeamlessPlay.Missing(host, direct, ini.Get("seamless_room"), ini.Get("seamless_host_room"),
+                                                   s.SeamlessHostPassword, ini.Get("seamless_direct_host"));
                 if (missing)
                 {
                     Prompt.Tell(L.T("Seamless co-op"), host
@@ -1698,9 +1705,6 @@ namespace BloodborneLauncher
                 ws.Log(choice == 1 ? L.F($"{names}: kept on while online; Play online will not reach the server.")
                     : L.F($"{names}: left out while online; it applies again with online off."), LogLevel.Step);
             }
-
-            if (!HuntersDream.OnlinePaused && ini.Get("online_enabled") == "1")
-                await Online.PrepareTrustAsync();
 
             // A third-party resolution patch while the output resolution sets the game's resolution
             // and UI itself: it would keep its own shape (black bars) and stop the widescreen hooks.
@@ -1846,6 +1850,8 @@ namespace BloodborneLauncher
                 if (!start) return;
             }
 
+            if (!await SignInBeforeStartAsync()) return;
+
             var error = ws.StartGame();
             if (error != null)
             {
@@ -1854,6 +1860,33 @@ namespace BloodborneLauncher
             }
             if (s.Bool("switch_to_output"))
                 Show("output");
+        }
+
+        private async Task<bool> SignInBeforeStartAsync()
+        {
+            var ws = Workspace.Current;
+            var s = ws.Settings;
+            var token = s.HuntersDreamToken;
+            var name = s.Str("hd_name");
+            if (token.Length == 0 || name.Length == 0 || !ThdStart.GoesOnline((key, fallback) => ws.Ini.Get(key, fallback)))
+                return true;
+            var state = await ThdStart.Current.ForPlayAsync(token, cancel => HuntersDream.WhoAmIAsync(token, cancel), ThdStart.Timeout);
+            var refused = ThdStart.Refusal(state, s.HuntersDreamRefused);
+            if (refused != s.HuntersDreamRefused)
+            {
+                s.Set("hd_refused", refused);
+                ws.SaveNow();
+            }
+            if (refused.Length == 0)
+                return true;
+            ws.Log(L.F($"The Hunter's Dream refused the sign-in as {name} ({refused}): this start plays offline."), LogLevel.Warn);
+            var choice = Prompt.Choose(L.T("The Hunter's Dream refused the sign-in"),
+                L.F($"The Hunter's Dream refused this PC's sign-in as {name} ({refused}), so this start plays offline: nobody can summon or invite you.\n\n") +
+                L.T("Sign in again on the Online page: Hunter's Dream account › Sign in again."),
+                L.T("Play offline"), L.T("Open the Online page"));
+            if (choice == 1)
+                Show("online");
+            return choice == 0;
         }
 
         private void UpdatePlayButton()

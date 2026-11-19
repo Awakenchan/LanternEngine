@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include "bbport_settings.h"
 #include "common/assert.h"
@@ -12,6 +14,7 @@
 #include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_fsr_framegen.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -51,8 +54,18 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
     if (full_screen_exclusive) {
         std::printf("Display: exclusive fullscreen disallowed (VK_EXT_full_screen_exclusive)\n");
     }
+    policy.mode = PresentPolicy::PolicyModeFromSwitch(std::getenv(PresentPolicy::kPolicySwitch));
+    std::printf("Display: present policy %s (%s=%d)\n",
+                policy.mode == PresentPolicy::PolicyMode::New
+                    ? "on: acquire and the idle redraw give up after 500 ms, a sticky suboptimal "
+                      "swapchain is rechecked once a second"
+                    : "off: the original waits and rebuilds",
+                PresentPolicy::kPolicySwitch, policy.mode == PresentPolicy::PolicyMode::New ? 1 : 0);
     FindPresentFormat();
     FindPresentMode();
+    if (instance.GetFsrFgQueues().present) {
+        fsr_fg = std::make_unique<FsrFrameGen>(instance);
+    }
 
     Create(window.GetWidth(), window.GetHeight());
     ImGui::Core::Initialize(instance, window, image_count, surface_format.format);
@@ -60,6 +73,7 @@ Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& windo
 
 Swapchain::~Swapchain() {
     Destroy();
+    fsr_fg.reset();
     instance.GetInstance().destroySurfaceKHR(surface);
 }
 
@@ -117,7 +131,8 @@ void Swapchain::Create(u32 width_, u32 height_) {
         .pNext = FullScreenExclusiveDisallowed(full_screen_exclusive),
         .latencyModeEnable = true,
     };
-    const bool boost = instance.IsLowLatencyBoostEnabled() &&
+    const bool fsr_fg_wanted = fsr_fg && fsr_fg->Usable();
+    const bool boost = instance.IsLowLatencyBoostEnabled() && !fsr_fg_wanted &&
                        BbSettings::Get().reflex.load() != BbSettings::ReflexOff;
     const vk::SwapchainCreateInfoKHR swapchain_info = {
         .pNext = boost ? static_cast<const void*>(&latency_info)
@@ -140,7 +155,15 @@ void Swapchain::Create(u32 width_, u32 height_) {
         .oldSwapchain = nullptr,
     };
 
-    auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    vk::Result swapchain_result = vk::Result::eSuccess;
+    vk::SwapchainKHR chain{};
+    if (fsr_fg_wanted && fsr_fg->CreateSwapchain(swapchain_info, chain)) {
+        fsr_fg_swapchain.store(true, std::memory_order_release);
+    } else {
+        auto created = instance.GetDevice().createSwapchainKHR(swapchain_info);
+        swapchain_result = created.result;
+        chain = created.value;
+    }
     if (swapchain_result != vk::Result::eSuccess) {
         // bbport: no swapchain now (IsPresentable is false): presents are skipped and the next
         // one tries again.
@@ -150,6 +173,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
         return;
     }
     swapchain = chain;
+    PresentPolicy::OnSwapchainCreated(policy);
     if (boost && VULKAN_HPP_DEFAULT_DISPATCHER.vkSetLatencySleepModeNV) {
         // bbport (0.9.37 beta 6): the driver keeps the GPU's clocks up (Reflex Boost) instead of
         // lowering them whenever the GPU waits for the engine: half the frame rate on an RTX 3070
@@ -206,10 +230,14 @@ void Swapchain::ApplyHdrMetadata() {
         .maxContentLightLevel = hdr_content_nits > 0.0f ? hdr_content_nits : hdr_max_nits,
         .maxFrameAverageLightLevel = hdr_average_nits,
     };
+    if (fsr_fg_swapchain) {
+        fsr_fg->SetHdrMetadata(metadata);
+        return;
+    }
     instance.GetDevice().setHdrMetadataEXT(1, &swapchain, &metadata);
 }
 
-std::vector<vk::SurfaceFormatKHR> Swapchain::QuerySurfaceFormats() const {
+std::vector<vk::SurfaceFormatKHR> Swapchain::QuerySurfaceFormats(vk::Result* quiet_result) const {
     const vk::PhysicalDevice physical = instance.GetPhysicalDevice();
     if (full_screen_exclusive) {
         // The same chain as the swapchain's creation (VK_EXT_full_screen_exclusive).
@@ -224,15 +252,25 @@ std::vector<vk::SurfaceFormatKHR> Swapchain::QuerySurfaceFormats() const {
             for (const auto& format2 : formats2) {
                 formats.push_back(format2.surfaceFormat);
             }
+            if (quiet_result) {
+                *quiet_result = formats2_result;
+            }
             return formats;
         }
-        LOG_WARNING(Render_Vulkan, "Failed to query surface formats (2): {}",
-                    vk::to_string(formats2_result));
+        if (!quiet_result) {
+            LOG_WARNING(Render_Vulkan, "Failed to query surface formats (2): {}",
+                        vk::to_string(formats2_result));
+        }
     }
     auto [formats_result, formats] = physical.getSurfaceFormatsKHR(surface);
+    if (quiet_result) {
+        *quiet_result = formats_result;
+    }
     if (formats_result != vk::Result::eSuccess) {
-        LOG_ERROR(Render_Vulkan, "Failed to query surface formats: {}",
-                  vk::to_string(formats_result));
+        if (!quiet_result) {
+            LOG_ERROR(Render_Vulkan, "Failed to query surface formats: {}",
+                      vk::to_string(formats_result));
+        }
         return {};
     }
     return std::move(formats);
@@ -257,43 +295,93 @@ void Swapchain::SetHDR(bool hdr) {
                                                  : surface_format.format);
 }
 
-bool Swapchain::AcquireNextImage() {
+static PresentPolicy::SurfaceExtent ToSurfaceExtent(vk::Extent2D extent) {
+    return {.width = extent.width, .height = extent.height};
+}
+
+static u64 NowNs() {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+}
+
+PresentPolicy::SurfaceResult Swapchain::AcquireImage(u64 timeout_ns, u32& index) {
+    last_acquire_result =
+        fsr_fg_swapchain
+            ? fsr_fg->Acquire(timeout_ns, image_acquired[frame_index], index)
+            : instance.GetDevice().acquireNextImageKHR(swapchain, timeout_ns,
+                                                       image_acquired[frame_index], VK_NULL_HANDLE,
+                                                       &index);
+    return PresentPolicy::ToSurfaceResult(static_cast<VkResult>(last_acquire_result));
+}
+
+bool Swapchain::HdrFormatWatched() const {
+    return !needs_hdr && hdr_format.format != vk::Format::eUndefined;
+}
+
+PresentPolicy::SurfaceState Swapchain::BuiltSurface() const {
+    PresentPolicy::SurfaceState state;
+    state.extent = ToSurfaceExtent(extent);
+    state.hdr_offered = HdrFormatWatched() && hdr_output;
+    return state;
+}
+
+std::optional<PresentPolicy::SurfaceState> Swapchain::CurrentSurface() const {
+    vk::SurfaceCapabilitiesKHR capabilities{};
+    if (QueryCapabilities(capabilities) != vk::Result::eSuccess) {
+        return std::nullopt;
+    }
+    PresentPolicy::SurfaceState state;
+    state.extent =
+        ToSurfaceExtent(ExtentFor(capabilities, window.GetWidth(), window.GetHeight()));
+    if (HdrFormatWatched()) {
+        vk::Result formats_result = vk::Result::eSuccess;
+        const std::vector<vk::SurfaceFormatKHR> formats = QuerySurfaceFormats(&formats_result);
+        if (formats_result != vk::Result::eSuccess) {
+            return std::nullopt;
+        }
+        state.hdr_offered = std::ranges::find(formats, hdr_format) != formats.end();
+    }
+    return state;
+}
+
+PresentPolicy::AcquireStep Swapchain::AcquireNextImage() {
+    using PresentPolicy::AcquireStep;
     if (!swapchain) {
         needs_recreation = true; // the last Create failed
-        return false;
+        return AcquireStep::Rebuild;
     }
-    vk::Device device = instance.GetDevice();
-    vk::Result result =
-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
-                                   image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
-
-    switch (result) {
-    case vk::Result::eSuccess:
-        break;
-    case vk::Result::eSuboptimalKHR:
+    const PresentPolicy::AcquireOutcome outcome =
+        PresentPolicy::AcquireImage(*this, BuiltSurface(), policy, NowNs(), image_index);
+    switch (outcome.step) {
+    case AcquireStep::Acquired:
         // A suboptimal acquire still owns an image and signals the semaphore: present it in the
-        // normal submission, then recreate (Present() returns false). Dropping it left the
-        // semaphore signalled and never waited on. From AwesomeObserver b3164c1 (E. Doronin).
-        needs_recreation = true;
-        return true;
-    case vk::Result::eErrorSurfaceLostKHR:
-        NoteDisplayEvent("acquiring a swapchain image", result);
-        surface_lost = true;
-        needs_recreation = true;
-        break;
-    case vk::Result::eErrorOutOfDateKHR:
-    case vk::Result::eErrorUnknown:
-        needs_recreation = true;
-        break;
-    default:
-        // bbport: e.g. a timeout or a lost exclusive fullscreen: recreated like out-of-date
-        // (this was UNREACHABLE, exit 23).
-        NoteDisplayEvent("acquiring a swapchain image", result);
-        needs_recreation = true;
+        // normal submission. Dropping it left the semaphore signalled and never waited on. From
+        // AwesomeObserver b3164c1 (E. Doronin).
+        needs_recreation = needs_recreation || outcome.rebuild_after_present;
+        return AcquireStep::Acquired;
+    case AcquireStep::Skip:
+        if (outcome.first_timeout) {
+            std::printf("Display: no swapchain image within %llu ms (%s); the frame is skipped "
+                        "and the next one tries again\n",
+                        static_cast<unsigned long long>(PresentPolicy::kPresentWaitTimeoutMs),
+                        vk::to_string(last_acquire_result).c_str());
+        }
+        return AcquireStep::Skip;
+    case AcquireStep::Rebuild:
         break;
     }
-
-    return !needs_recreation;
+    // bbport: a lost surface, out-of-date or another display event (a lost exclusive
+    // fullscreen): recreated (this was UNREACHABLE, exit 23).
+    if (last_acquire_result != vk::Result::eErrorOutOfDateKHR &&
+        last_acquire_result != vk::Result::eErrorUnknown) {
+        NoteDisplayEvent("acquiring a swapchain image", last_acquire_result);
+    }
+    if (last_acquire_result == vk::Result::eErrorSurfaceLostKHR) {
+        surface_lost = true;
+    }
+    needs_recreation = true;
+    return AcquireStep::Rebuild;
 }
 
 bool Swapchain::Present() {
@@ -305,9 +393,18 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
-    auto result = instance.GetPresentQueue().presentKHR(present_info);
-    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+    auto result = fsr_fg_swapchain ? fsr_fg->Present(instance.GetPresentQueue(), present_info)
+                                   : instance.GetPresentQueue().presentKHR(present_info);
+    if (fsr_fg_swapchain && result != vk::Result::eSuccess && result != vk::Result::eSuboptimalKHR &&
+        result != vk::Result::eErrorOutOfDateKHR && result != vk::Result::eErrorSurfaceLostKHR &&
+        result != vk::Result::eErrorDeviceLost) {
+        fsr_fg->Fail("AMD's swapchain returned an error at present");
+    }
+    if (result == vk::Result::eErrorOutOfDateKHR) {
         needs_recreation = true;
+    } else if (result == vk::Result::eSuboptimalKHR) {
+        const bool rebuild = PresentPolicy::OnSuboptimal(*this, BuiltSurface(), policy, NowNs());
+        needs_recreation = needs_recreation || rebuild;
     } else if (result != vk::Result::eSuccess && result != vk::Result::eErrorDeviceLost) {
         // bbport: a lost surface (display or driver reset) or another display event: recreated
         // like out-of-date (this was an assertion, exit 23). A lost device still stops below.
@@ -315,6 +412,9 @@ bool Swapchain::Present() {
         surface_lost = result == vk::Result::eErrorSurfaceLostKHR;
         needs_recreation = true;
     } else {
+        if (result == vk::Result::eSuccess) {
+            PresentPolicy::OnPresentSucceeded(policy);
+        }
         if (result == vk::Result::eErrorDeviceLost) {
             Breadcrumbs::ReportDeviceLost("present");
         }
@@ -323,6 +423,9 @@ bool Swapchain::Present() {
     }
 
     frame_index = (frame_index + 1) % image_count;
+    if (fsr_fg_swapchain && !fsr_fg->Usable()) {
+        needs_recreation = true;
+    }
 
     return !needs_recreation;
 }
@@ -402,43 +505,56 @@ void Swapchain::FindPresentFormat() {
 }
 
 void Swapchain::FindPresentMode() {
+    const std::string requested_mode = EmulatorSettings.GetPresentMode();
+    const PresentPolicy::PresentMode requested_by_name =
+        PresentPolicy::PresentModeFromName(requested_mode);
     const auto [modes_result, modes] = GetSurfacePresentModes(
         instance.GetInstance(), instance.GetPhysicalDevice(), surface, full_screen_exclusive);
     if (modes_result != vk::Result::eSuccess) {
         LOG_ERROR(Render, "Failed to query available present modes, falling back to Fifo as "
                           "guaranteed supported option.");
         present_mode = vk::PresentModeKHR::eFifo;
+        pacing_mode.store(PresentPolicy::PacingPresentMode(policy.mode, requested_by_name,
+                                                           PresentPolicy::PresentMode::Fifo),
+                          std::memory_order_relaxed);
         return;
     }
 
-    const auto requested_mode = EmulatorSettings.GetPresentMode();
+    vk::PresentModeKHR requested = vk::PresentModeKHR::eMailbox;
     if (requested_mode == "Mailbox") {
-        present_mode = vk::PresentModeKHR::eMailbox;
+        requested = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {
-        present_mode = vk::PresentModeKHR::eFifo;
+        requested = vk::PresentModeKHR::eFifo;
     } else if (requested_mode == "FifoRelaxed") {
         // bbport: the launcher offers it (VSync that tears instead of waiting when a frame is late).
-        present_mode = vk::PresentModeKHR::eFifoRelaxed;
+        requested = vk::PresentModeKHR::eFifoRelaxed;
     } else if (requested_mode == "Immediate") {
-        present_mode = vk::PresentModeKHR::eImmediate;
+        requested = vk::PresentModeKHR::eImmediate;
     } else {
         LOG_ERROR(Render_Vulkan, "Unknown present mode {}, defaulting to Mailbox.",
                   EmulatorSettings.GetPresentMode());
-        present_mode = vk::PresentModeKHR::eMailbox;
     }
 
-    if (std::ranges::find(modes, present_mode) == modes.cend()) {
-        // FIFO is guaranteed to be supported by the Vulkan spec.
-        constexpr auto fallback = vk::PresentModeKHR::eFifo;
-        LOG_WARNING(Render, "Requested present mode {} is not supported, falling back to {}.",
-                    vk::to_string(present_mode), vk::to_string(fallback));
-        present_mode = fallback;
+    std::vector<PresentPolicy::PresentMode> supported;
+    supported.reserve(modes.size());
+    for (const vk::PresentModeKHR mode : modes) {
+        supported.push_back(PresentPolicy::ToPolicyMode(static_cast<VkPresentModeKHR>(mode)));
     }
+    const PresentPolicy::PresentMode chosen = PresentPolicy::ChoosePresentMode(
+        policy.mode, PresentPolicy::ToPolicyMode(static_cast<VkPresentModeKHR>(requested)),
+        supported);
+    present_mode = static_cast<vk::PresentModeKHR>(PresentPolicy::ToVkMode(chosen));
+    if (present_mode != requested) {
+        LOG_WARNING(Render, "Requested present mode {} is not supported, falling back to {}.",
+                    vk::to_string(requested), vk::to_string(present_mode));
+    }
+    pacing_mode.store(PresentPolicy::PacingPresentMode(policy.mode, requested_by_name, chosen),
+                      std::memory_order_relaxed);
+    std::printf("Display: present mode %s (requested %s)\n", vk::to_string(present_mode).c_str(),
+                vk::to_string(requested).c_str());
 }
 
-bool Swapchain::SetSurfaceProperties() {
-    vk::SurfaceCapabilitiesKHR capabilities{};
-    vk::Result capabilities_result{};
+vk::Result Swapchain::QueryCapabilities(vk::SurfaceCapabilitiesKHR& capabilities) const {
     if (full_screen_exclusive) {
         // The same chain as the swapchain's creation (VK_EXT_full_screen_exclusive).
         const vk::PhysicalDeviceSurfaceInfo2KHR surface_info{
@@ -447,28 +563,37 @@ bool Swapchain::SetSurfaceProperties() {
         };
         const auto [result2, capabilities2] =
             instance.GetPhysicalDevice().getSurfaceCapabilities2KHR(surface_info);
-        capabilities_result = result2;
         capabilities = capabilities2.surfaceCapabilities;
-    } else {
-        const auto [result1, capabilities1] =
-            instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
-        capabilities_result = result1;
-        capabilities = capabilities1;
+        return result2;
     }
+    const auto [result1, capabilities1] =
+        instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+    capabilities = capabilities1;
+    return result1;
+}
+
+vk::Extent2D Swapchain::ExtentFor(const vk::SurfaceCapabilitiesKHR& capabilities, u32 width_,
+                                  u32 height_) const {
+    vk::Extent2D result = capabilities.currentExtent;
+    if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
+        result.width = std::max(capabilities.minImageExtent.width,
+                                std::min(capabilities.maxImageExtent.width, width_));
+        result.height = std::max(capabilities.minImageExtent.height,
+                                 std::min(capabilities.maxImageExtent.height, height_));
+    }
+    return result;
+}
+
+bool Swapchain::SetSurfaceProperties() {
+    vk::SurfaceCapabilitiesKHR capabilities{};
+    const vk::Result capabilities_result = QueryCapabilities(capabilities);
     if (capabilities_result != vk::Result::eSuccess) {
         // bbport: this was an assertion (exit 23); a lost surface is made again at the next try.
         NoteDisplayEvent("querying the surface capabilities failed", capabilities_result);
         surface_lost = capabilities_result == vk::Result::eErrorSurfaceLostKHR;
         return false;
     }
-
-    extent = capabilities.currentExtent;
-    if (capabilities.currentExtent.width == std::numeric_limits<u32>::max()) {
-        extent.width = std::max(capabilities.minImageExtent.width,
-                                std::min(capabilities.maxImageExtent.width, width));
-        extent.height = std::max(capabilities.minImageExtent.height,
-                                 std::min(capabilities.maxImageExtent.height, height));
-    }
+    extent = ExtentFor(capabilities, width, height);
 
     // Select number of images in swap chain, we prefer one buffer in the background to work on
     image_count = capabilities.minImageCount + 1 + extra_images; // bbport: + frame generation's
@@ -490,7 +615,24 @@ bool Swapchain::SetSurfaceProperties() {
     return true;
 }
 
+void Swapchain::EndFsrSwapchain() {
+    if (!fsr_fg_swapchain) {
+        return;
+    }
+    const vk::Device device = instance.GetDevice();
+    for (auto& image_view : images_view) {
+        device.destroyImageView(image_view);
+    }
+    images_view.clear();
+    images.clear();
+    fsr_fg->EndSwapchain();
+    swapchain = nullptr;
+    fsr_fg_swapchain.store(false, std::memory_order_release);
+    needs_recreation = true;
+}
+
 void Swapchain::WaitIdle() {
+    EndFsrSwapchain();
     // bbport: vkDeviceWaitIdle needs every queue of the device externally synchronized: the
     // recording threads submit to the same queue under this lock (Scheduler::submit_mutex).
     std::scoped_lock submit_lock{Scheduler::submit_mutex};
@@ -572,7 +714,15 @@ void Swapchain::RefreshSemaphores() {
 
 void Swapchain::SetupImages() {
     vk::Device device = instance.GetDevice();
-    auto [images_result, imgs] = device.getSwapchainImagesKHR(swapchain);
+    std::vector<vk::Image> imgs;
+    vk::Result images_result = vk::Result::eSuccess;
+    if (fsr_fg_swapchain) {
+        images_result = fsr_fg->GetImages(imgs);
+    } else {
+        auto listed = device.getSwapchainImagesKHR(swapchain);
+        images_result = listed.result;
+        imgs = std::move(listed.value);
+    }
     ASSERT_MSG(images_result == vk::Result::eSuccess, "Failed to create swapchain images: {}",
                vk::to_string(images_result));
     images = std::move(imgs);

@@ -15,6 +15,7 @@
 #include "bbport_free_check.h"
 #include "engine/key_prompts.h"
 #include "engine/hud_clean.h"
+#include "engine/gc_marks.h"
 #include <zlib.h>
 #include <cstdlib>
 #include <cstring>
@@ -157,23 +158,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         return;
     }
 
-    const s64 device_local_memory = static_cast<s64>(instance.GetTotalMemoryBudget());
-    const s64 min_spacing_expected = device_local_memory - 1_GB;
-    const s64 min_spacing_critical = device_local_memory - 512_MB;
-    const s64 mem_threshold = std::min<s64>(device_local_memory, TARGET_GC_THRESHOLD);
-    const s64 min_vacancy_expected = (6 * mem_threshold) / 10;
-    const s64 min_vacancy_critical = (2 * mem_threshold) / 10;
-    pressure_gc_memory = static_cast<u64>(
-        std::max<u64>(std::min(device_local_memory - min_vacancy_expected, min_spacing_expected),
-                      DEFAULT_PRESSURE_GC_MEMORY));
-    critical_gc_memory = static_cast<u64>(
-        std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
-                      DEFAULT_CRITICAL_GC_MEMORY));
-    if (device_local_memory <= DEFAULT_CRITICAL_GC_MEMORY) {
-        pressure_gc_memory = static_cast<u64>(device_local_memory / 100 * 75);
-        critical_gc_memory = static_cast<u64>(device_local_memory / 100 * 88);
-    }
-    trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    const auto marks = BbEngine::GcMarks::StartMarks(static_cast<s64>(instance.GetTotalMemoryBudget()));
+    trigger_gc_memory = marks.trigger;
+    pressure_gc_memory = marks.pressure;
+    critical_gc_memory = marks.critical;
     static_pressure_gc_memory = pressure_gc_memory;
     static_critical_gc_memory = critical_gc_memory;
 }
@@ -319,7 +307,8 @@ void TextureCache::ProcessDownloadImages() {
     download_images.clear();
 }
 
-static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size);
+static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size,
+                                         const char* outcome);
 
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     Image& image = slot_images[image_id];
@@ -379,29 +368,28 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         download.Invalidate();
         BbFreeCheck::Check(image.info.guest_address, download_size, download.mapped,
                            BbFreeCheck::ImageDownload);
-        const auto watched = WatchedPart(image, image.info.guest_address, download_size);
+        // bbport: the caches' own thread (stage A drained, or the draw recording thread):
+        // a readback the range needs runs here. Sent to the GPU command thread, it waited
+        // for that thread, or for this one, which never came back to run it.
+        buffer_cache.InvalidateMemory(image.info.guest_address, download_size, true);
+        const auto watched =
+            WatchedPart(image, image.info.guest_address, download_size, "downloaded without them");
         if (watched.second != 0) {
             Core::Memory::Instance()->TryWriteBacking(
                 std::bit_cast<u8*>(watched.first),
                 download.mapped + (watched.first - image.info.guest_address), watched.second);
         }
-        if (!WriteTracking()) {
-            // bbport: the caches' own thread (stage A drained, or the draw recording thread):
-            // a readback the range needs runs here. Sent to the GPU command thread, it waited
-            // for that thread, or for this one, which never came back to run it.
-            buffer_cache.InvalidateMemory(image.info.guest_address, download_size, true);
-        }
+        buffer_cache.MarkCpuModified(image.info.guest_address, download_size, BufferCache::CpuModifiedBy::ImageStore);
     } else {
         scheduler.DeferPriorityOperation(
             [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
                 BbFreeCheck::Check(device_addr, download_size, download.mapped,
                                    BbFreeCheck::ImageDownload);
+                buffer_cache.InvalidateMemory(device_addr, download_size);
                 Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
                                                           download.mapped, download_size);
-                if (!WriteTracking()) {
-                    buffer_cache.InvalidateMemory(device_addr, download_size);
-                }
+                buffer_cache.MarkCpuModified(device_addr, download_size, BufferCache::CpuModifiedBy::ImageStore);
                 runtime.GetStagingPool().FreeDeferred(download);
             });
     }
@@ -419,7 +407,8 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
 /// its heap kept the free list in those bytes, and a store of the whole image put pixels over it
 /// (crash in the game's heap after a death and reload, 0.9.40 reports). Those pages are left as
 /// the game has them. BB_STORE_UNWATCHED=1: the whole image, as before.
-static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size) {
+static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size,
+                                         const char* outcome) {
     static const bool whole = [] {
         const char* env = std::getenv("BB_STORE_UNWATCHED");
         return env && env[0] == '1';
@@ -432,20 +421,20 @@ static std::pair<VAddr, u64> WatchedPart(Image& image, VAddr address, u64 size) 
     if (begin >= end) {
         return {address, 0};
     }
-    if (end - begin != size) {
+    if (end - begin != size && outcome != nullptr) {
         static std::atomic<u32> said{0};
         if (said.fetch_add(1, std::memory_order_relaxed) < 6) {
-            std::printf("Texture cache: image at %#llx stored back without %llu bytes on its first "
-                        "or last page (the game wrote beside it there; BB_STORE_UNWATCHED=1: all "
-                        "of it)\n",
-                        static_cast<unsigned long long>(address),
+            std::printf("Texture cache: image at %#llx %s: %llu bytes on its first or last page "
+                        "are no longer watched (the game wrote beside it there; "
+                        "BB_STORE_UNWATCHED=1: all of it)\n",
+                        static_cast<unsigned long long>(address), outcome,
                         static_cast<unsigned long long>(size - (end - begin)));
         }
     }
     return {begin, end - begin};
 }
 
-bool TextureCache::StoreTiledImage(ImageId image_id) {
+bool TextureCache::StoreTiledImage(ImageId image_id, bool partial) {
     Image& image = slot_images[image_id];
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         return true; // guest memory already has it
@@ -456,8 +445,8 @@ bool TextureCache::StoreTiledImage(ImageId image_id) {
     if (!info.props.is_tiled || address == 0 || size == 0 || !image.backing) {
         return false;
     }
-    const auto watched = WatchedPart(image, address, size);
-    if (watched.second == 0) {
+    const auto watched = WatchedPart(image, address, size, nullptr);
+    if (watched.second == 0 || (watched.second != size && !partial)) {
         return false;
     }
 
@@ -526,6 +515,7 @@ bool TextureCache::StoreTiledImage(ImageId image_id) {
     if (!host.mapped) {
         return false;
     }
+    buffer_cache.InvalidateMemory(address, size, true);
     memory->CopySparseMemory(address, host.mapped, size);
     host.Flush();
 
@@ -554,10 +544,8 @@ bool TextureCache::StoreTiledImage(ImageId image_id) {
                                                 host.mapped + (watched.first - address),
                                                 watched.second);
     image.mip_hashes_current = false;
-    // Guest memory changed under the copies made of it (also by a partial store).
-    if (!WriteTracking()) {
-        buffer_cache.InvalidateMemory(address, size, true);
-    }
+    // Guest memory changed under the copies made of it.
+    buffer_cache.MarkCpuModified(address, size, BufferCache::CpuModifiedBy::ImageStore);
     // The other images over the range read guest memory again at their next use.
     for (const ImageId other_id : others) {
         Image& other = slot_images[other_id];
@@ -609,8 +597,12 @@ void TextureCache::DumpImagesAt(VAddr address, const char* dir) {
         const std::string path = std::format("{}/img_{:x}_{}_{}x{}_{}.raw", dir, address, n++, width,
                                              height, format);
         if (FILE* f = std::fopen(path.c_str(), "wb")) {
-            std::fwrite(download.mapped, 1, size, f);
-            std::fclose(f);
+            const bool written = std::fwrite(download.mapped, 1, size, f) == size;
+            if (std::fclose(f) != 0 || !written) {
+                std::remove(path.c_str());
+                std::printf("  image %u could not be written to %s; partial file removed\n",
+                            image_id.index, path.c_str());
+            }
         }
     }
 }
@@ -1511,13 +1503,18 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             NoteObjectPath(PathNoObject);
             return false;
         }
-        if (!held.uid) {
+        const HeldUse use = UseHeld({held.uid, held.generation, held.index}, registry_generation.load(std::memory_order_relaxed));
+        if (use == HeldNothing) {
             NoteObjectPath(PathNothingHeld);
             return true;
         }
         const ImageId held_id{held.index};
         if (!IsRegisteredImage(held_id, held.uid)) {
             NoteObjectPath(PathHeldGone);
+            return true;
+        }
+        if (use == HeldSearch) {
+            NoteObjectPath(PathHeldStale);
             return true;
         }
         const Image& candidate = slot_images[held_id];
@@ -1657,7 +1654,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     };
     if (at_object && !held_served && view_mip <= 0 && view_slice <= 0 &&
         slot_images[image_id].info.guest_address == info.guest_address) {
-        BbEngine::GxObjects::HoldImage(info.guest_address, image_id.index, slot_images[image_id].image_uid);
+        BbEngine::GxObjects::HoldImage(info.guest_address, image_id.index, slot_images[image_id].image_uid,
+                                       registry_generation.load(std::memory_order_relaxed));
     }
     if (BbEngine::GxObjects::On()) {
         BbEngine::GxObjects::NoteImage(info.guest_address, info.guest_size, ImageUid(image_id), info.size.width, info.size.height,
@@ -1975,6 +1973,9 @@ void TextureCache::UnregisterImage(ImageId image_id) {
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
     ++registry_generation;
+    if (BbEngine::GxObjects::TexturesOwned()) {
+        BbEngine::GxObjects::DropHeldImage(image.image_uid);
+    }
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
     BbStats::live_image_bytes.fetch_sub(Common::AlignUp(image.info.guest_size, 1024),
@@ -2140,28 +2141,27 @@ void TextureCache::GarbageCollectImages() {
             const char* env = std::getenv("BB_GC_BUDGET_MB");
             return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
         }();
-        if (instance.IsIntegrated() || forced_budget) {
-            const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
-            if (budget != 0) {
-                trigger_gc_memory = budget / 10 * 7;
-                pressure_gc_memory = budget / 100 * 85;
-                critical_gc_memory = budget / 100 * 95;
-            }
-        } else if (const u64 percent = DiscretePressurePercent();
-                   percent != 0 && second != gc_budget_second) {
-            // bbport: discrete GPUs (see DiscretePressurePercent); the budget once a second.
+        BbEngine::GcMarks::Inputs inputs;
+        inputs.start = {trigger_gc_memory, static_pressure_gc_memory, static_critical_gc_memory};
+        inputs.current = {trigger_gc_memory, pressure_gc_memory, critical_gc_memory};
+        inputs.start_budget = instance.GetTotalMemoryBudget();
+        inputs.used = total_used_memory;
+        inputs.image_bytes = BbStats::vk_image_bytes.load(std::memory_order_relaxed);
+        inputs.percent = DiscretePressurePercent();
+        inputs.forced_budget = forced_budget;
+        inputs.integrated = instance.IsIntegrated();
+        inputs.low_vram = low_vram_gc;
+        inputs.new_second = second != gc_budget_second;
+        const auto derived = BbEngine::GcMarks::Derive(
+            inputs, [this] { return instance.GetDeviceMemoryBudgetNow(); });
+        if (inputs.new_second && inputs.percent != 0 && !inputs.integrated && !forced_budget) {
             gc_budget_second = second;
-            if (const u64 budget = instance.GetDeviceMemoryBudgetNow(); budget != 0) {
-                const bool small_budget = low_vram_gc || budget <= static_cast<u64>(DEFAULT_CRITICAL_GC_MEMORY);
-                pressure_gc_memory = small_budget
-                                         ? budget / 100 * percent
-                                         : std::max(static_pressure_gc_memory, budget / 100 * percent);
-                critical_gc_memory =
-                    small_budget ? budget / 100 * (percent + 10)
-                                 : std::max({static_critical_gc_memory, budget / 100 * (percent + 10),
-                                             pressure_gc_memory});
-            }
         }
+        trigger_gc_memory = derived.marks.trigger;
+        pressure_gc_memory = derived.marks.pressure;
+        critical_gc_memory = derived.marks.critical;
+        gc_hysteresis = derived.hysteresis;
+        gc_non_image_memory = BbEngine::GcMarks::NonImage(inputs.used, inputs.image_bytes);
     }
     BbStats::gc_used_bytes.store(total_used_memory, std::memory_order_relaxed);
     BbStats::gc_trigger_bytes.store(trigger_gc_memory, std::memory_order_relaxed);
@@ -2180,6 +2180,7 @@ void TextureCache::GarbageCollectImages() {
     }
 
     if (total_used_memory < trigger_gc_memory) {
+        gc_pressure_latched = false;
         return;
     }
     static const u64 idle_seconds = [] {
@@ -2221,7 +2222,8 @@ void TextureCache::GarbageCollectImages() {
                    : ~0ull);
 
     const auto configure = [&](bool allow_aggressive) {
-        pressured = total_used_memory >= pressure_gc_memory;
+        pressured = BbEngine::GcMarks::Pressured(gc_pressure_latched, total_used_memory,
+                                                 pressure_gc_memory);
         aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
         const u64 ticks_to_destroy = std::min<u64>(aggresive ? 160 : pressured ? 80 : 16, gc_tick);
         below_tick = gc_tick - ticks_to_destroy;
@@ -2258,25 +2260,42 @@ void TextureCache::GarbageCollectImages() {
         // work not finished yet: kept, whatever its LRU age says.
         if (recent_tick != 0 && (image.tick_accessed_last >= recent_tick ||
                                  !scheduler.IsFree(image.tick_accessed_last))) {
-            ++gc_recent_kept;
+            gc_recent_kept += BbEngine::GcMarks::FirstInReport(image.gc_seen_recent, gc_report_id);
             return keep();
         }
         bool written_back = false;
         if (tiled && download) {
             // Freed only once its contents are in guest memory, tiled (StoreTiledImage).
             if (!store_tiled || gc_tick < image.store_retry_tick) {
-                ++gc_tiled_kept;
+                gc_tiled_kept += BbEngine::GcMarks::FirstInReport(image.gc_seen_tiled, gc_report_id);
+                return keep();
+            }
+            const bool partial =
+                True(image.flags & ImageFlagBits::GpuModified) && [&] {
+                    const u64 size = image.info.guest_size;
+                    const u64 watched =
+                        WatchedPart(image, image.info.guest_address, size, nullptr).second;
+                    return watched != 0 && watched != size;
+                }();
+            const bool critical = total_used_memory >= critical_gc_memory;
+            if (partial && !critical) {
+                gc_tiled_refused += BbEngine::GcMarks::FirstInReport(image.gc_seen_refused, gc_report_id);
+                gc_tiled_kept += BbEngine::GcMarks::FirstInReport(image.gc_seen_tiled, gc_report_id);
                 return keep();
             }
             if (stores >= MaxStoresPerPass) {
                 return false; // each waits for the GPU: the next pass, still first in line
             }
             ++stores;
-            if (!StoreTiledImage(image_id)) {
+            if (!StoreTiledImage(image_id, partial && critical)) {
                 image.store_retry_tick = gc_tick + (u64{60} << std::min<u8>(image.store_failures, 5));
                 image.store_failures = static_cast<u8>(std::min(image.store_failures + 1, 255));
-                ++gc_tiled_kept;
+                gc_tiled_kept += BbEngine::GcMarks::FirstInReport(image.gc_seen_tiled, gc_report_id);
                 return keep();
+            }
+            if (partial) {
+                WatchedPart(image, image.info.guest_address, image.info.guest_size,
+                            "stored back without them at critical memory pressure");
             }
             image.store_failures = 0;
             written_back = true;
@@ -2300,7 +2319,8 @@ void TextureCache::GarbageCollectImages() {
                 aggresive = false;
                 return false;
             }
-            if (pressured && total_used_memory < pressure_gc_memory) {
+            if (pressured && !BbEngine::GcMarks::Pressured(gc_hysteresis, total_used_memory,
+                                                           pressure_gc_memory)) {
                 num_deletions >>= 1;
                 pressured = false;
             }
@@ -2315,21 +2335,28 @@ void TextureCache::GarbageCollectImages() {
         configure(true);
         lru_cache.ForEachItemBelow(below_tick, clean_up);
     }
+    gc_pressure_latched = BbEngine::GcMarks::Latch(gc_hysteresis, gc_pressure_latched,
+                                                   total_used_memory, pressure_gc_memory);
     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
     if (pressured || gc_downloads != 0 || gc_tiled_written != 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
-            std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
+            std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu, "
+                        "non-image %llu MiB): "
                         "%llu images evicted, %llu written back, %llu tiled written back, "
-                        "%llu tiled kept, %llu in use kept since the last report\n",
+                        "%llu tiled images kept (%llu partly unwatched), %llu images in use kept "
+                        "since the last report\n",
                         (unsigned long long)(total_used_memory >> 20),
                         (unsigned long long)(pressure_gc_memory >> 20),
                         (unsigned long long)(critical_gc_memory >> 20),
+                        (unsigned long long)(gc_non_image_memory >> 20),
                         (unsigned long long)gc_evictions, (unsigned long long)gc_downloads,
                         (unsigned long long)gc_tiled_written, (unsigned long long)gc_tiled_kept,
-                        (unsigned long long)gc_recent_kept);
+                        (unsigned long long)gc_tiled_refused, (unsigned long long)gc_recent_kept);
             gc_report_time = now;
-            gc_evictions = gc_downloads = gc_tiled_written = gc_tiled_kept = gc_recent_kept = 0;
+            ++gc_report_id;
+            gc_evictions = gc_downloads = gc_tiled_written = gc_tiled_kept = gc_tiled_refused =
+                gc_recent_kept = 0;
         }
     }
 }

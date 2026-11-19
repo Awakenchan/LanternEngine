@@ -29,10 +29,16 @@ static SYS_ABI int32_t trophy_register_context(int32_t context, int32_t handle, 
     return 0;
 }
 
+static const char *trophy_role_name = "own";
+
+void sys_trophy_role(const char *role) {
+    __atomic_store_n(&trophy_role_name, role ? role : "own", __ATOMIC_RELAXED);
+}
+
 static SYS_ABI int32_t trophy_unlock_trophy(int32_t context, int32_t handle, int32_t trophy, int32_t *platinum) {
     (void)context;
     (void)handle;
-    printf("Runtime: trophy %d unlocked\n", trophy);
+    printf("Runtime: trophy %d unlocked as %s\n", trophy, __atomic_load_n(&trophy_role_name, __ATOMIC_RELAXED));
     if (platinum) *platinum = NO_PLATINUM;
     return 0;
 }

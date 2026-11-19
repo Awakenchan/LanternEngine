@@ -1,4 +1,5 @@
 using System.IO;
+using Avalonia;
 using Avalonia.Controls;
 using BloodborneLauncher.Core;
 
@@ -53,7 +54,11 @@ namespace BloodborneLauncher.Views
             _hints.RemoveAll(h => !h.Look.BuiltIn);
             var saved = Looks.Saved();
             if (saved.Count == 0)
-                _saved.Children.Add(Text(L.T("None yet. Save your current picture or import someone's look below."), "Faint"));
+            {
+                var empty = Text(L.T("None yet. Save your current picture or import someone's look below."), "Faint");
+                empty.Margin = new Thickness(14, 10, 14, 10);
+                _saved.Children.Add(empty);
+            }
             foreach (var look in saved)
             {
                 var use = UseButton(look);

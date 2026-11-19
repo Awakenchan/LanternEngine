@@ -11,15 +11,32 @@
 #include "bbport_threads.h"
 #include "bbport_toggles.h"
 #include "common/thread.h"
+#include "engine/gx_records.h"
+#include "engine/gx_whole_route.h"
+#include "engine/pipe_census.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include <xxhash.h>
+#include "lantern_steps.h"
+#include "lantern_switches.h"
 
 namespace Vulkan {
 
 namespace {
+thread_local bool t_rebased = false;
+
+bool PipeCensusOn() {
+    static const bool on = BbEngine::PipeCensus::On();
+    return on;
+}
+
+void NoteIfLate(u64 seq, u32 ordinal) {
+    if (BbEngine::PipeCensus::GpuPassed(seq, ordinal)) {
+        BbEngine::PipeCensus::NotePreparedLate();
+    }
+}
 
 bool IsDirectDraw(const AmdGpu::PM4Header* header) {
     using AmdGpu::PM4ItOpcode;
@@ -244,6 +261,23 @@ std::shared_ptr<DrawPreparation::Submission> DrawPreparation::Build(
         submission->num_draws += IsDirectDraw(header);
     });
     submission->draws = std::make_unique<PreparedDraw[]>(submission->num_draws);
+    if (BbEngine::GxWholeRoute::MarksPrepared()) {
+        u32 ordinal = 0, marked = 0;
+        ForEachPacket(commands, [&](const AmdGpu::PM4Header* header) {
+            if (!IsDirectDraw(header)) {
+                return;
+            }
+            if (ordinal < submission->num_draws &&
+                BbEngine::GxRecords::Pending(reinterpret_cast<u64>(header))) {
+                submission->draws[ordinal].state.store(PreparedDraw::Unavailable,
+                                                       std::memory_order_relaxed);
+                ++marked;
+            }
+            ++ordinal;
+        });
+        submission->marked = marked != 0;
+        BbEngine::GxWholeRoute::NoteMarked(marked);
+    }
     return submission;
 }
 
@@ -262,10 +296,14 @@ void DrawPreparation::Enqueue(u64 seq, std::shared_ptr<Submission> submission) {
 void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg_checksum) {
     current_draw = 0;
     current.reset();
+    t_rebased = false;
     if (!Enabled()) {
         return;
     }
     gpu_seq.store(seq, std::memory_order_release);
+    if (PipeCensusOn()) {
+        BbEngine::PipeCensus::NoteGpuPosition(seq, 0);
+    }
     std::scoped_lock lk{mutex};
     if (!baseline_ready) {
         initial_regs = std::make_unique<AmdGpu::Regs>(regs);
@@ -287,6 +325,10 @@ void DrawPreparation::BeginSubmission(u64 seq, const AmdGpu::Regs& regs, u64 reg
             submissions.pop_front();
         }
         ++rebases;
+        t_rebased = true;
+        if (PipeCensusOn()) {
+            BbEngine::PipeCensus::NoteRebase();
+        }
         cv.notify_all();
     }
     if (!submissions.empty() && seq >= submissions.front()->seq &&
@@ -306,11 +348,23 @@ void DrawPreparation::EndSubmission() {
 }
 
 const PreparedDraw* DrawPreparation::NextDraw() {
+    namespace Census = BbEngine::PipeCensus;
+    const bool census = PipeCensusOn() && Enabled();
     if (!current || current_draw >= current->num_draws) {
+        if (census) {
+            Census::NoteNoPrepared(current ? Census::NoPreparedPastEnd
+                                           : t_rebased ? Census::NoPreparedRebase : Census::NoPreparedNoSubmission);
+        }
         return nullptr;
     }
     const PreparedDraw* draw = &current->draws[current_draw++];
+    if (census) {
+        Census::NoteGpuPosition(current->seq, current_draw);
+    }
     if (BbToggle::Disabled(BbToggle::DrawPreparation)) {
+        if (census) {
+            Census::NoteNoPrepared(Census::NoPreparedSwitchedOff);
+        }
         return nullptr;
     }
     return draw;
@@ -397,6 +451,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
     auto regs = std::make_unique<AmdGpu::Regs>();
     constexpr u64 NoPosition = ~0ull;
     u64 position = NoPosition; ///< `regs` holds the state at the start of this buffer
+    const bool census = PipeCensusOn();
     PipelineSelection sel{};
     sel.regs = regs.get();
     PrepWorker prep_worker{};
@@ -448,6 +503,8 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         path.clear();
         u64 checksum = target->start_checksum;
         u32 ordinal = 0;
+        u64 abandoned = 0;
+        const bool marked = target->marked;
         arena = FlatArena{};
         ForEachPacket(target->commands, [&](const AmdGpu::PM4Header* header) {
             AmdGpu::Liverpool::ApplyGraphicsRegisterPacket(*regs, header, checksum);
@@ -458,6 +515,10 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
             if (ordinal < target->num_draws &&
                 target->seq >= gpu_seq.load(std::memory_order_acquire)) {
                 auto& draw = target->draws[ordinal];
+                if (marked && draw.state.load(std::memory_order_relaxed) == PreparedDraw::Unavailable) {
+                    ++ordinal;
+                    return;
+                }
                 // bbport: the draw's other guest reads (shader headers in GetParams, the vertex
                 // buffer table in PrepareVertexInputs) recover too. Handled, such a fault sent a
                 // readback to the GPU command thread and waited for it; on memory the guest has
@@ -467,6 +528,10 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 if (BB_RECOVER_SET(recover)) {
                     runtime_fault_recover = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
+                    if (census) {
+                        BbEngine::PipeCensus::NoteUnavailable(BbEngine::PipeCensus::UnavailableFault);
+                        NoteIfLate(target->seq, ordinal);
+                    }
                     ++ordinal;
                     return;
                 }
@@ -477,6 +542,10 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
                     draw.reg_checksum = checksum;
                     draw.key = sel.graphics_key;
+                    draw.key_hash = std::hash<GraphicsPipelineKey>{}(draw.key);
+                    if (Lantern::Steps::Get(Lantern::StepId::key_hash) != Lantern::Mode::Off) {
+                        Lantern::Steps::Used(Lantern::Steps::Slot(), Lantern::StepId::key_hash);
+                    }
                     draw.num_stages = static_cast<u32>(prep_worker.stages.size());
                     for (u32 i = 0; i < draw.num_stages; ++i) {
                         const auto& stage = prep_worker.stages[i];
@@ -499,22 +568,43 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
                 } else {
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
+                    if (census) {
+                        namespace Census = BbEngine::PipeCensus;
+                        Census::NoteUnavailable(regs->stage_enable.hs_en ? Census::UnavailableTessellation
+                                                : prep_worker.failed    ? Census::UnavailableFailed
+                                                                        : Census::UnavailableNoKey);
+                    }
                 }
                 runtime_fault_recover = nullptr;
+                if (census) {
+                    NoteIfLate(target->seq, ordinal);
+                }
+            } else if (census && ordinal < target->num_draws) {
+                ++abandoned;
             }
             ++ordinal;
         });
+        if (abandoned) {
+            BbEngine::PipeCensus::NoteAbandoned(abandoned);
+        }
         // The arena's chunks live as long as the submission.
         target->flat_chunks = std::move(arena.chunks);
         position = target->seq + 1;
     }
 }
 
-void DrawPreparation::Count(bool was_used) {
-    ++(was_used ? used : unused);
-    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+void DrawPreparation::Count(BbEngine::PipelineMemo::Prepared reason) {
+    tally.Note(reason);
+    if (PipeCensusOn()) {
+        if (reason == BbEngine::PipelineMemo::Pending) {
+            BbEngine::PipeCensus::NotePending();
+        } else if (reason == BbEngine::PipelineMemo::Checksum) {
+            BbEngine::PipeCensus::NoteChecksumMiss();
+        }
+    }
+    const bool stats = Lantern::Switches::Get().frame_stats;
     // The clock is read every 1024 draws: per draw it was 8% of the GPU thread.
-    if (!stats || ((used + unused) & 1023) != 0) {
+    if (!stats || (tally.Total() & 1023) != 0) {
         return;
     }
     static auto window = std::chrono::steady_clock::now();
@@ -523,11 +613,11 @@ void DrawPreparation::Count(bool was_used) {
         return;
     }
     window = now;
-    std::printf("Draw preparation: %llu prepared pipelines used, %llu not (%u workers, "
-                "%llu scanner rebases)\n",
-                static_cast<unsigned long long>(used), static_cast<unsigned long long>(unused),
-                worker_count, static_cast<unsigned long long>(rebases));
-    used = unused = 0;
+    char counts[512];
+    tally.Format(counts, sizeof(counts));
+    std::printf("Draw preparation: prepared pipelines %s (%u workers, %llu scanner rebases)\n",
+                counts, worker_count, static_cast<unsigned long long>(rebases));
+    tally.Clear();
 }
 
 } // namespace Vulkan

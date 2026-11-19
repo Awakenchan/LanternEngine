@@ -3,12 +3,15 @@
 #include "option_keys.h"
 #include "option_rows.h"
 #include "engine_state.h"
+#include "engine_hooks.h"
 #include "graphics.h"
+#include "fog_scale.h"
 #include "menu_memory.h"
 #include "bbport_looks.h"
 #include "bbport_settings.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -31,6 +34,7 @@ using OptionRows::Choice;
 constexpr std::size_t kSectionNames = 0x53398b0, kSectionSlot = kSectionNames + 6 * 8;
 constexpr std::size_t kSectionLoopEnd = 0x1b20e1e;
 constexpr std::uint8_t kSectionLoopBytes[] = {0x48, 0x83, 0xfa, 0x06};
+constexpr std::uint8_t kSectionLoopWithOurs = 7;
 constexpr std::size_t kSystemCall = 0x1bb4978, kSystemFinish = 0x1bea630, kSystemPad = 0x1bb4c61;
 constexpr std::size_t kTitleCall = 0x1b4adb3, kTitleFinish = 0x1bea820, kTitlePad = 0x1b49ac1;
 constexpr std::uint8_t kPadding[] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0};
@@ -53,6 +57,7 @@ struct Setting {
     bool picture = false;
     std::atomic<bool>* flag = nullptr;
     std::atomic<float>* amount = nullptr;
+    bool fog = false;
     std::atomic<int>* number = nullptr;
     std::uint8_t byte = 0;
     std::int32_t word = 0;
@@ -62,6 +67,7 @@ struct Setting {
 std::int32_t Shown(const Setting& s) { return s.kind == Kind::Pick ? s.word : s.byte; }
 std::int32_t Read(const Setting& s) {
     if (s.flag) return s.flag->load() ? 1 : 0;
+    if (s.amount && s.fog) return FogScale::MenuStep(s.amount->load(), s.base, s.step, 10);
     if (s.amount) return std::int32_t(std::clamp(std::lround((s.amount->load() - s.base) / s.step), 0l, 10l));
     const int v = s.number->load();
     return s.kind == Kind::Pick ? std::clamp(v, 0, int(s.choices.size()) - 1) : std::clamp(v, 0, 10);
@@ -88,6 +94,7 @@ static_assert(std::size(kPadIcons) == BbSettings::PadIconsCount);
 const Choice kSunShadows[] = {{0, 127010}, {1, 127011}, {2, 127012}};
 const Choice kLampShadows[] = {{0, 127010}, {1, 127013}, {2, 127014}};
 const Choice kBlurQuality[] = {{0, 127010}, {1, 127013}};
+const Choice kFogFalloff[] = {{BbSettings::PointFogFalloffClassic, 127015}, {BbSettings::PointFogFalloffInverseSquare, 127016}};
 const Choice kLookChoices[] = {{0, 128010}, {1, 128011}, {2, 128012}, {3, 128013}, {4, 128014}, {5, 128016}, {6, 128015}};
 static_assert(std::size(kLookChoices) == BbLooks::PresetCount + 2);
 
@@ -115,7 +122,7 @@ Setting g_lighting[] = {Toggle(126000, 0), Toggle(126001, 0), Toggle(126002, 0),
                         Toggle(126007, 0)};
 Setting g_detail[] = {Toggle(127000, 0), Slider(127001, 5, 0, 0.2f), Toggle(127002, 0), Toggle(127003, 0),
                       Slider(127004, 5, 0, 0.2f), Pick(127005, 0, kSunShadows), Pick(127006, 0, kLampShadows),
-                      Pick(127007, 0, kBlurQuality)};
+                      Pick(127007, 0, kBlurQuality), Pick(127008, BbSettings::PointFogFalloffClassic, kFogFalloff)};
 Setting g_looks[] = {Pick(128000, 0, kLookChoices)};
 constexpr int kGraphicsPick = 4;
 
@@ -252,18 +259,22 @@ bool CallSite(const std::uint8_t* image, std::size_t size, std::size_t call, std
     std::memcpy(&rel, image + call + 1, 4);
     return std::int64_t(call + 5) + rel == std::int64_t(target) && !std::memcmp(image + pad, kPadding, sizeof kPadding);
 }
-void RouteCall(std::uint8_t* image, std::size_t call, std::size_t pad, const void* host) {
-    std::uint8_t* p = image + pad;
+constexpr std::size_t kRouteJump = 13;
+struct Route {
+    std::array<std::uint8_t, kRouteJump> jump{};
+    std::array<std::uint8_t, 4> rel{}, old_rel{};
+};
+void RouteCall(std::uint8_t* image, std::size_t call, std::size_t pad, const void* host, Route& route,
+               std::vector<CodePatch>& patches) {
+    static_assert(kRouteJump <= sizeof kPadding);
     const auto to = reinterpret_cast<std::uint64_t>(host);
-    *p++ = 0x49;
-    *p++ = 0xbb;
-    std::memcpy(p, &to, 8);
-    p += 8;
-    *p++ = 0x41;
-    *p++ = 0xff;
-    *p = 0xe3;
+    route.jump = {0x49, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0x41, 0xff, 0xe3};
+    std::memcpy(route.jump.data() + 2, &to, 8);
     const auto rel = std::int32_t(std::int64_t(pad) - std::int64_t(call + 5));
-    std::memcpy(image + call + 1, &rel, 4);
+    std::memcpy(route.rel.data(), &rel, 4);
+    std::memcpy(route.old_rel.data(), image + call + 1, 4);
+    patches.push_back({image, pad, std::span(kPadding).first(kRouteJump), route.jump});
+    patches.push_back({image, call + 1, route.old_rel, route.rel});
 }
 
 std::vector<std::string> g_mounted;
@@ -341,6 +352,7 @@ bool BindSettings() {
     g_graphics[3].amount = &s.graphics_shadow_scale;
     g_graphics[4].number = &s.output_res;
     g_graphics[5].amount = &s.graphics_fog;
+    g_graphics[5].fog = true;
     effect(g_effects[0], blur);
     effect(g_effects[1], dof);
     effect(g_effects[2], ca);
@@ -379,6 +391,7 @@ bool BindSettings() {
     g_detail[5].number = &s.graphics_shadow_resolution;
     g_detail[6].number = &s.graphics_local_shadow_resolution;
     g_detail[7].number = &s.graphics_motion_blur_quality;
+    g_detail[8].number = &s.graphics_point_fog_falloff;
     g_looks[0].number = &s.look_choice;
     return true;
 }
@@ -424,13 +437,22 @@ bool Install(std::uint8_t* image, std::size_t size) {
     g_offered[kCamera] = settings.camera_controls;
 
     const auto name = reinterpret_cast<std::uint64_t>(g_section);
-    std::memcpy(image + kSectionSlot, &name, sizeof name);
-    image[kSectionLoopEnd + 3] = 7;
-    RouteCall(image, kSystemCall, kSystemPad, reinterpret_cast<const void*>(&SystemList));
-    if (CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad))
-        RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList));
-    else
-        host_log("pc-options: the title's Quit Game left out (its code is not 1.09's)");
+    const std::uint64_t no_name = 0;
+    const std::uint8_t sections = kSectionLoopWithOurs;
+    std::array<Route, 2> routes;
+    std::vector<CodePatch> patches{
+        {image, kSectionSlot, AsCode(std::span(&no_name, 1)), AsCode(std::span(&name, 1))},
+        {image, kSectionLoopEnd + 3, std::span(kSectionLoopBytes).subspan(3, 1), std::span(&sections, 1)}};
+    RouteCall(image, kSystemCall, kSystemPad, reinterpret_cast<const void*>(&SystemList), routes[0], patches);
+    const bool title = CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad);
+    if (title) RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList), routes[1], patches);
+    if (const WriteResult result = WriteCode(patches); result != WriteResult::Applied) {
+        for (const auto& path : g_mounted) sys_file_unmount(path.c_str());
+        g_mounted.clear();
+        host_log("pc-options off: the System list's code %s", Describe(result));
+        return false;
+    }
+    if (!title) host_log("pc-options: the title's Quit Game left out (its code is not 1.09's)");
     g_installed = true;
     std::string offered;
     for (int s = 0; s < kSectionCount; ++s)

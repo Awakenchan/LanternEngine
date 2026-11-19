@@ -28,23 +28,6 @@ namespace BloodborneLauncher.Core
                 : text;
         }
 
-        /// <summary>One HTTPS request to The Hunter's Dream through Windows' own TLS before the game
-        /// starts. The engine's OpenSSL trusts the roots in Windows' store, but Windows adds a root
-        /// (ISRG Root X1, The Hunter's Dream's Let's Encrypt chain) only when its own TLS needs it:
-        /// a PC that never had it failed every request with "SSL server verification failed"
-        /// (GitHub issue 46). The answer does not matter; failures are left to the game's log.</summary>
-        public static async Task PrepareTrustAsync()
-        {
-            try
-            {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
-                using var response = await http.GetAsync($"https://{Host}:{SessionPort}/");
-            }
-            catch (Exception)
-            {
-            }
-        }
-
         public static async Task<List<Result>> CheckAsync(string gameServer)
         {
             var results = new List<Result> { await CheckGameServerAsync(gameServer) };

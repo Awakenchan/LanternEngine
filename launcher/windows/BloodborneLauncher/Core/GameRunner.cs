@@ -98,6 +98,8 @@ namespace BloodborneLauncher.Core
             info.WorkingDirectory = Paths.IsPortDir(Paths.PortDir) ? Paths.EngineDir : Environment.CurrentDirectory;
             foreach (var (key, value) in GameEnvironment.Build(s))
                 info.Environment[key] = value;
+            foreach (var key in info.Environment.Keys.Where(GameEnvironment.IsTestSandbox).ToList())
+                info.Environment.Remove(key);
             info.Environment["PYTHONUNBUFFERED"] = "1";
             // UTF-8 whatever the Windows language: the game title (param.sfo) has a ™ that GBK and other
             // code pages cannot write.

@@ -21,6 +21,7 @@
 
 #include "gpu/bbnet/room/room_link.h"
 #include "gpu/bbnet/room/room_service.h"
+#include "gpu/shim/test_sandbox.h"
 
 using Json = nlohmann::json;
 
@@ -463,6 +464,12 @@ int main(int argc, char** argv) {
 #endif
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) return Fail("usage: room-service-test host|guest|early-guest");
+    if (const char* server = std::getenv("BB_ROOM_SERVER");
+        LanternSandbox::On() && server && LanternSandbox::ClassifyHost(LanternSandbox::HostOfUrl(server)) != LanternSandbox::Target::Loopback) {
+        std::printf("room-service-test: SKIPPED: BB_ROOM_SERVER is not a loopback relay, and the test sandbox (LANTERN_TEST_SANDBOX=1) refuses other hosts\n");
+        std::fflush(stdout);
+        std::_Exit(0);
+    }
     const bool host = std::string(argv[1]) == "host";
     const int game_port = host ? 47658 : 48658;
     const int http_port = game_port + 1;

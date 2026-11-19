@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cstdlib>
 #include "room_ws.h"
+#include "room_crypto.h"
+#include "../../shim/test_sandbox_net.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 
 #include <httplib.h>
 #include <openssl/err.h>
-#include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
@@ -61,6 +65,8 @@ constexpr auto kClosePingEvery = std::chrono::seconds(2);
 constexpr auto kCloseDeadAfter = std::chrono::seconds(9);
 constexpr std::size_t kPacedBytesPerSecond = 12000;
 constexpr std::size_t kMostPacedQueued = 512;
+constexpr std::size_t kMaskLen = 4;
+constexpr std::size_t kHandshakeKeyLen = 16;
 #ifdef _WIN32
 constexpr int kSendBuffer = 16384;
 #else
@@ -108,7 +114,28 @@ std::string Base64(const std::uint8_t* data, std::size_t size) {
     return out;
 }
 
-void Frame(std::vector<std::uint8_t>& out, std::uint8_t opcode, const std::uint8_t* data, std::size_t size) {
+void TellOnce(std::atomic<bool>& told, const char* what) {
+    if (told.exchange(true, std::memory_order_relaxed)) return;
+    std::printf("Seamless: %s\n", what);
+    std::fflush(stdout);
+}
+
+void TellMaskFailedOnce() {
+    static std::atomic<bool> told{false};
+    TellOnce(told, "a WebSocket frame got no random mask, so it was not sent");
+}
+
+void TellKeyFailedOnce() {
+    static std::atomic<bool> told{false};
+    TellOnce(told, "no random WebSocket key, so the room connection was not opened");
+}
+
+[[nodiscard]] bool Frame(std::vector<std::uint8_t>& out, std::uint8_t opcode, const std::uint8_t* data, std::size_t size) {
+    std::array<std::uint8_t, kMaskLen> mask{};
+    if (!RandomBytes(mask)) {
+        TellMaskFailedOnce();
+        return false;
+    }
     out.push_back(static_cast<std::uint8_t>(0x80 | opcode));
     if (size < 126) {
         out.push_back(static_cast<std::uint8_t>(0x80 | size));
@@ -120,12 +147,11 @@ void Frame(std::vector<std::uint8_t>& out, std::uint8_t opcode, const std::uint8
         out.push_back(0x80 | 127);
         for (int i = 7; i >= 0; --i) out.push_back(static_cast<std::uint8_t>(static_cast<std::uint64_t>(size) >> (8 * i)));
     }
-    std::uint8_t mask[4];
-    RAND_bytes(mask, sizeof mask);
-    out.insert(out.end(), mask, mask + 4);
+    out.insert(out.end(), mask.begin(), mask.end());
     const std::size_t at = out.size();
     out.resize(at + size);
     for (std::size_t i = 0; i < size; ++i) out[at + i] = data[i] ^ mask[i & 3];
+    return true;
 }
 
 int AnswerProtocol(const std::string& head) {
@@ -202,10 +228,21 @@ WebSocket::WebSocket() : impl_(new Impl) {}
 
 WebSocket::~WebSocket() { delete impl_; }
 
+bool WebSocket::SandboxAllows(const std::string& text, const char* site) {
+    Url url;
+    return !ParseUrl(text, url) || LanternSandbox::AllowHost(url.host, site);
+}
+
 bool WebSocket::Connect(const std::string& text, int timeout_s, std::string& error) {
     Url url;
     if (!ParseUrl(text, url)) {
         error = "bad address";
+        return false;
+    }
+    std::array<std::uint8_t, kHandshakeKeyLen> key{};
+    if (!RandomBytes(key)) {
+        TellKeyFailedOnce();
+        error = "no random WebSocket key";
         return false;
     }
     const auto deadline = Clock::now() + std::chrono::seconds(timeout_s);
@@ -213,6 +250,10 @@ bool WebSocket::Connect(const std::string& text, int timeout_s, std::string& err
         return static_cast<int>(std::max<long long>(
             0, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count()));
     };
+    if (!LanternSandbox::AllowHost(url.host, "room WebSocket connect")) {
+        error = "refused by the test sandbox";
+        return false;
+    }
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -222,8 +263,10 @@ bool WebSocket::Connect(const std::string& text, int timeout_s, std::string& err
         return false;
     }
     for (addrinfo* a = list; a && impl_->sock == kBad; a = a->ai_next) {
+        if (!LanternSandbox::AllowAddress(a->ai_addr, a->ai_addrlen, "room WebSocket connect")) continue;
         const Sock s = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (s == kBad) continue;
+        LanternSandbox::NoteSocket();
         NonBlocking(s);
         const int r = ::connect(s, a->ai_addr, static_cast<int>(a->ai_addrlen));
         int soerr = 0;
@@ -277,10 +320,8 @@ bool WebSocket::Connect(const std::string& text, int timeout_s, std::string& err
         }
     }
 
-    std::uint8_t key[16];
-    RAND_bytes(key, sizeof key);
     const std::string request = "GET " + url.path + " HTTP/1.1\r\nHost: " + url.host +
-                                "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + Base64(key, sizeof key) +
+                                "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + Base64(key.data(), key.size()) +
                                 "\r\nSec-WebSocket-Version: 13\r\nUser-Agent: LanternEngine\r\nX-Lantern-Room: " +
                                 std::to_string(kRoomProtocol) + DevHeader() + "\r\n\r\n";
     std::size_t sent = 0;
@@ -326,7 +367,12 @@ bool WebSocket::Connect(const std::string& text, int timeout_s, std::string& err
         return false;
     }
 
+    if (!LanternSandbox::AllowLocalSocket("room WebSocket wake socket")) {
+        error = "refused by the test sandbox";
+        return false;
+    }
     impl_->wake = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (impl_->wake != kBad) LanternSandbox::NoteSocket();
     sockaddr_in self{};
     self.sin_family = AF_INET;
     self.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -350,7 +396,7 @@ bool WebSocket::Send(const void* data, std::size_t size, bool binary) {
     if (!open_) return false;
     std::vector<std::uint8_t> frame;
     frame.reserve(size + 14);
-    Frame(frame, binary ? 2 : 1, static_cast<const std::uint8_t*>(data), size);
+    if (!Frame(frame, binary ? 2 : 1, static_cast<const std::uint8_t*>(data), size)) return false;
     {
         std::lock_guard lock(queue_mutex_);
         backlog_ += frame.size();
@@ -369,7 +415,7 @@ bool WebSocket::SendPaced(const void* data, std::size_t size) {
     if (!open_) return false;
     std::vector<std::uint8_t> frame;
     frame.reserve(size + 14);
-    Frame(frame, 2, static_cast<const std::uint8_t*>(data), size);
+    if (!Frame(frame, 2, static_cast<const std::uint8_t*>(data), size)) return false;
     {
         std::lock_guard lock(queue_mutex_);
         if (paced_.size() >= kMostPacedQueued) return false;
@@ -474,9 +520,7 @@ void WebSocket::Run(const Handler& handler) {
             const bool fin = b0 & 0x80;
             at += head + len;
             if (opcode == 9) {
-                std::vector<std::uint8_t> pong;
-                Frame(pong, 10, payload, static_cast<std::size_t>(len));
-                s.out.insert(s.out.end(), pong.begin(), pong.end());
+                if (!Frame(s.out, 10, payload, static_cast<std::size_t>(len))) continue;
             } else if (opcode == 8) {
                 if (len >= 2) close_code_ = (int(payload[0]) << 8) | payload[1];
                 closed = true;
@@ -496,7 +540,7 @@ void WebSocket::Run(const Handler& handler) {
         const bool close_watch = watch_closely_.load();
         const auto ping_every = close_watch ? std::chrono::steady_clock::duration(kClosePingEvery) : std::chrono::steady_clock::duration(kPingEvery);
         if (now - last_rx > ping_every && now - last_ping > ping_every) {
-            Frame(s.out, 9, nullptr, 0);
+            if (!Frame(s.out, 9, nullptr, 0)) closed = true;
             last_ping = now;
         }
         if (now - last_rx > (close_watch ? kCloseDeadAfter : kDeadAfter)) closed = true;

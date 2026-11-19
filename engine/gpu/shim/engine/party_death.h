@@ -1,10 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <vector>
 
+#ifdef LANTERN_PARTY_DEATH_MUTANTS
 namespace BbEngine::PartyDeath {
+inline int g_mutant = 0;
+}
+#define LANTERN_PARTY_DEATH_PICK(n, wrong, right) (::BbEngine::PartyDeath::g_mutant == (n) ? (wrong) : (right))
+#else
+#define LANTERN_PARTY_DEATH_PICK(n, wrong, right) (right)
+#endif
+
+namespace BbEngine::PartyDeath {
+
+inline constexpr int kMutants = 3;
+
+inline std::uint32_t SpectateCameraInput(std::uint32_t game_flag, bool watching_other) {
+    return LANTERN_PARTY_DEATH_PICK(1, game_flag,
+           LANTERN_PARTY_DEATH_PICK(2, watching_other ? game_flag : 0u,
+           LANTERN_PARTY_DEATH_PICK(3, 0u, watching_other ? 0u : game_flag)));
+}
 
 struct Situation {
     bool in_party = false;

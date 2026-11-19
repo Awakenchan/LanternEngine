@@ -404,7 +404,7 @@ namespace BloodborneLauncher.Views
                         actions.Children.Add(mode);
                     }
                     actions.Children.Add(reset);
-                    _table.Children.Add(TableRow(name, keys, PadCell(control), actions));
+                    _table.Children.Add(TableRow(name, keys, PadCell(control, pcControls), actions));
                 }
             }
 
@@ -577,7 +577,7 @@ namespace BloodborneLauncher.Views
         // ---------------------------------------------------------------- storing
 
         /// <summary>The controller column: the button that does this action, changeable when it is a PS4 button.</summary>
-        private Control PadCell(ControlDef control)
+        private Control PadCell(ControlDef control, bool pcControls)
         {
             if (PadMap.InputFor(control) is not { } input)
             {
@@ -592,19 +592,25 @@ namespace BloodborneLauncher.Views
             // opened under the pointer and picked whatever the release landed on).
             var current = PadMap.Main(Ini, input);
             var menu = PadMap.IsMenu(input);
+            var split = PadMap.IsSplit(input);
             var chip = new AppButton
             {
-                Text = current.Length > 0 ? PadMap.Label(current) : menu ? L.T("As in the world") : L.T("Not bound"),
+                Text = current.Length > 0 ? PadMap.Label(current) : menu ? L.T("As in the world") : split ? L.T("Not bound (Circle does it)") : L.T("Not bound"),
                 Icon = Icon(SymbolRegular.XboxController24),
                 Padding = new Thickness(8, 3, 10, 3),
                 FontSize = 12.5,
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Left,
             };
-            chip.SetTip(menu
+            chip.SetTip(split ? PadMap.SplitTip(input) : menu
                 ? L.T("The controller button that does this in the game's menus, whatever it does in the world (Circle moved to L2 for sprinting still goes back here). Not set: menus use the buttons as in the world. Click, then press a button on the pad.")
                 : L.F($"The controller button for this action (the game's {control.Pad}). Click, then press a button on the pad."));
             if (!PadMap.IsDefault(Ini, input)) chip.FontWeight = FontWeight.SemiBold;
+            if (split && !pcControls)
+            {
+                chip.IsEnabled = false;
+                ToolTip.SetShowOnDisabled(chip, true);
+            }
             chip.Click += (_, _) => BeginPadCapture(control, input);
             return chip;
         }

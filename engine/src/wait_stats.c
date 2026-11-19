@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/shim/lantern_diag_c.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,9 +24,36 @@
 #include <sys/random.h>
 #include <sys/resource.h>
 #endif
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+static void sample_start(void) {}
+static void sample_report(void) {}
+static uintptr_t thread_stack_hi(void) {
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);
+    return (uintptr_t)hi;
+}
+static int thread_id(void) { return (int)GetCurrentThreadId(); }
+static void thread_name(char *out, size_t size) {
+    out[0] = 0;
+    PWSTR wide = NULL;
+    if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &wide)) && wide) {
+        WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, (int)size, NULL, NULL);
+        out[size - 1] = 0;
+        LocalFree(wide);
+    }
+}
+#else
 static void sample_start(void);
 static void sample_report(void);
+static uintptr_t thread_stack_hi(void) {
+    pthread_attr_t attr; void *base=NULL; size_t size=0;
+    if (!pthread_getattr_np(pthread_self(),&attr)) { pthread_attr_getstack(&attr,&base,&size); pthread_attr_destroy(&attr); }
+    return (uintptr_t)base+size;
+}
+static int thread_id(void) { return (int)syscall(SYS_gettid); }
+static void thread_name(char *out, size_t size) { pthread_getname_np(pthread_self(),out,size); }
+#endif
 
 typedef struct { _Atomic uint64_t key; uint64_t site, site2, site3; int tid, kind; char name[16]; _Atomic uint64_t count, ns; } WaitSite;
 static WaitSite wait_sites[512];
@@ -34,21 +62,15 @@ void runtime_guest_call_sites(uint64_t out[3]);
 static void guest_call_sites(uint64_t out[3]) {
     const uintptr_t text_lo=0x800000000ull, text_hi=0x800000000ull+0x50d96dcull;
     static _Thread_local uintptr_t stack_hi;
-    if (!stack_hi) {
-        pthread_attr_t attr; void *base=NULL; size_t size=0;
-        if (!pthread_getattr_np(pthread_self(),&attr)) { pthread_attr_getstack(&attr,&base,&size); pthread_attr_destroy(&attr); }
-        stack_hi=(uintptr_t)base+size;
-    }
+    if (!stack_hi) stack_hi=thread_stack_hi();
     const uintptr_t *sp=(const uintptr_t *)__builtin_frame_address(0);
     int found=0;
     out[0]=out[1]=out[2]=0;
     for (int i=0;i<400 && found<3 && (uintptr_t)(sp+i+1)<=stack_hi;++i) if (sp[i]>=text_lo && sp[i]<text_hi) out[found++]=sp[i]-text_lo;
 }
 void runtime_wait_note(int kind, uint64_t ns) {
-    static int enabled=-1;
-    if (enabled<0) enabled=getenv("BB_FRAME_STATS")!=NULL;
-    if (!enabled) return;
-    if (!wait_tid) wait_tid=(int)syscall(SYS_gettid);
+    if (!lantern_switch_c(LANTERN_SW_ID_frame_stats)) return;
+    if (!wait_tid) wait_tid=thread_id();
     uint64_t sites[3];
     guest_call_sites(sites);
     const uint64_t key=((sites[0]<<20)^(sites[1]*0x9E3779B1ull)^(sites[2]<<7)^((uint64_t)wait_tid<<4)^(uint64_t)kind)|1;
@@ -56,7 +78,7 @@ void runtime_wait_note(int kind, uint64_t ns) {
         WaitSite *w=&wait_sites[(slot+i)%512];
         uint64_t expected=0;
         if (atomic_load(&w->key)==key || atomic_compare_exchange_strong(&w->key,&expected,key)) {
-            if (!w->tid) { w->site=sites[0]; w->site2=sites[1]; w->site3=sites[2]; w->kind=kind; pthread_getname_np(pthread_self(),w->name,sizeof(w->name)); w->tid=wait_tid; }
+            if (!w->tid) { w->site=sites[0]; w->site2=sites[1]; w->site3=sites[2]; w->kind=kind; thread_name(w->name,sizeof(w->name)); w->tid=wait_tid; }
             atomic_fetch_add(&w->count,1); atomic_fetch_add(&w->ns,ns);
             return;
         }
@@ -90,6 +112,9 @@ void runtime_wait_report(double frames) {
     printf("\n");
 }
 
+void runtime_guest_call_sites(uint64_t out[3]) { guest_call_sites(out); }
+
+#ifndef _WIN32
 static _Atomic uint64_t sample_keys[1024], sample_counts[1024];
 static uint64_t sample_rips[1024], sample_callers[1024];
 static _Atomic uint64_t samples_total;
@@ -190,9 +215,4 @@ static void sample_report(void) {
     }
     printf("\n");
 }
-void runtime_guest_call_sites(uint64_t out[3]) { guest_call_sites(out); }
-#else
-void runtime_wait_note(int kind, uint64_t ns) { (void)kind; (void)ns; }
-void runtime_wait_report(double frames) { (void)frames; }
-void runtime_guest_call_sites(uint64_t out[3]) { out[0]=out[1]=out[2]=0; }
 #endif

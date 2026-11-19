@@ -40,6 +40,7 @@ int bbgpu_window_in_background(void);
 int bbgpu_save_backups_start(const char *user);
 void bbgpu_save_backups_write(int begin);
 void bbgpu_anti_lag_before_input(void);
+void bbgpu_pacing_pad_read(void);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
 void bbgpu_patch_image(unsigned char *image, uint64_t size);
 /* Number of symbols registered by the vendored libraries (diagnostics). */

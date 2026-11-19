@@ -4,9 +4,11 @@
 // recording order, and the GPU writes 2n before command n and 2n+1 after it into a host-visible
 // buffer (VK_AMD_buffer_marker at the bottom of the pipe: written once all earlier work of the
 // queue has finished). On device lost the last value says which command never finished, and the
-// notes kept here say what it was. BB_BREADCRUMBS=0 turns them off.
+// notes kept here say what it was. Off by default; BB_BREADCRUMBS=1 forces them on and =0 off,
+// and a device loss turns them on for the next three starts (vk_breadcrumbs_arming.h).
 #pragma once
 
+#include <atomic>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -14,7 +16,13 @@ namespace Vulkan {
 class Instance;
 }
 
+namespace VideoCore {
+struct Image;
+}
+
 namespace Vulkan::Breadcrumbs {
+
+struct DrawResources;
 
 enum class Kind : u8 { Pass, Draw, DrawIndexed, DrawIndirect, Dispatch, DispatchIndirect };
 
@@ -28,9 +36,16 @@ struct Crumb {
     u32 args_slot = ~0u;        ///< indirect dispatches: where the GPU copies its arguments
 };
 
+struct Switch {
+    bool markers = false;
+};
+extern Switch marker_switch;
+
 /// A stream for a new scheduler (`name` a string literal); the first call creates the buffer.
 u32 NewStream(const Instance& instance, const char* name);
-[[nodiscard]] bool Enabled() noexcept;
+[[nodiscard]] inline bool Enabled() noexcept {
+    return marker_switch.markers;
+}
 /// Recording side, in command order: numbers the next command of `stream`.
 u32 Note(u32 stream, const Crumb& crumb);
 /// Recorded right before (`after` false) and right after the command numbered `id`.
@@ -41,6 +56,7 @@ u32 ArgsSlot();
 void CopyArgs(vk::CommandBuffer cmdbuf, vk::Buffer args, u64 offset, u32 slot);
 /// Device lost: prints, per stream, the command the GPU did not finish and what it was.
 void ReportDeviceLost(const char* where);
+bool DeviceLost() noexcept;
 void ReportDeviceFault();
 vk::UniqueDebugUtilsMessengerEXT CreateAddressReport(vk::Instance instance);
 /// The same report, once, while the GPU has not finished submitted work for a long time (no
@@ -48,6 +64,13 @@ vk::UniqueDebugUtilsMessengerEXT CreateAddressReport(vk::Instance instance);
 void ReportStuck(const char* where);
 /// Frame statistics: per stream, the commands noted and how many the GPU has yet to finish.
 void PrintProgress();
+void WatchStageB(const std::atomic<u64>* busy_cycles) noexcept;
+
+[[nodiscard]] DrawResources* BeginDraw(u32 stream, u32 image_descriptors, u32 buffer_descriptors);
+void AddImage(DrawResources& draw, const VideoCore::Image& image);
+void AddBuffer(DrawResources& draw, vk::Buffer buffer, u64 guest, u64 offset, u64 size);
+void EndDraw(DrawResources& draw);
+void NameBound(u64 handle, const char* name);
 
 /// Breadcrumbs around what is recorded on `cmdbuf` right here (not deferred) in the scope.
 class Scope {

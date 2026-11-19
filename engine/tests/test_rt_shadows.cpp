@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <numeric>
 #include <random>
 #include <vector>
 #include "video_core/host_shaders/contact_shadow_comp.h"
@@ -17,6 +18,8 @@
 #include "video_core/host_shaders/point_shadow_ray_comp.h"
 #include "video_core/host_shaders/rt_unproject_comp.h"
 #include "video_core/host_shaders/ssgi_gather_ray_comp.h"
+#include "video_core/host_shaders/rt_unproject_bounds_comp.h"
+#include "../gpu/shadps4/video_core/renderer_vulkan/rt_scene_rules.h"
 
 namespace {
 #define CHECK(call) do { if (VkResult r_ = (call); r_ != VK_SUCCESS) { std::fprintf(stderr, "%s failed: %d\n", #call, int(r_)); std::exit(1); } } while (false)
@@ -268,7 +271,8 @@ struct Vk {
         return i;
     }
     Pipeline MakePipeline(std::initializer_list<VkDescriptorType> types, unsigned push_bytes,
-                          const std::uint32_t* code, std::size_t code_bytes, VkPipelineCreateFlags create_flags = 0) {
+                          const std::uint32_t* code, std::size_t code_bytes, VkPipelineCreateFlags create_flags = 0,
+                          const VkSpecializationInfo* specialization = nullptr) {
         Pipeline p;
         std::vector<VkDescriptorSetLayoutBinding> bindings;
         for (const auto type : types)
@@ -286,7 +290,8 @@ struct Vk {
         CHECK(vkCreateShaderModule(device, &mi, nullptr, &module));
         VkComputePipelineCreateInfo pc{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .flags = create_flags, .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main"}, .layout = p.layout};
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main",
+                .pSpecializationInfo = specialization}, .layout = p.layout};
         CHECK(vkCreateComputePipelines(device, {}, 1, &pc, nullptr, &p.pipeline));
         vkDestroyShaderModule(device, module, nullptr);
         return p;
@@ -503,7 +508,7 @@ struct Scene {
         vk.Barrier();
         return vk.End();
     }
-    double Refit(VkBuildAccelerationStructureFlagsKHR flags, bool update) {
+    double Refit(VkBuildAccelerationStructureFlagsKHR flags, bool update, int percent = -1) {
         std::vector<VkAccelerationStructureGeometryKHR> geometries;
         geometries.reserve(blas.size());
         std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
@@ -515,7 +520,7 @@ struct Scene {
             auto& b = blas[i];
             const VkDeviceSize scratch_at = at;
             at += (std::max(b.scratch, b.update_scratch) + AsAlign - 1) & ~(AsAlign - 1);
-            if (!meshes[i].skinned) continue;
+            if (percent < 0 ? !meshes[i].skinned : i * 100 >= blas.size() * std::size_t(percent)) continue;
             geometries.push_back(Geometry(b));
             VkAccelerationStructureBuildGeometryInfoKHR info{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
                 .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, .flags = flags,
@@ -846,11 +851,67 @@ int main(int argc, char** argv) {
                     64, POINT_SHADOW_RAY_COMP, sizeof(POINT_SHADOW_RAY_COMP));
     vk.MakePipeline({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-                     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR},
+                     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
                     128, SSGI_GATHER_RAY_COMP, sizeof(SSGI_GATHER_RAY_COMP));
+    const Pipeline boxed = vk.MakePipeline({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 60,
+                                           RT_UNPROJECT_BOUNDS_COMP, sizeof(RT_UNPROJECT_BOUNDS_COMP));
     if (argc > 1 && std::strcmp(argv[1], "--pipelines") == 0) {
         std::puts("RT pipelines: built");
         return 0;
+    }
+    if (argc > 1 && std::strcmp(argv[1], "--bounds") == 0) {
+        namespace R = Vulkan::RtRules;
+        const Pipeline plain = vk.MakePipeline({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 56, RT_UNPROJECT_COMP,
+                                               sizeof(RT_UNPROJECT_COMP));
+        const unsigned first = 17, count = 100003, total = first + count + 50;
+        Buffer a = vk.MakeBuffer(VkDeviceSize(total) * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+        Buffer b = vk.MakeBuffer(VkDeviceSize(total) * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+        Buffer box = vk.MakeBuffer(2 * 6 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+        std::mt19937 rng(3);
+        std::uniform_real_distribution<float> spread(-50.0f, 50.0f), wide(0.5f, 2.0f);
+        auto* pa = static_cast<float*>(a.data);
+        for (unsigned i = 0; i < total * 4; ++i) pa[i] = (i % 4 == 3) ? wide(rng) : spread(rng);
+        std::memcpy(b.data, a.data, VkDeviceSize(total) * 16);
+        auto* words = static_cast<std::uint32_t*>(box.data);
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 3; ++k) { words[s * 6 + k] = R::EmptyLow; words[s * 6 + 3 + k] = R::EmptyHigh; }
+        struct BoundsPush { float rows[12]; std::uint32_t first, count, box; };
+        static_assert(sizeof(BoundsPush) == 60);
+        BoundsPush push{{0.9f, 0.1f, 0.0f, 3.0f, -0.2f, 1.1f, 0.3f, -7.0f, 0.05f, 0.0f, 1.3f, 120.0f}, first, count, 1};
+        vk.Begin();
+        const auto bind = [&](const Pipeline& p, std::initializer_list<VkBuffer> buffers, unsigned bytes) {
+            std::vector<VkDescriptorBufferInfo> infos;
+            for (VkBuffer buffer : buffers) infos.push_back({buffer, 0, VK_WHOLE_SIZE});
+            std::vector<VkWriteDescriptorSet> writes;
+            for (unsigned i = 0; i < infos.size(); ++i)
+                writes.push_back({.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = i, .descriptorCount = 1,
+                                  .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &infos[i]});
+            vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline);
+            vk.push(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, unsigned(writes.size()), writes.data());
+            vkCmdPushConstants(vk.cmd, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, bytes, &push);
+            vkCmdDispatch(vk.cmd, (count + 63) / 64, 1, 1);
+        };
+        bind(plain, {a.buffer}, 56);
+        bind(boxed, {b.buffer, box.buffer}, 60);
+        vk.Barrier();
+        vk.Stamp(0); vk.Stamp(1);
+        vk.End();
+        const bool same = std::memcmp(a.data, b.data, VkDeviceSize(total) * 16) == 0;
+        R::Box want{{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}};
+        const auto* pb = static_cast<const float*>(b.data);
+        for (unsigned i = first; i < first + count; ++i)
+            for (int k = 0; k < 3; ++k) {
+                want.lo[k] = std::min(want.lo[k], pb[i * 4 + k]);
+                want.hi[k] = std::max(want.hi[k], pb[i * 4 + k]);
+            }
+        R::Box got, untouched;
+        const bool read = R::BoxFromBits(words + 6, got);
+        const bool exact = read && got.lo == want.lo && got.hi == want.hi;
+        const bool empty = !R::BoxFromBits(words, untouched);
+        std::printf("Bounds: positions %s the plain unproject; box %s (%.3f %.3f %.3f .. %.3f %.3f %.3f); other slot %s\n",
+                    same ? "identical to" : "DIFFER from", exact ? "exact" : "WRONG", got.lo[0], got.lo[1], got.lo[2],
+                    got.hi[0], got.hi[1], got.hi[2], empty ? "untouched" : "WRITTEN");
+        return same && exact && empty ? 0 : 1;
     }
     const Vec3 sun = Norm({-0.5f, 0.75f, 0.4f});
     constexpr auto Trace = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
@@ -861,7 +922,218 @@ int main(int argc, char** argv) {
         {{{-4, 1.7f, 12}, {0.8f, -0.25f, 0.5f}}},
         {{{5, 3, 30}, {-0.5f, -0.5f, 1}}},
     }};
-    if (argc > 1 && std::strcmp(argv[1], "--speed") == 0) {
+    if (argc > 1 && std::strcmp(argv[1], "--refits") == 0) {
+        const unsigned total = argc > 2 ? unsigned(std::strtoul(argv[2], nullptr, 10)) : 2600000u;
+        const unsigned draws = argc > 3 ? unsigned(std::strtoul(argv[3], nullptr, 10)) : 480u;
+        Scene scene{vk, MakeScene(total, draws)};
+        scene.Create(Trace | Update);
+        scene.Sizes(Trace | Update);
+        scene.Allocate();
+        scene.BuildAll(Trace | Update);
+        for (const int percent : {100, 75, 50, 25, 10}) {
+            std::vector<double> times;
+            for (int i = 0; i < 9; ++i) times.push_back(scene.Refit(Trace | Update, true, percent));
+            std::printf("%zu BLAS, %u triangles: refit %3d%% of them %.3f ms\n", scene.blas.size(), scene.triangles,
+                        percent, Median(times));
+        }
+        return 0;
+    }
+    if (argc > 1 && std::strcmp(argv[1], "--turn") == 0) {
+        const unsigned total = argc > 2 ? unsigned(std::strtoul(argv[2], nullptr, 10)) : 2400000u;
+        const float step = argc > 3 ? float(std::strtod(argv[3], nullptr)) : 6.0f;
+        const unsigned evict_after = argc > 4 ? unsigned(std::strtoul(argv[4], nullptr, 10)) : 90u;
+        std::vector<Mesh> meshes = MakeScene(total, total / 1875);
+        std::vector<float> angle(meshes.size(), 0.0f);
+        {
+            std::mt19937 rng(11);
+            std::uniform_real_distribution<float> turn(0.0f, 360.0f), reach(3.0f, 60.0f);
+            for (std::size_t i = 1; i < meshes.size(); ++i) {
+                angle[i] = turn(rng);
+                const float r = reach(rng), a = angle[i] * 3.14159265f / 180.0f;
+                meshes[i].position = {r * std::sin(a), meshes[i].position.y, r * std::cos(a)};
+            }
+        }
+        Scene scene{vk, std::move(meshes)};
+        scene.Create(Trace);
+        scene.Allocate();
+        const unsigned n = unsigned(scene.blas.size());
+        std::vector<VkDeviceSize> scratch_at(n);
+        {
+            VkDeviceSize at = 0;
+            for (unsigned i = 0; i < n; ++i) {
+                scratch_at[i] = at;
+                at += (std::max(scene.blas[i].scratch, scene.blas[i].update_scratch) + AsAlign - 1) & ~(AsAlign - 1);
+            }
+        }
+        Tlas tlas = CreateTlas(vk, scene);
+        const auto record_builds = [&](const std::vector<unsigned>& list) {
+            if (list.empty()) return;
+            std::vector<VkAccelerationStructureGeometryKHR> geometries;
+            geometries.reserve(list.size());
+            std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
+            std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+            ranges.reserve(list.size());
+            std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pointers;
+            for (unsigned i : list) {
+                geometries.push_back(scene.Geometry(scene.blas[i]));
+                VkAccelerationStructureBuildGeometryInfoKHR info{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                    .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, .flags = Trace,
+                    .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR, .dstAccelerationStructure = scene.blas[i].handle,
+                    .geometryCount = 1, .pGeometries = &geometries.back()};
+                info.scratchData.deviceAddress = scene.scratch.address + scratch_at[i];
+                infos.push_back(info);
+                ranges.push_back({scene.blas[i].triangles, 0, 0, 0});
+                pointers.push_back(&ranges.back());
+            }
+            vk.build(vk.cmd, unsigned(infos.size()), infos.data(), pointers.data());
+            vk.Barrier();
+        };
+        const auto record_tlas = [&](const std::vector<unsigned>& list, const Mat4& view) {
+            auto* out = static_cast<VkAccelerationStructureInstanceKHR*>(tlas.instances.data);
+            for (std::size_t k = 0; k < list.size(); ++k) {
+                Mat4 model = Identity();
+                model.at(0, 3) = scene.meshes[list[k]].position.x;
+                model.at(1, 3) = scene.meshes[list[k]].position.y;
+                model.at(2, 3) = scene.meshes[list[k]].position.z;
+                const Mat4 m = view * model;
+                VkAccelerationStructureInstanceKHR inst{};
+                std::memcpy(inst.transform.matrix, m.m.data(), 12 * sizeof(float));
+                inst.mask = 0xff;
+                inst.accelerationStructureReference = scene.blas[list[k]].address;
+                out[k] = inst;
+            }
+            VkAccelerationStructureGeometryKHR g{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+                .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .flags = VK_GEOMETRY_OPAQUE_BIT_KHR};
+            g.geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
+            g.geometry.instances.data.deviceAddress = tlas.instances.address;
+            VkAccelerationStructureBuildGeometryInfoKHR info{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+                .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .flags = Fast,
+                .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR, .dstAccelerationStructure = tlas.handle,
+                .geometryCount = 1, .pGeometries = &g};
+            info.scratchData.deviceAddress = tlas.scratch.address;
+            VkAccelerationStructureBuildRangeInfoKHR range{unsigned(list.size()), 0, 0, 0};
+            const VkAccelerationStructureBuildRangeInfoKHR* pointer = &range;
+            vk.build(vk.cmd, 1, &info, &pointer);
+            vk.Barrier();
+        };
+        const unsigned frames = unsigned(2.0f * 360.0f / step);
+        std::printf("== Turn: %u triangles in %u meshes around the camera, %.1f degrees a frame, %u frames, "
+                    "unseen meshes leave after %u frames\n", scene.triangles, n, step, frames, evict_after);
+        struct Result { std::vector<double> ms; std::vector<unsigned> built; std::vector<unsigned> added; unsigned gone = 0; };
+        enum Mode { Draws, World, Persistent };
+        std::vector<Vulkan::RtRules::Box> boxes(n);
+        for (unsigned i = 0; i < n; ++i) {
+            auto& box = boxes[i];
+            box.lo = {1e30f, 1e30f, 1e30f};
+            box.hi = {-1e30f, -1e30f, -1e30f};
+            for (const Vec3& v : scene.meshes[i].vertices) {
+                const Vec3 w = v + scene.meshes[i].position;
+                const float p[3] = {w.x, w.y, w.z};
+                for (int a = 0; a < 3; ++a) {
+                    box.lo[a] = std::min(box.lo[a], p[a]);
+                    box.hi[a] = std::max(box.hi[a], p[a]);
+                }
+            }
+        }
+        const float fy = 1.0f / std::tan(0.5f * 0.87f);
+        const std::array<float, 4> turn_proj{fy * H / W, fy, 1.0f, -0.1f};
+        const auto run = [&](Mode mode) {
+            const bool from_draws = mode != World;
+            Result result;
+            std::vector<int> last_seen(n, -1000000);
+            std::vector<int> gone(n, -1);
+            std::vector<bool> built(n, false);
+            if (!from_draws) {
+                std::vector<unsigned> all(n);
+                for (unsigned i = 0; i < n; ++i) all[i] = i;
+                vk.Begin();
+                record_builds(all);
+                vk.Stamp(0); vk.Stamp(1);
+                vk.End();
+            }
+            for (unsigned f = 0; f < frames; ++f) {
+                const float yaw = float(f) * step;
+                const float y = yaw * 3.14159265f / 180.0f;
+                const Mat4 view = LookTo({0, 1.6f, 0}, {std::sin(y), -0.1f, std::cos(y)});
+                std::vector<unsigned> visible, fresh, scene_list;
+                for (unsigned i = 0; i < n; ++i) {
+                    float d = std::fmod(std::fabs(angle[i] - std::fmod(yaw, 360.0f)), 360.0f);
+                    if (d > 180.0f) d = 360.0f - d;
+                    if (i == 0 || d <= 50.0f) visible.push_back(i);
+                }
+                if (from_draws) {
+                    for (unsigned i : visible) {
+                        if (!built[i]) { fresh.push_back(i); built[i] = true; }
+                        last_seen[i] = int(f);
+                    }
+                    for (unsigned i = 0; i < n; ++i) {
+                        if ((mode == Draws || scene.meshes[i].skinned) && built[i] && int(f) - last_seen[i] > int(evict_after))
+                            built[i] = false;
+                    }
+                    scene_list = visible;
+                    if (mode == Persistent) {
+                        namespace R = Vulkan::RtRules;
+                        std::array<float, 12> rows{};
+                        std::memcpy(rows.data(), view.m.data(), sizeof(rows));
+                        const float eye[3] = {0, 1.6f, 0};
+                        std::vector<R::Caster> casters;
+                        for (unsigned i = 0; i < n; ++i) {
+                            if (!built[i] || last_seen[i] == int(f) || scene.meshes[i].skinned ||
+                                !R::RecentCaster(std::uint64_t(f + 1), std::uint64_t(last_seen[i] + 1)) ||
+                                R::Hidden(std::uint64_t(last_seen[i] + 1), std::uint64_t(gone[i] + 1))) {
+                                continue;
+                            }
+                            const float distance = R::BoxDistance(boxes[i], eye);
+                            const auto kind = R::ClassifyUndrawn(R::OutsideFrustum(boxes[i], rows, turn_proj), distance,
+                                                                 R::ShadowReachMeters);
+                            if (kind == R::Undrawn::Add) {
+                                casters.push_back({i, distance});
+                            } else if (kind == R::Undrawn::Gone) {
+                                gone[i] = int(f);
+                                ++result.gone;
+                            }
+                        }
+                        R::KeepNearest(casters, 8192 - visible.size());
+                        for (const auto& caster : casters) scene_list.push_back(caster.id);
+                        result.added.push_back(unsigned(casters.size()));
+                    }
+                } else {
+                    scene_list.resize(n);
+                    for (unsigned i = 0; i < n; ++i) scene_list[i] = i;
+                }
+                vk.Begin();
+                vk.Stamp(0);
+                record_builds(fresh);
+                record_tlas(scene_list, view);
+                vk.Stamp(1);
+                result.ms.push_back(vk.End());
+                result.built.push_back(unsigned(fresh.size()));
+            }
+            return result;
+        };
+        const auto report = [](const char* name, Result r) {
+            const double mean = std::accumulate(r.ms.begin(), r.ms.end(), 0.0) / double(r.ms.size());
+            std::vector<double> sorted = r.ms;
+            std::sort(sorted.begin(), sorted.end());
+            const double p95 = sorted[sorted.size() * 95 / 100], max = sorted.back();
+            const unsigned max_built = *std::max_element(r.built.begin(), r.built.end());
+            const double mean_built = std::accumulate(r.built.begin(), r.built.end(), 0.0) / double(r.built.size());
+            std::printf("Turn, %s: GPU %.3f ms a frame, p95 %.3f, max %.3f; new BLAS %.1f a frame, max %u\n", name, mean, p95,
+                        max, mean_built, max_built);
+        };
+        report("scene from this frame's draws", run(Draws));
+        report("scene from the loaded world", run(World));
+        const Result kept = run(Persistent);
+        report("persistent scene, still meshes kept, undrawn ones outside the view within 40 m added", kept);
+        const double mean_added = std::accumulate(kept.added.begin(), kept.added.end(), 0.0) / double(kept.added.size());
+        std::printf("Turn, persistent scene: %.1f casters outside the view added a frame, max %u; %u marked gone\n",
+                    mean_added, *std::max_element(kept.added.begin(), kept.added.end()), kept.gone);
+        return 0;
+    }
+    if (argc > 1 && (std::strcmp(argv[1], "--speed") == 0 || std::strcmp(argv[1], "--lamps") == 0 ||
+                     std::strcmp(argv[1], "--lamp-casters") == 0)) {
+        const bool lamps_only = std::strcmp(argv[1], "--lamps") == 0;
+        const bool casters_only = std::strcmp(argv[1], "--lamp-casters") == 0;
         const unsigned total = argc > 2 ? unsigned(std::strtoul(argv[2], nullptr, 10)) : 1500000u;
         Scene scene{vk, MakeScene(total, total / 1875)};
         scene.Create(Trace | Update);
@@ -959,10 +1231,317 @@ int main(int argc, char** argv) {
         }
         vk.Stamp(0); vk.Stamp(1);
         vk.End();
+        if (lamps_only) {
+            const Views views = MakeViews(cameras[0][0], cameras[0][1], sun);
+            Tlas tlas = make_tlas(n, Trace);
+            build_tlas(tlas, views.view, Trace, false);
+            lab.Prepare(tlas.handle, views);
+            auto* words = static_cast<float*>(lights.data);
+            for (int r = 0; r < 4; ++r)
+                for (int k = 0; k < 4; ++k) words[r * 4 + k] = views.inv_proj.at(r, k);
+            std::mt19937 rng(5);
+            std::uniform_real_distribution<float> across(-14.0f, 14.0f), deep(2.0f, 70.0f), up(0.3f, 6.0f);
+            const std::array<unsigned, 3> counts{10, 100, 300};
+            std::array<std::array<double, 4>, 3> ms{};
+            for (std::size_t c = 0; c < counts.size(); ++c) {
+                std::vector<std::array<int, 4>> rects;
+                unsigned used = 16;
+                const float radius = 6.0f;
+                while (rects.size() < counts[c]) {
+                    const Vec3 world{across(rng), up(rng), deep(rng)};
+                    Vec3 v{};
+                    for (int r = 0; r < 3; ++r) {
+                        const float value = views.view.at(r, 0) * world.x + views.view.at(r, 1) * world.y +
+                                            views.view.at(r, 2) * world.z + views.view.at(r, 3);
+                        (r == 0 ? v.x : r == 1 ? v.y : v.z) = value;
+                    }
+                    if (v.z - radius <= 0.1f) continue;
+                    float x0 = float(W), y0 = float(H), x1 = 0, y1 = 0;
+                    for (int k = 0; k < 8; ++k) {
+                        const Vec3 corner{v.x + (k & 1 ? radius : -radius), v.y + (k & 2 ? radius : -radius),
+                                          v.z + (k & 4 ? radius : -radius)};
+                        const float px = (views.proj.at(0, 0) * corner.x / corner.z * 0.5f + 0.5f) * W;
+                        const float py = (0.5f - views.proj.at(1, 1) * corner.y / corner.z * 0.5f) * H;
+                        x0 = std::min(x0, px); x1 = std::max(x1, px);
+                        y0 = std::min(y0, py); y1 = std::max(y1, py);
+                    }
+                    const std::array<int, 4> rect{std::clamp(int(x0), 0, int(W)), std::clamp(int(y0), 0, int(H)),
+                                                  std::clamp(int(x1) + 1, 0, int(W)), std::clamp(int(y1) + 1, 0, int(H))};
+                    if (rect[0] >= rect[2] || rect[1] >= rect[3]) continue;
+                    const std::array<float, 16> light{v.x, v.y, v.z, 1.0f / (radius * radius), 1.0f, 0.8f, 0.6f};
+                    std::memcpy(words + used, light.data(), sizeof(light));
+                    used += 16;
+                    rects.push_back(rect);
+                }
+                const unsigned table = used;
+                for (std::size_t t = 0; t < rects.size(); ++t) {
+                    const std::array<std::uint32_t, 8> row{unsigned(rects[t][0]), unsigned(rects[t][1]), unsigned(rects[t][2]),
+                                                           unsigned(rects[t][3]), 16u + unsigned(t) * 16u, 1u, 0u, 0u};
+                    std::memcpy(words + used, row.data(), sizeof(row));
+                    used += 8;
+                }
+                const auto run = [&](std::size_t batch, unsigned pick) {
+                    vk.Begin();
+                    VkClearColorValue one{};
+                    one.float32[0] = one.float32[1] = one.float32[2] = 1.0f;
+                    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                    vkCmdClearColorImage(vk.cmd, lamp_images[0].image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &range);
+                    vkCmdClearColorImage(vk.cmd, lamp_images[2].image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &range);
+                    vk.Barrier();
+                    VkDescriptorBufferInfo data{lights.buffer, 0, (used + 32) * 4};
+                    VkDescriptorImageInfo depth{vk.sampler, lab.depth.view, VK_IMAGE_LAYOUT_GENERAL};
+                    std::array<VkDescriptorImageInfo, 4> images{};
+                    for (int k = 0; k < 4; ++k) images[k] = {{}, lamp_images[k].view, VK_IMAGE_LAYOUT_GENERAL};
+                    VkWriteDescriptorSetAccelerationStructureKHR as{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                        .accelerationStructureCount = 1, .pAccelerationStructures = &tlas.handle};
+                    VkDescriptorImageInfo history_prev{{}, history[1].view, VK_IMAGE_LAYOUT_GENERAL};
+                    VkDescriptorImageInfo history_cur{{}, history[0].view, VK_IMAGE_LAYOUT_GENERAL};
+                    std::array<VkWriteDescriptorSet, 9> writes{};
+                    for (unsigned k = 0; k < 9; ++k) writes[k] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = k, .descriptorCount = 1};
+                    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[0].pBufferInfo = &data;
+                    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[1].pImageInfo = &depth;
+                    for (int k = 0; k < 4; ++k) { writes[2 + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[2 + k].pImageInfo = &images[k]; }
+                    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; writes[6].pNext = &as;
+                    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[7].pImageInfo = &history_prev;
+                    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[8].pImageInfo = &history_cur;
+                    vk.Stamp(0);
+                    for (std::size_t start = 0; start < rects.size(); start += batch) {
+                        const std::size_t end = std::min(rects.size(), start + batch);
+                        const VkImageCopy region{.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {W, H, 1}};
+                        vkCmdCopyImage(vk.cmd, zero_image.image, VK_IMAGE_LAYOUT_GENERAL, lamp_images[1].image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+                        vkCmdCopyImage(vk.cmd, zero_image.image, VK_IMAGE_LAYOUT_GENERAL, lamp_images[3].image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+                        vk.Barrier();
+                        std::array<int, 4> covered{int(W), int(H), 0, 0};
+                        for (std::size_t t = start; t < end; ++t) {
+                            covered = {std::min(covered[0], rects[t][0]), std::min(covered[1], rects[t][1]),
+                                       std::max(covered[2], rects[t][2]), std::max(covered[3], rects[t][3])};
+                        }
+                        LampPush push;
+                        push.first_light = table + unsigned(start) * 8;
+                        push.count = unsigned(end - start);
+                        push.rect = covered;
+                        push.steps = pick;
+                        vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lamp.pipeline);
+                        vk.push(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lamp.layout, 0, 9, writes.data());
+                        vkCmdPushConstants(vk.cmd, lamp.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                        const unsigned gx0 = unsigned(covered[0]) / 8, gy0 = unsigned(covered[1]) / 8;
+                        const unsigned gx1 = (unsigned(covered[2]) + 7) / 8, gy1 = (unsigned(covered[3]) + 7) / 8;
+                        vkCmdDispatchBase(vk.cmd, gx0, gy0, 0, gx1 - gx0, gy1 - gy0, 1);
+                        vk.Barrier();
+                    }
+                    vk.Stamp(1);
+                    vk.Barrier();
+                    return vk.End();
+                };
+                const std::array<std::pair<std::size_t, unsigned>, 4> modes{{{4, 1}, {rects.size(), 1}, {rects.size(), 2}, {rects.size(), 0}}};
+                for (std::size_t m = 0; m < modes.size(); ++m) {
+                    std::vector<double> samples;
+                    for (int i = 0; i < 11; ++i) samples.push_back(run(modes[m].first, modes[m].second));
+                    ms[c][m] = Median(samples);
+                }
+            }
+            std::printf("%-58s %9s %9s %9s\n", "Lamp pass GPU ms, 1920x1080, lights:", "10", "100", "300");
+            const std::array<const char*, 4> names{"before: batches of 4 lights, strongest + 1 sampled",
+                                                   "one batch, strongest + 1 sampled",
+                                                   "after: one batch, strongest 2 + 1 sampled",
+                                                   "one batch, every light traced (exact)"};
+            for (std::size_t m = 0; m < names.size(); ++m) {
+                std::printf("%-58s %9.3f %9.3f %9.3f\n", names[m], ms[0][m], ms[1][m], ms[2][m]);
+            }
+            vk.destroy_as(vk.device, tlas.handle, nullptr);
+            vk.Free(tlas.instances); vk.Free(tlas.storage); vk.Free(tlas.scratch);
+            return 0;
+        }
         const auto decode = [](std::uint32_t v) {
             const unsigned e = (v >> 6) & 31u, m = v & 63u;
             return e == 0 ? float(m) / 64.0f * std::ldexp(1.0f, -14) : std::ldexp(1.0f + float(m) / 64.0f, int(e) - 15);
         };
+        if (casters_only) {
+            const Views views = MakeViews({0, 3, -2}, {0, -0.8f, 1}, sun);
+            const auto to_view = [&](Vec3 world) {
+                Vec3 v{};
+                for (int r = 0; r < 3; ++r) {
+                    const float value = views.view.at(r, 0) * world.x + views.view.at(r, 1) * world.y +
+                                        views.view.at(r, 2) * world.z + views.view.at(r, 3);
+                    (r == 0 ? v.x : r == 1 ? v.y : v.z) = value;
+                }
+                return v;
+            };
+            std::vector<Mesh> parts(3);
+            parts[0] = Box({40, 0.1f, 40}, 12);
+            parts[0].position = {0, -0.1f, 4};
+            parts[1] = Box({0.5f, 1.8f, 0.5f}, 12);
+            parts[1].position = {1.5f, 0, 4};
+            const std::array<float, 5> blades{-0.24f, -0.12f, 0.0f, 0.12f, 0.24f};
+            for (const float x : blades) AddGrid(parts[2], {x - 0.03f, 0, 0}, {0.06f, 0, 0}, {0, 0.6f, 0}, 1);
+            parts[2].position = {0, 0, 3};
+            Scene casters{vk, std::move(parts)};
+            casters.Create(Trace);
+            casters.Allocate();
+            casters.BuildAll(Trace);
+            Tlas tlas = CreateTlas(vk, casters);
+            const auto load = [&](std::initializer_list<std::array<unsigned, 2>> instances) {
+                auto* out = static_cast<VkAccelerationStructureInstanceKHR*>(tlas.instances.data);
+                tlas.count = 0;
+                for (const auto& [mesh, mask] : instances) {
+                    Mat4 model = Identity();
+                    model.at(0, 3) = casters.meshes[mesh].position.x;
+                    model.at(1, 3) = casters.meshes[mesh].position.y;
+                    model.at(2, 3) = casters.meshes[mesh].position.z;
+                    const Mat4 m = views.view * model;
+                    VkAccelerationStructureInstanceKHR inst{};
+                    std::memcpy(inst.transform.matrix, m.m.data(), 12 * sizeof(float));
+                    inst.mask = mask;
+                    inst.accelerationStructureReference = casters.blas[mesh].address;
+                    out[tlas.count++] = inst;
+                }
+                BuildTlas(vk, tlas, casters, views.view, false);
+            };
+            auto* words = static_cast<float*>(lights.data);
+            for (int r = 0; r < 4; ++r)
+                for (int k = 0; k < 4; ++k) words[r * 4 + k] = views.inv_proj.at(r, k);
+            const auto place = [&](const std::vector<Vec3>& lamps) {
+                unsigned used = 16;
+                for (const Vec3& world : lamps) {
+                    const Vec3 v = to_view(world);
+                    const std::array<float, 16> light{v.x, v.y, v.z, 1.0f / 36.0f, 1.0f, 0.8f, 0.6f};
+                    std::memcpy(words + used, light.data(), sizeof(light));
+                    used += 16;
+                }
+                const std::array<std::uint32_t, 8> row{0u, 0u, W, H, 16u, unsigned(lamps.size()), 0u, 0u};
+                std::memcpy(words + used, row.data(), sizeof(row));
+                return used;
+            };
+            const std::uint32_t cut_mask = 0xffu & ~(4u | 8u);
+            const VkSpecializationMapEntry mask_entry{0, 0, sizeof(cut_mask)};
+            const VkSpecializationInfo mask_info{1, &mask_entry, sizeof(cut_mask), &cut_mask};
+            const Pipeline lamp_cut = vk.MakePipeline({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                                       VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE},
+                                                      64, POINT_SHADOW_RAY_COMP, sizeof(POINT_SHADOW_RAY_COMP),
+                                                      VK_PIPELINE_CREATE_DISPATCH_BASE_BIT, &mask_info);
+            const auto shade = [&](const Pipeline& pipe, unsigned table, unsigned pick) {
+                vk.Begin();
+                VkClearColorValue one{}, zero{};
+                one.float32[0] = one.float32[1] = one.float32[2] = 1.0f;
+                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                for (int k = 0; k < 4; ++k)
+                    vkCmdClearColorImage(vk.cmd, lamp_images[k].image, VK_IMAGE_LAYOUT_GENERAL, k % 2 ? &zero : &one, 1, &range);
+                vk.Barrier();
+                VkDescriptorBufferInfo data{lights.buffer, 0, VkDeviceSize(table + 40) * 4};
+                VkDescriptorImageInfo depth{vk.sampler, lab.depth.view, VK_IMAGE_LAYOUT_GENERAL};
+                std::array<VkDescriptorImageInfo, 4> images{};
+                for (int k = 0; k < 4; ++k) images[k] = {{}, lamp_images[k].view, VK_IMAGE_LAYOUT_GENERAL};
+                VkWriteDescriptorSetAccelerationStructureKHR as{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                    .accelerationStructureCount = 1, .pAccelerationStructures = &tlas.handle};
+                VkDescriptorImageInfo history_prev{{}, history[1].view, VK_IMAGE_LAYOUT_GENERAL};
+                VkDescriptorImageInfo history_cur{{}, history[0].view, VK_IMAGE_LAYOUT_GENERAL};
+                std::array<VkWriteDescriptorSet, 9> writes{};
+                for (unsigned k = 0; k < 9; ++k) writes[k] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = k, .descriptorCount = 1};
+                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[0].pBufferInfo = &data;
+                writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[1].pImageInfo = &depth;
+                for (int k = 0; k < 4; ++k) { writes[2 + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[2 + k].pImageInfo = &images[k]; }
+                writes[6].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; writes[6].pNext = &as;
+                writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[7].pImageInfo = &history_prev;
+                writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; writes[8].pImageInfo = &history_cur;
+                LampPush push;
+                push.first_light = table;
+                push.thickness = 0.6f;
+                push.bias = 0.03f;
+                push.steps = pick;
+                push.rect = {0, 0, int(W), int(H)};
+                vkCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.pipeline);
+                vk.push(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.layout, 0, 9, writes.data());
+                vkCmdPushConstants(vk.cmd, pipe.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                vk.Stamp(0);
+                vkCmdDispatch(vk.cmd, (W + 7) / 8, (H + 7) / 8, 1);
+                vk.Stamp(1);
+                vk.Barrier();
+                return vk.End();
+            };
+            const auto scales = [&] {
+                const auto raw = lab.Read(lamp_images[0], VK_FORMAT_R32_SFLOAT);
+                std::vector<float> out(raw.size());
+                for (std::size_t k = 0; k < raw.size(); ++k) {
+                    std::uint32_t bits;
+                    std::memcpy(&bits, &raw[k], 4);
+                    out[k] = decode(bits);
+                }
+                return out;
+            };
+            const auto sample = [&](const std::vector<float>& image, const std::vector<Vec3>& points) {
+                double sum = 0;
+                unsigned count = 0;
+                for (const Vec3& world : points) {
+                    const Vec3 v = to_view(world);
+                    const int px = int((views.proj.at(0, 0) * v.x / v.z * 0.5f + 0.5f) * W);
+                    const int py = int((0.5f - views.proj.at(1, 1) * v.y / v.z * 0.5f) * H);
+                    for (int dy = -1; dy <= 1; ++dy)
+                        for (int dx = -1; dx <= 1; ++dx, ++count)
+                            sum += image[std::size_t(std::clamp(py + dy, 0, int(H) - 1)) * W + std::size_t(std::clamp(px + dx, 0, int(W) - 1))];
+                }
+                return sum / count;
+            };
+            bool all = true;
+            const auto verdict = [&](bool ok) { all = all && ok; return ok ? "PASS" : "FAIL"; };
+            const std::vector<Vec3> behind_solid{{2.5f, 0, 4}, {3, 0, 4}, {2.5f, 0, 3.9f}};
+            const std::vector<Vec3> beside{{-2.5f, 0, 4}, {-3, 0, 4}, {-2.5f, 0, 3.9f}};
+            std::vector<Vec3> behind_thin;
+            for (const float x : blades) behind_thin.push_back({1.6f * x, 0, 2.4f});
+            const Vec3 lamp_at{0, 1, 4};
+            const unsigned one_lamp = place({lamp_at});
+            load({{0, 2}});
+            lab.Prepare(tlas.handle, views);
+            shade(lamp, one_lamp, 0);
+            const auto bare = scales();
+            const float lowest = *std::min_element(bare.begin(), bare.end());
+            std::printf("%s case 3: floor without casters, lowest lamp scale %.3f (want > 0.98)\n", verdict(lowest > 0.98f), lowest);
+            for (const unsigned caster_mask : {2u, 8u}) {
+                load({{0u, 2u}, {1u, caster_mask}});
+                for (const bool cut : {false, true}) {
+                    shade(cut ? lamp_cut : lamp, one_lamp, 0);
+                    const double s = sample(scales(), behind_solid);
+                    const bool dark = !(cut && caster_mask == 8u);
+                    std::printf("%s case 4: caster instance mask %u, RAY_MASK 0x%02x, scale behind it %.3f (want %s)\n",
+                                verdict(dark ? s < 0.5 : s > 0.9), caster_mask, cut ? cut_mask : 0xffu, s,
+                                dark ? "< 0.5" : "> 0.9");
+                }
+            }
+            load({{0, 2}, {1, 2}, {2, 2}});
+            lab.Prepare(tlas.handle, views);
+            load({{0, 2}, {1, 2}});
+            shade(lamp, one_lamp, 0);
+            const auto lit = scales();
+            const double shadowed = sample(lit, behind_solid), open = sample(lit, beside), fringe = sample(lit, behind_thin);
+            std::printf("%s case 1: solid caster in the ray scene, scale behind it %.3f (want < 0.5), beside it %.3f (want > 0.9)\n",
+                        verdict(shadowed < 0.5 && open > 0.9), shadowed, open);
+            std::printf("%s case 2: thin caster only in depth, scale behind it %.3f (want < 0.5, needs the screen-space march)\n",
+                        verdict(fringe < 0.5), fringe);
+            std::printf("%-44s %9s %9s %9s\n", "Lamp casters GPU ms per dispatch, 1920x1080:", "1", "4", "16");
+            const std::array<unsigned, 3> counts{1, 4, 16};
+            for (const unsigned pick : {0u, 2u}) {
+                std::array<double, 3> ms{};
+                for (std::size_t c = 0; c < counts.size(); ++c) {
+                    std::vector<Vec3> lamps;
+                    for (unsigned i = 0; i < counts[c]; ++i) {
+                        const float a = 0.3f + 6.2831853f * float(i) / float(counts[c]);
+                        lamps.push_back({2.5f * std::cos(a), 1.0f, 4.0f + 2.5f * std::sin(a)});
+                    }
+                    const unsigned table = place(lamps);
+                    std::vector<double> samples;
+                    for (int i = 0; i < 9; ++i) samples.push_back(shade(lamp, table, pick));
+                    ms[c] = Median(samples);
+                }
+                std::printf("%-44s %9.3f %9.3f %9.3f\n", pick ? "strongest 2 + 1 sampled" : "every light traced (exact)",
+                            ms[0], ms[1], ms[2]);
+            }
+            vk.destroy_as(vk.device, tlas.handle, nullptr);
+            vk.Free(tlas.instances); vk.Free(tlas.storage); vk.Free(tlas.scratch);
+            return all ? 0 : 1;
+        }
         std::vector<std::array<double, 3>> lamp_ms(variants.size()), sun_ms(variants.size());
         std::array<double, 3> per_tile_ms{}, pick_ms{}, reuse_ms{}, reuse_error{};
         std::array<std::array<double, 2>, 3> pick_error{};

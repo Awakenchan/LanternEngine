@@ -1,0 +1,1 @@
+LICENSE.txt: the license headers of engine/gpu/third_party/gcn/include/gcn/si_ci_vi_merged_offset.h and si_ci_vi_merged_pm4_it_opcodes.h in this repository (AMD PAL, namespace Pal::Gfx6)
