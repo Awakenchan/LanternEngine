@@ -6,6 +6,16 @@ namespace BloodborneLauncher.Core
 {
     public static class OnlineStatus
     {
+        public static bool CheatsOff(Func<string, string, string> ini)
+        {
+            // Paleblood: the same rule the engine applies when it starts (start/online.cpp ConfigureOnline):
+            // a session is online only with Play online on AND (a seamless co-op room, or a connected
+            // Hunter's Dream account). Play online alone, with no account, starts the game offline.
+            if (HuntersDream.OnlinePaused || ini("online_enabled", "") != "1") return false;
+            if (ini("seamless_enabled", "") == "1") return true;
+            return ini("online_pool", "") == "huntersdream" && ini("online_connected", "1") == "1";
+        }
+
         public const string Lamp2Lamp = "Bloodborne.xml/Lamp2Lamp (warp between lamps)";
         public const string Lamp2LampBosses = "Bloodborne.xml/Lamp2Lamp: warp to bosses";
 

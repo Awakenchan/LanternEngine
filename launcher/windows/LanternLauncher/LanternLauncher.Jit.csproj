@@ -10,6 +10,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>LanternEngine</AssemblyName>
+    <!-- Paleblood: what Windows shows for the exe (taskbar hover, Task Manager, Properties). -->
+    <AssemblyTitle>Paleblood</AssemblyTitle>
+    <Product>Paleblood</Product>
+    <Company>Paleblood</Company>
+    <Description>Paleblood</Description>
+    <Copyright>GPL-3.0-or-later; based on Lantern Engine</Copyright>
     <RootNamespace>BloodborneLauncher</RootNamespace>
     <DefineConstants>$(DefineConstants);AVALONIA</DefineConstants>
     <ApplicationIcon>..\BloodborneLauncher\app.ico</ApplicationIcon>

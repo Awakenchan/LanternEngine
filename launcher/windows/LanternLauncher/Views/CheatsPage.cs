@@ -41,6 +41,15 @@ namespace BloodborneLauncher.Views
                 Message = L.T("Play online or seamless co-op is on: every cheat stays off in online and seamless co-op sessions, so other players never meet them. ") +
                           L.T("Turn both off and they work again; what you pick here is kept."),
             };
+            var goOffline = new Button { Content = L.T("Turn Play online and seamless co-op off now") };
+            goOffline.Click += (_, _) =>
+            {
+                Ini.Set("online_enabled", "0");
+                Ini.Set("seamless_enabled", "0");
+                Ws.Log(L.T("Play online and seamless co-op are off: cheats work in the next game start."), LogLevel.Step);
+                OnShown();
+            };
+            _online.Content = goOffline;
             Body.Children.Add(_online);
 
             Group(L.T("Items"));
@@ -111,7 +120,7 @@ namespace BloodborneLauncher.Views
         public override void OnShown()
         {
             _engine.IsOpen = !Supported;
-            _online.IsOpen = Ini.Get("seamless_enabled") == "1" || (Ini.Get("online_enabled") == "1" && !HuntersDream.OnlinePaused);
+            _online.IsOpen = OnlineStatus.CheatsOff((k, d) => Ini.Get(k, d));
         }
     }
 }
