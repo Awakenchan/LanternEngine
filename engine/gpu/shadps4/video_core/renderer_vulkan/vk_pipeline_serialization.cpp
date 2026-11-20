@@ -29,7 +29,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 7u; // bbport: interpolated integer fix (Pascal)
+static constexpr u32 ShaderBinaryVersion = 10u; // bbport: interpolated integer fix (Pascal); GCN NaN/Inf rules (BB_GCN_NAN)
 static constexpr u32 MotionShaderBinaryVersion = 8u; // runtime address descriptor, set 1
 static constexpr u32 CaptureShaderBinaryVersion = 9u;
 static constexpr u32 ShaderMetaVersion = 8u; // bbport: HwFragmentRuntimeInfo::depth_first

@@ -13,6 +13,10 @@ namespace BloodborneLauncher.Core
     {
         private Process? _process;
         private StreamWriter? _log;
+        /// <summary>every session's output also goes to its own file in logs\archive, line by line
+        /// as it is printed (a crash keeps everything up to it), named by start time. Never overwritten and
+        /// never deleted by the launcher.</summary>
+        private StreamWriter? _archive;
 
         /// <summary>Linux: asks a process to end (SIGTERM) through kill(1), present on every distribution.</summary>
         private static bool Terminate(int pid)
@@ -160,6 +164,25 @@ namespace BloodborneLauncher.Core
                 _log = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
             }
             catch { _log = null; /* read-only folder: the Log tab still has it */ }
+            try
+            {
+                var archive = Path.Combine(Path.GetDirectoryName(SessionLog)!, "archive");
+                Directory.CreateDirectory(archive);
+                // FileMode.CreateNew: a name that exists is never reused, so an old log cannot be overwritten.
+                var name = "session_" + DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+                for (var n = 0; n < 100 && _archive == null; n++)
+                {
+                    var path = Path.Combine(archive, name + (n == 0 ? "" : "_" + n) + ".log");
+                    try
+                    {
+                        // bufferSize 1: unbuffered, so every line is on disk when written (a killed launcher loses nothing).
+                        var astream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete, 1);
+                        _archive = new StreamWriter(astream, new UTF8Encoding(false)) { AutoFlush = true };
+                    }
+                    catch (IOException) { /* taken: try the next name */ }
+                }
+            }
+            catch { _archive = null; /* read-only folder: last_session.log still has it */ }
         }
 
         private void Emit(string line)
@@ -167,6 +190,7 @@ namespace BloodborneLauncher.Core
             lock (this)
             {
                 try { _log?.WriteLine(line); } catch { /* disk full */ }
+                try { _archive?.WriteLine(line); } catch { /* disk full */ }
             }
             Output?.Invoke(line);
         }
@@ -177,6 +201,8 @@ namespace BloodborneLauncher.Core
             {
                 _log?.Dispose();
                 _log = null;
+                try { _archive?.Dispose(); } catch { /* already closed */ }
+                _archive = null;
             }
         }
 

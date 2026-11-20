@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using BloodborneLauncher.Core;
@@ -111,7 +111,7 @@ namespace BloodborneLauncher.Views
         public override void OnShown()
         {
             _engine.IsOpen = !Supported;
-            _online.IsOpen = Ini.Get("seamless_enabled") == "1" || (Ini.Get("online_enabled") == "1" && !HuntersDream.OnlinePaused);
+            _online.IsOpen = OnlineStatus.CheatsOff((k, d) => Ini.Get(k, d));
         }
     }
 }

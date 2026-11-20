@@ -139,7 +139,9 @@ private:
     static constexpr u32 ParamsPerFrame = 8192;
     static_assert(1 + FrameSlots * ParamsPerFrame == Shader::MotionVectors::ParamsCapacity);
     // Positions (device local): two halves (current/previous frame) of vec4; element 0 is reserved.
-    static constexpr u32 PositionsPerFrame = 4u << 20;
+    // 16M positions (was 4M). A 30-minute play log showed the 4M budget 90-97% full with 30-42% of
+    // the draws skipped for space in busy areas (their motion vectors were missing for the upscaler).
+    static constexpr u32 PositionsPerFrame = 16u << 20;
     Motion::History history{PositionsPerFrame};
     Motion::IndexRangeCache index_ranges;
     std::array<u64, FrameSlots> params_ticks{};

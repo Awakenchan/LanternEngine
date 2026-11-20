@@ -54,6 +54,9 @@ struct Profile {
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};
+    /// Jgamrot/yharnam-pc #204, shadPS4 #5257/#5346): GCN NaN/Inf rules for min/max/med3, clamp,
+    /// legacy multiply-adds, clamped rcp/rsq and negated compares.
+    bool gcn_nan_semantics{};
     /// bbport (native shaders; BB_NATIVE_SHADERS=0 turns them off): guest constant buffers the
     /// shader only reads with scalar constant loads (s_buffer_load) are uniform buffers instead of
     /// storage buffers: NVIDIA reads them through its constant cache instead of the memory path.

@@ -1,0 +1,77 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The same launcher as LanternLauncher.csproj, built as one self-contained exe WITHOUT NativeAOT
+       (NativeAOT needs Visual Studio's C++ tools). Build:
+       dotnet publish LanternLauncher.Jit.csproj -c Release -r win-x64 -p:BaseIntermediateOutputPath=obj-jit\ -o <dir>
+       then rename LanternEngine.exe to "Lantern Engine.exe" (the assembly name stays LanternEngine: the launcher's resource URIs use it). -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LanternEngine</AssemblyName>
+    <RootNamespace>BloodborneLauncher</RootNamespace>
+    <DefineConstants>$(DefineConstants);AVALONIA</DefineConstants>
+    <ApplicationIcon>..\BloodborneLauncher\app.ico</ApplicationIcon>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <StartupObject>BloodborneLauncher.Program</StartupObject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version>0.9.9</Version>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(RuntimeIdentifier.StartsWith('win')) Or ('$(RuntimeIdentifier)' == '' And '$(OS)' == 'Windows_NT')">
+    <ApplicationManifest>..\BloodborneLauncher\app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
+    <PackageReference Include="System.Windows.Extensions" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="*.cs;Views\**\*.cs;Themes\**\*.cs" />
+    <Compile Include="..\BloodborneLauncher\Core\**\*.cs" Link="Core\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\Shared\SourceStamp.cs" Link="Core\SourceStamp.cs" />
+    <Compile Include="..\BloodborneLauncher\GlobalUsings.cs" Link="GlobalUsings.cs" />
+    <EmbeddedResource Include="..\BloodborneLauncher\app.ico" LogicalName="app.ico" />
+    <EmbeddedResource Include="..\BloodborneLauncher\lantern-purple.ico" LogicalName="lantern-purple.ico" />
+    <EmbeddedResource Include="..\BloodborneLauncher\lantern-orange.ico" LogicalName="lantern-orange.ico" />
+    <EmbeddedResource Include="..\BloodborneLauncher\Assets\lantern-purple.png" LogicalName="lantern-purple.png" />
+    <EmbeddedResource Include="..\BloodborneLauncher\Assets\lantern-orange.png" LogicalName="lantern-orange.png" />
+    <EmbeddedResource Include="..\BloodborneLauncher\Localization\*.json" LogicalName="BloodborneLauncher.Localization.%(Filename)%(Extension)" />
+    <AvaloniaResource Include="..\BloodborneLauncher\Assets\discord-logo.png" Link="Assets\discord-logo.png" />
+    <AvaloniaResource Include="Assets\Fonts\*.ttf" />
+  </ItemGroup>
+
+  <!-- As the AOT project: the native libraries ride inside the exe as native.zip (NativeRuntime.cs unpacks them). -->
+  <Target Name="LanternNativeZip" AfterTargets="ResolvePackageAssets" Condition="$(RuntimeIdentifier.StartsWith('win'))">
+    <PropertyGroup>
+      <LanternNativeDir>$(ProjectDir)$(IntermediateOutputPath)native-runtime\</LanternNativeDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <LanternNative Include="@(NativeCopyLocalItems)" Condition="'%(Extension)' == '.dll'" />
+    </ItemGroup>
+    <RemoveDir Directories="$(LanternNativeDir)" />
+    <Copy SourceFiles="@(LanternNative)" DestinationFolder="$(LanternNativeDir)files" />
+    <ZipDirectory SourceDirectory="$(LanternNativeDir)files" DestinationFile="$(LanternNativeDir)native.zip" Overwrite="true" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(LanternNativeDir)native.zip" LogicalName="native.zip" />
+    </ItemGroup>
+  </Target>
+
+  <!-- The managed assemblies are bundled into the exe; only the native libraries (they are in native.zip) stay out. -->
+  <Target Name="LanternDropNativeFiles" AfterTargets="ComputeResolvedFilesToPublishList" Condition="$(RuntimeIdentifier.StartsWith('win'))">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.AssetType)' == 'native'" />
+    </ItemGroup>
+  </Target>
+
+</Project>

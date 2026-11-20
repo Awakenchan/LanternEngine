@@ -44,23 +44,40 @@ Id EmitFPFma64(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
     return Decorate(ctx, inst, ctx.OpFma(ctx.F64[1], a, b, c));
 }
 
+// GCN min/max return the other operand when one is NaN (NMin/NMax); FMin/FMax leave it undefined.
 Id EmitFPMax32(EmitContext& ctx, Id a, Id b) {
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMax(ctx.F32[1], a, b);
+    }
     return ctx.OpFMax(ctx.F32[1], a, b);
 }
 
 Id EmitFPMax64(EmitContext& ctx, Id a, Id b) {
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMax(ctx.F64[1], a, b);
+    }
     return ctx.OpFMax(ctx.F64[1], a, b);
 }
 
 Id EmitFPMin32(EmitContext& ctx, Id a, Id b) {
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMin(ctx.F32[1], a, b);
+    }
     return ctx.OpFMin(ctx.F32[1], a, b);
 }
 
 Id EmitFPMin64(EmitContext& ctx, Id a, Id b) {
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMin(ctx.F64[1], a, b);
+    }
     return ctx.OpFMin(ctx.F64[1], a, b);
 }
 
+// The AMD trinary ops leave NaN undefined as well, so they are only used without GCN NaN rules.
 Id EmitFPMinTri32(EmitContext& ctx, Id a, Id b, Id c) {
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMin(ctx.F32[1], a, ctx.OpNMin(ctx.F32[1], b, c));
+    }
     if (ctx.profile.supports_trinary_minmax) {
         return ctx.OpFMin3AMD(ctx.F32[1], a, b, c);
     }
@@ -68,6 +85,9 @@ Id EmitFPMinTri32(EmitContext& ctx, Id a, Id b, Id c) {
 }
 
 Id EmitFPMaxTri32(EmitContext& ctx, Id a, Id b, Id c) {
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMax(ctx.F32[1], a, ctx.OpNMax(ctx.F32[1], b, c));
+    }
     if (ctx.profile.supports_trinary_minmax) {
         return ctx.OpFMax3AMD(ctx.F32[1], a, b, c);
     }
@@ -75,6 +95,16 @@ Id EmitFPMaxTri32(EmitContext& ctx, Id a, Id b, Id c) {
 }
 
 Id EmitFPMedTri32(EmitContext& ctx, Id a, Id b, Id c) {
+    if (ctx.profile.gcn_nan_semantics) {
+        // V_MED3_F32 falls back to V_MIN3_F32 when any input is NaN.
+        const Id is_nan{ctx.OpLogicalOr(
+            ctx.U1[1], ctx.OpIsNan(ctx.U1[1], a),
+            ctx.OpLogicalOr(ctx.U1[1], ctx.OpIsNan(ctx.U1[1], b), ctx.OpIsNan(ctx.U1[1], c)))};
+        const Id mmx{ctx.OpFMin(ctx.F32[1], ctx.OpFMax(ctx.F32[1], a, b), c)};
+        const Id med3{ctx.OpFMax(ctx.F32[1], ctx.OpFMin(ctx.F32[1], a, b), mmx)};
+        const Id min3{ctx.OpNMin(ctx.F32[1], a, ctx.OpNMin(ctx.F32[1], b, c))};
+        return ctx.OpSelect(ctx.F32[1], is_nan, min3, med3);
+    }
     if (ctx.profile.supports_trinary_minmax) {
         return ctx.OpFMid3AMD(ctx.F32[1], a, b, c);
     }
@@ -150,15 +180,22 @@ Id EmitFPSqrt(EmitContext& ctx, Id value) {
     return ctx.OpSqrt(ctx.F32[1], value);
 }
 
+// Clamp output modifier: NaN becomes 0 (DX10_CLAMP; the mode bit is not tracked, set is assumed).
 Id EmitFPSaturate32(EmitContext& ctx, Id value) {
     const Id zero{ctx.ConstF32(f32{0.0})};
     const Id one{ctx.ConstF32(f32{1.0})};
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMin(ctx.F32[1], ctx.OpNMax(ctx.F32[1], value, zero), one);
+    }
     return ctx.OpFClamp(ctx.F32[1], value, zero, one);
 }
 
 Id EmitFPSaturate64(EmitContext& ctx, Id value) {
     const Id zero{ctx.Constant(ctx.F64[1], f64{0.0})};
     const Id one{ctx.Constant(ctx.F64[1], f64{1.0})};
+    if (ctx.profile.gcn_nan_semantics) {
+        return ctx.OpNMin(ctx.F64[1], ctx.OpNMax(ctx.F64[1], value, zero), one);
+    }
     return ctx.OpFClamp(ctx.F64[1], value, zero, one);
 }
 

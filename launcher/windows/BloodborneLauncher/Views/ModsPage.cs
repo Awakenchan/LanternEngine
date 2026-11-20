@@ -157,7 +157,7 @@ namespace BloodborneLauncher.Views
             if (read != _patchReads) return;
             _patches = patches;
             SetHint(_patchesHint, _patches.Count == 0 ? L.F($"{dir} — no patches") : dir);
-            var cheatsOff = Ini.Get("seamless_enabled") == "1" || (Ini.Get("online_enabled") == "1" && !HuntersDream.OnlinePaused);
+            var cheatsOff = OnlineStatus.CheatsOff((k, d) => Ini.Get(k, d));
             var shown = string.Join("\u0001", _patches.Select(p => $"{p.Patch.Key}|{p.Patch.Name}|{p.Patch.File}|{p.Patch.Author}|{p.Patch.Note}={p.On}")) + (cheatsOff ? "\u0002" : "");
             if (shown == _patchesShown) return;
             _patchesShown = shown;
