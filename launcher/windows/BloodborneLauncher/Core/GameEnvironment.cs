@@ -230,6 +230,12 @@ namespace BloodborneLauncher.Core
             }
             var (vram, integrated) = GpuMemory();
             ApplyGcMarks(env, s.Bool("exp_vram_budget") && !s.Bool("safe_mode_next"), vram, integrated);
+            // Paleblood: a card with 12 GB or more never needs the engine's idle clean-up (it sends game data
+            // unused for 3 minutes back to system memory even with VRAM to spare, and it is uploaded again
+            // when used: late geometry and hitches). A 30-minute log on a 16 GB card showed 16,407 blocks
+            // evicted. The Extra variables below still win.
+            if (!integrated && vram >= 12L << 30 && !s.Bool("safe_mode_next"))
+                env["BB_VRAM_CLEANUP_SECONDS"] = "0";
             // The Hunter's Dream account (scripts/online.py uses it in that pool only).
             foreach (var (variable, value) in ThdStart.Account(s.HuntersDreamToken, s.Str("hd_name"), s.HuntersDreamRefused))
                 env[variable] = value;
