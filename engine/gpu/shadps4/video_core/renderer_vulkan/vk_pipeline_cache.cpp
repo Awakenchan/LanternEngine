@@ -740,7 +740,13 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         }(),
         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
                               instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
-        .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
+        // Paleblood: LANTERN_UBO_ANY_ALIGNMENT=1 (off by default) treats a card whose storage buffer
+        // alignment is 4 (AMD RDNA) like one with a larger alignment, so the native constant-buffer path
+        // (needed by GTAO and Improved reflections, which are otherwise "left off") can be tried on it.
+        .needs_buffer_offsets = instance.StorageMinAlignment() > 4 || [] {
+            const char* env = std::getenv("LANTERN_UBO_ANY_ALIGNMENT");
+            return env && env[0] == '1';
+        }(),
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
@@ -752,7 +758,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                 const char* env = std::getenv("BB_NATIVE_SHADERS");
                 return !(env && env[0] == '0');
             }() &&
-            instance.StorageMinAlignment() > 4 && instance.UniformMinAlignment() <= 256 &&
+            (instance.StorageMinAlignment() > 4 || [] {
+                const char* env = std::getenv("LANTERN_UBO_ANY_ALIGNMENT");
+                return env && env[0] == '1';
+            }()) && instance.UniformMinAlignment() <= 256 &&
             instance.GetPhysicalDevice().getProperties().limits.maxUniformBufferRange >= 65536,
     };
     // bbport: the native constant-buffer layout and binding, and the console's early depth
