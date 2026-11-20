@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Paleblood: the same launcher as LanternLauncher.csproj, built as one self-contained exe WITHOUT NativeAOT
+  <!-- The same launcher as LanternLauncher.csproj, built as one self-contained exe WITHOUT NativeAOT
        (NativeAOT needs Visual Studio's C++ tools). Build:
        dotnet publish LanternLauncher.Jit.csproj -c Release -r win-x64 -p:BaseIntermediateOutputPath=obj-jit\ -o <dir>
-       then rename LanternEngine.exe to "Lantern Engine.exe". -->
+       then rename LanternEngine.exe to "Lantern Engine.exe" (the assembly name stays LanternEngine: the launcher's resource URIs use it). -->
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -10,12 +10,6 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>LanternEngine</AssemblyName>
-    <!-- Paleblood: what Windows shows for the exe (taskbar hover, Task Manager, Properties). -->
-    <AssemblyTitle>Paleblood</AssemblyTitle>
-    <Product>Paleblood</Product>
-    <Company>Paleblood</Company>
-    <Description>Paleblood</Description>
-    <Copyright>GPL-3.0-or-later; based on Lantern Engine</Copyright>
     <RootNamespace>BloodborneLauncher</RootNamespace>
     <DefineConstants>$(DefineConstants);AVALONIA</DefineConstants>
     <ApplicationIcon>..\BloodborneLauncher\app.ico</ApplicationIcon>

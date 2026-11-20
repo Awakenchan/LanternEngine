@@ -230,13 +230,13 @@ namespace BloodborneLauncher.Core
             }
             var (vram, integrated) = GpuMemory();
             ApplyGcMarks(env, s.Bool("exp_vram_budget") && !s.Bool("safe_mode_next"), vram, integrated);
-            // Paleblood: a card with 12 GB or more never needs the engine's idle clean-up (it sends game data
+            // a card with 12 GB or more never needs the engine's idle clean-up (it sends game data
             // unused for 3 minutes back to system memory even with VRAM to spare, and it is uploaded again
             // when used: late geometry and hitches). A 30-minute log on a 16 GB card showed 16,407 blocks
             // evicted. The Extra variables below still win.
             if (!integrated && vram >= 12L << 30 && !s.Bool("safe_mode_next"))
                 env["BB_VRAM_CLEANUP_SECONDS"] = "0";
-            // Paleblood: the ray tracing scene (default 320 MB) was full in busy areas (400-650 meshes over
+            // the ray tracing scene (default 320 MB) was full in busy areas (400-650 meshes over
             // budget a frame); 1 GB fits on a 16 GB card, 640 MB on 12 GB. Extra variables still win.
             // A "16 GB" card reports a little under 16 GiB (an RX 6950 XT: 16,368 MiB), so the 1 GB step
             // starts at 15 GiB; at exactly 16 GiB it fell to 640 MB and the scene stayed full in play.

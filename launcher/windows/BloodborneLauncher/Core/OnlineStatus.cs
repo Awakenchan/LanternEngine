@@ -8,7 +8,7 @@ namespace BloodborneLauncher.Core
     {
         public static bool CheatsOff(Func<string, string, string> ini)
         {
-            // Paleblood: the same rule the engine applies when it starts (start/online.cpp ConfigureOnline):
+            // the same rule the engine applies when it starts (start/online.cpp ConfigureOnline):
             // a session is online only with Play online on AND (a seamless co-op room, or a connected
             // Hunter's Dream account). Play online alone, with no account, starts the game offline.
             if (HuntersDream.OnlinePaused || ini("online_enabled", "") != "1") return false;

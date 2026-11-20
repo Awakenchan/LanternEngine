@@ -9,8 +9,8 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "FileDescription", "Paleblood: Bloodborne (starts the game with the launcher's settings)"
-      VALUE "ProductName", "Paleblood"
+      VALUE "FileDescription", "Bloodborne (starts the game with the launcher's settings)"
+      VALUE "ProductName", "Bloodborne PC"
       VALUE "OriginalFilename", "Bloodborne.exe"
     END
   END

@@ -13,7 +13,7 @@ namespace BloodborneLauncher.Core
     {
         private Process? _process;
         private StreamWriter? _log;
-        /// <summary>Paleblood: every session's output also goes to its own file in logs\archive, line by line
+        /// <summary>every session's output also goes to its own file in logs\archive, line by line
         /// as it is printed (a crash keeps everything up to it), named by start time. Never overwritten and
         /// never deleted by the launcher.</summary>
         private StreamWriter? _archive;
