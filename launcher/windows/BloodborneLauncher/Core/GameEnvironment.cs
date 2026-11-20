@@ -238,8 +238,10 @@ namespace BloodborneLauncher.Core
                 env["BB_VRAM_CLEANUP_SECONDS"] = "0";
             // Paleblood: the ray tracing scene (default 320 MB) was full in busy areas (400-650 meshes over
             // budget a frame); 1 GB fits on a 16 GB card, 640 MB on 12 GB. Extra variables still win.
+            // A "16 GB" card reports a little under 16 GiB (an RX 6950 XT: 16,368 MiB), so the 1 GB step
+            // starts at 15 GiB; at exactly 16 GiB it fell to 640 MB and the scene stayed full in play.
             if (!integrated && vram >= 12L << 30 && !s.Bool("safe_mode_next"))
-                env["LANTERN_RT_SCENE_MB"] = vram >= 16L << 30 ? "1024" : "640";
+                env["LANTERN_RT_SCENE_MB"] = vram >= 15L << 30 ? "1024" : "640";
             // The Hunter's Dream account (scripts/online.py uses it in that pool only).
             foreach (var (variable, value) in ThdStart.Account(s.HuntersDreamToken, s.Str("hd_name"), s.HuntersDreamRefused))
                 env[variable] = value;
