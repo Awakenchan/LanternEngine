@@ -514,6 +514,7 @@ X(lantern_rt_lamp_reuse, "LANTERN_RT_LAMP_REUSE", Text, "", 0, 0, StartOnly, NoS
 X(lantern_rt_scene_mb, "LANTERN_RT_SCENE_MB", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LEGACY)
 X(lantern_rt_shadow_rays, "LANTERN_RT_SHADOW_RAYS", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LEGACY)
 X(lantern_ubo_any_alignment, "LANTERN_UBO_ANY_ALIGNMENT", Bool, "0", 0, 1, StartOnly, NoStep, 0)
+X(bb_gcn_nan, "BB_GCN_NAN", Bool, "1", 0, 1, StartOnly, NoStep, 0)
 X(lantern_run_census, "LANTERN_RUN_CENSUS", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LEGACY)
 X(lantern_run_commit, "LANTERN_RUN_COMMIT", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LEGACY)
 X(lantern_texset_revalidate, "LANTERN_TEXSET_REVALIDATE", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LEGACY)
