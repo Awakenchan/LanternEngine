@@ -2096,9 +2096,9 @@ void StepRow(Lantern::StepId id) {
         ImGui::TextDisabled("%s: %s (%s)", name.c_str(), BbSettings::MenuText("unavailable"),
                             why ? why : BbSettings::MenuText("no reason given"));
     } else if (!live || info.wiring == Lantern::Wiring::Registry) {
-        const char* now = state == Lantern::StepState::Off       ? "off"
-                          : state == Lantern::StepState::Compare ? "compare"
-                                                                 : "on";
+        const char* now = state == Lantern::StepState::Off       ? BbSettings::MenuText("off")
+                          : state == Lantern::StepState::Compare ? BbSettings::MenuText("compare")
+                                                                 : BbSettings::MenuText("on");
         ImGui::TextDisabled("%s: %s", name.c_str(), now);
         ImGui::SameLine();
         ImGui::TextDisabled("%s LANTERN_STEPS_OFF=%s", BbSettings::MenuText("next start, Extra variables:"),
@@ -2110,7 +2110,7 @@ void StepRow(Lantern::StepId id) {
                                         "Extra variables to start without it."));
     } else {
         bool on = state != Lantern::StepState::Off;
-        const std::string label = name + (state == Lantern::StepState::Compare ? "  (compare)" : "");
+        const std::string label = name + (state == Lantern::StepState::Compare ? BbSettings::MenuText("  (compare)") : "");
         if (ImGui::Checkbox(label.c_str(), &on)) {
             Lantern::Steps::SetFromMenu(id, on ? Lantern::Mode::On : Lantern::Mode::Off);
         }
@@ -2636,10 +2636,10 @@ void FpsCounter() {
     if (s.show_fps_rate) {
         const float game = s.frame_gen_game_fps.load(), shown = s.frame_gen_shown_fps.load();
         if (s.frame_gen_active && game > 1.0f && shown >= game) {
-            n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS (game %.0f, frame gen %.1fx)", shown, game, shown / game);
+            n += std::snprintf(text + n, sizeof(text) - n, BbSettings::MenuText("%.0f FPS (game %.0f, frame gen %.1fx)"), shown, game, shown / game);
             const float reached = s.frame_gen_reached_pct.load();
             if (s.frame_gen.load() == BbSettings::FrameGenFsr3 && reached >= 0.0f) {
-                n += std::snprintf(text + n, sizeof(text) - n, "  frame gen: %.0f%% of generated frames shown", reached);
+                n += std::snprintf(text + n, sizeof(text) - n, BbSettings::MenuText("  frame gen: %.0f%% of generated frames shown"), reached);
             }
         } else {
             n += std::snprintf(text + n, sizeof(text) - n, "%.0f FPS",
