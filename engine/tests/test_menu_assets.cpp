@@ -147,7 +147,8 @@ int main(int argc, char** argv) {
     assert(chinese.at(110015).help == "关闭游戏并返回桌面。");
     assert(chinese.at(117010).text == "1280x720");
     assert(english.at(920000).text.find('\n') != std::string::npos);
-    assert(chinese.at(119100).text == "向前移动" && chinese.at(119129).text == "调试菜单" && chinese.at(119204).text == "其他");
+    assert(chinese.at(119100).text == "向前移动" && chinese.at(119129).text == "闪避" &&
+           chinese.at(119132).text == "调试菜单" && chinese.at(119204).text == "其他");
     assert(english.at(119215).text.front() == ' ');
     assert(KindOf(110006) == Kind::Menu && KindOf(920001) == Kind::Question && KindOf(14000336) == Kind::Event);
     assert(Utf16("a😀") == std::u16string(u"a\U0001F600") && Utf16("한글") == u"한글");
