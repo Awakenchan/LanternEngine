@@ -21,6 +21,7 @@ struct Info {
     std::string module;  ///< the file name it was loaded as (winmm.dll, dxgi.dll, ...)
     std::string version; ///< from its version resource, empty when it has none
     std::string frame_generation; ///< its frame generation output from OptiScaler.ini, empty when off
+    void* handle = nullptr; ///< its module (HMODULE), which exports the NGX entry points
 };
 
 /// Looks once for a loaded OptiScaler and prints one line about it and the compatibility mode.
@@ -32,6 +33,11 @@ bool Part(const char* name);
 /// One submit thread: Part("BB_OPTISCALER_SYNC_SUBMIT") with its frame generation on, or the
 /// switch set to 1.
 bool SyncSubmit();
+/// OptiScaler's module as the NGX provider for DLSS when the driver has no NGX core (an AMD or
+/// Intel GPU): its exports take the DLSS inputs and run its own upscaler (OptiScaler.ini's
+/// VulkanUpscaler) without VK_NVX_binary_import / VK_NVX_image_view_handle. Null without
+/// OptiScaler or with BB_OPTISCALER_NGX=0.
+void* NgxProvider();
 std::filesystem::path PrivateFfxLibrary(const std::filesystem::path& source, const char* name);
 const char* FfxFailureHint();
 

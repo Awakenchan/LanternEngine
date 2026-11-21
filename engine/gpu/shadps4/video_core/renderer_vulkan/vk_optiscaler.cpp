@@ -149,6 +149,7 @@ Info Find() {
             continue;
         }
         info.loaded = true;
+        info.handle = entry.hModule;
         info.module = Narrow(entry.szModule);
         info.version = FileVersion(entry.szExePath);
         if (ini) {
@@ -210,6 +211,15 @@ bool SyncSubmit() {
     const bool always = env ? env[0] == '1'
                             : BbSettings::Get().startup_optiscaler.sync_submit == BbSettings::OptiSubmitOn;
     return Part("BB_OPTISCALER_SYNC_SUBMIT") && (!Detect().frame_generation.empty() || always);
+}
+
+void* NgxProvider() {
+    const char* env = std::getenv("BB_OPTISCALER_NGX");
+    if (env && env[0] == '0') {
+        return nullptr;
+    }
+    const auto& info = Detect();
+    return info.loaded ? info.handle : nullptr;
 }
 
 std::filesystem::path PrivateFfxLibrary(const std::filesystem::path& source, const char* name) {
