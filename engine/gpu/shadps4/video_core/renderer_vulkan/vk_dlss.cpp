@@ -281,15 +281,16 @@ struct DlssUpscaler::Impl {
     bool LoadCore() {
 #ifdef _WIN32
         // The driver records its NGX core under this key (nvsdk_ngx_loader.h does the same).
+        // bbport: only a device with the NVX extensions can run the driver's core.
         wchar_t dir[MAX_PATH];
         DWORD size = sizeof(dir);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
+        if (instance.IsDlssCapable() && RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
                          L"FullPath", RRF_RT_REG_SZ, nullptr, dir, &size) == ERROR_SUCCESS) {
             core = LoadLibraryW((std::wstring(dir) + L"\\_nvngx.dll").c_str());
         }
         // bbport: some driver installs (laptops) leave that key out; the core is then in the
         // display driver's DriverStore folder (nv*.inf_amd64_*), the newest one in use.
-        if (!core) {
+        if (!core && instance.IsDlssCapable()) {
             wchar_t windows[MAX_PATH];
             const UINT length = GetSystemDirectoryW(windows, MAX_PATH);
             if (length > 0 && length < MAX_PATH) {
@@ -312,6 +313,16 @@ struct DlssUpscaler::Impl {
                     FindClose(find);
                 }
                 if (!newest.empty()) core = LoadLibraryW(newest.c_str());
+            }
+        }
+        // bbport: no NVIDIA NGX core (an AMD or Intel GPU): OptiScaler's module exports the same
+        // NGX entry points and runs its own upscaler on our DLSS inputs (BB_OPTISCALER_NGX=0: off).
+        // It stays loaded for the process, like the driver's core: no FreeLibrary.
+        if (!core) {
+            if (void* opti = OptiScaler::NgxProvider()) {
+                core = static_cast<HMODULE>(opti);
+                std::printf("DLSS: no NVIDIA NGX core; the NGX calls go to OptiScaler (%s)\n",
+                            OptiScaler::Detect().module.c_str());
             }
         }
 #else
@@ -440,7 +451,7 @@ struct DlssUpscaler::Impl {
     }
 
     void Initialize() {
-        if (!instance.IsDlssCapable()) {
+        if (!instance.IsDlssCapable() && !OptiScaler::NgxProvider()) {
             Fail("the Vulkan device lacks VK_NVX_binary_import / VK_NVX_image_view_handle "
                  "(DLSS needs an NVIDIA RTX GPU)",
                  true);

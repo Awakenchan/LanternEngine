@@ -39,6 +39,7 @@
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_hdr_native.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_optiscaler.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -239,7 +240,9 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
       runtime{runtime_}, camera_motion{camera_motion_}, scene_targets{scene_targets_},
       hdr_native{hdr_native_} {
     // Reject unsupported shaders before allocating resources or recording a frame.
-    if (instance.IsDlssCapable()) {
+    // bbport: without the NVX extensions (an AMD or Intel GPU) DLSS can still run through
+    // OptiScaler's NGX exports (vk_optiscaler.h, NgxProvider).
+    if (instance.IsDlssCapable() || OptiScaler::NgxProvider()) {
         dlss = std::make_unique<DlssUpscaler>(instance, scheduler);
     }
     if (instance.IsXessCapable()) {
