@@ -21,9 +21,9 @@ constexpr const char* kMainName = "main";
 constexpr const char* kRenderName = "GXRenderThread";
 constexpr const char* kWorkerPrefix = "GXWorker";
 constexpr std::size_t kThreadName = 64;
-constexpr u32 kGroupCpus = 64;
 
 #ifdef _WIN32
+constexpr u32 kGroupCpus = 64;  // a Windows processor group
 constexpr u64 kFileTimeNs = 100;
 
 u64 FileTimeTicks(const FILETIME& t) {

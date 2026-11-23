@@ -94,6 +94,8 @@ public:
     }
 
     void Stop() {
+        // Linux: closing the listener does not wake the accept() blocked on it; shutting it down does.
+        ShutSocket(listener_);
         CloseSocket(listener_);
         if (accept_.joinable()) accept_.join();
         std::vector<std::thread> pumps;

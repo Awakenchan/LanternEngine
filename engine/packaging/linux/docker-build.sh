@@ -40,6 +40,9 @@ mkdir -p "$repo/engine/out/docker-home"
 # without relabelling it (:z would relabel the user's whole checkout).
 run=(run --rm --security-opt label=disable -v "$repo:/src" -w /src/engine -e HOME="$home"
      -e CARGO_HOME="$home/.cargo")
+# No display or sound server in the container: the tests that start SDL use its dummy drivers.
+run+=(-e SDL_VIDEO_DRIVER="${SDL_VIDEO_DRIVER:-dummy}" -e SDL_AUDIO_DRIVER="${SDL_AUDIO_DRIVER:-dummy}"
+      -e XDG_RUNTIME_DIR=/tmp)
 # The calling user's files stay theirs: rootful Docker or Podman run as their ids; rootless Podman
 # keeps their id inside (keep-id); rootless Docker's root already is them outside. "docker" may be
 # Podman's (podman-docker).

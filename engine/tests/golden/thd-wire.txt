@@ -12,93 +12,93 @@ requests per phase (background poll and heartbeat counted apart)
 requests in order
 [in game: Matching2 Initialize, CreateContext, ContextStart] POST /mp/matching2/context_start
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
-  Content-Type: application/json
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 105
   Accept: application/json
+  Connection: close
+  Content-Length: 105
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"MappedAddr":"","MappedPort":0,"OnlineId":"TestHunter","SignalingAddr":"127.0.0.1","SignalingPort":3658}
 [in game: signaling activate (a peer outside the room)] POST /np/signaling/resolve
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
-  Content-Type: application/json
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 29
   Accept: application/json
+  Connection: close
+  Content-Length: 29
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"OnlineId":"SummonedHunter"}
 [in game: Matching2 CreateJoinRoom] POST /mp/matching2/create_room
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
-  Content-Type: application/json
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 155
   Accept: application/json
+  Connection: close
+  Content-Length: 155
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"LocalAddr":"127.0.0.1","LocalPort":3658,"MappedAddr":"","MappedPort":0,"MaxMembers":4,"OnlineId":"TestHunter","PublicAddr":"127.0.0.1","PublicPort":3658}
 [in game: Matching2 LeaveRoom (host)] POST /mp/matching2/leave_room
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
-  Content-Type: application/json
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 41
   Accept: application/json
+  Connection: close
+  Content-Length: 41
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"MemberId":1,"SessionId":"session-host"}
 [in game: Matching2 JoinRoom] POST /mp/matching2/join_room
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
-  Content-Type: application/json
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 154
   Accept: application/json
+  Connection: close
+  Content-Length: 154
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"LocalAddr":"127.0.0.1","LocalPort":3658,"MappedAddr":"","MappedPort":0,"OnlineId":"TestHunter","PublicAddr":"127.0.0.1","PublicPort":3658,"RoomId":4242}
 [in game: Matching2 LeaveRoom (guest)] POST /mp/matching2/leave_room
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
-  Content-Type: application/json
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 42
   Accept: application/json
+  Connection: close
+  Content-Length: 42
+  Content-Type: application/json
+  Host: 127.0.0.1:<port>
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"MemberId":2,"SessionId":"session-guest"}
 [in game: one sceHttp request] POST /fs4/login.spd
   Accept-Encoding: gzip, deflate
   Accept: */*
+  Connection: close
+  Content-Length: 14
+  Content-Type: application/octet-stream
+  Content-Type: application/octet-stream
+  Host: 127.0.0.1:<port>
   User-Agent: Bloodborne/1.09 libhttp/14.00 (PlayStation 4) shadPS4/Awakenchan/v0.20.0
   X-BB-Token: test-token-0123456789
   X-BBHost-Ruleset: vanilla
-  Content-Type: application/octet-stream
-  Content-Type: application/octet-stream
-  Connection: close
-  Host: 127.0.0.1:<port>
-  Content-Length: 14
   body: game-body-0123
 
 background request shapes (heartbeat only when a 5 s beat fell inside a room)
 POST /np/events/poll
   Accept-Encoding: gzip, deflate
-  X-BBHost-Ruleset: vanilla
-  X-BB-Token: test-token-0123456789
-  User-Agent: shadPS4/Awakenchan/v0.20.0
+  Accept: application/json
+  Content-Length: 78
   Content-Type: application/json
   Host: 127.0.0.1:<port>
-  Content-Length: 78
-  Accept: application/json
+  User-Agent: shadPS4/Awakenchan/v0.20.0
+  X-BB-Token: test-token-0123456789
+  X-BBHost-Ruleset: vanilla
   body: {"Categories":["matching2"],"Cursor":0,"OnlineId":"TestHunter","WaitMs":25000}
 
 game-visible results

@@ -12,7 +12,9 @@ FROM ubuntu:24.04
 COPY setup-ubuntu.sh /tmp/setup-ubuntu.sh
 RUN BB_DEPS_WORK=/var/tmp/lantern-deps BB_DEPS_LOG=1 bash /tmp/setup-ubuntu.sh \
     && rm -rf /var/tmp/lantern-deps /var/lib/apt/lists/* /tmp/setup-ubuntu.sh
+# /opt/deps also on the compiler's own search paths: build.sh's tests compile some files with a
+# plain clang++ line, as MSYS2's CLANG64 finds its libraries without flags.
 ENV CC=clang CXX=clang++ LDFLAGS=-fuse-ld=lld \
     PKG_CONFIG_PATH=/opt/deps/lib/pkgconfig:/opt/deps/share/pkgconfig \
-    CMAKE_PREFIX_PATH=/opt/deps
+    CMAKE_PREFIX_PATH=/opt/deps CPATH=/opt/deps/include LIBRARY_PATH=/opt/deps/lib
 WORKDIR /src/engine

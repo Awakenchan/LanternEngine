@@ -95,7 +95,7 @@ struct HeldFile {
 struct HeldFile {
     int handle = -1;
     explicit HeldFile(const fs::path& path) {
-        handle = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        handle = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);  // not inherited by the child engine
         Require(handle >= 0 && flock(handle, LOCK_EX) == 0, "the test locks the file");
     }
     ~HeldFile() { close(handle); }
