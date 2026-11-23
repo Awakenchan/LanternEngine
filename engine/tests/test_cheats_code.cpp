@@ -14,6 +14,15 @@ bool ReadProcessMemory(const void* p, void* out, size_t n) {
     return true;
 }
 }
+#else
+// The runtime's memory map, which BbPlatform::ReadProcessMemory falls back to on Linux: with no
+// runtime in the test, every address reads as on Windows above (the test passes its own memory).
+extern "C" int runtime_memory_vma_info(uintptr_t, int* prot, int* type, uintptr_t* end) {
+    *prot = 1;
+    *type = 0;
+    *end = UINTPTR_MAX;
+    return 1;
+}
 #endif
 
 namespace BbEngine {

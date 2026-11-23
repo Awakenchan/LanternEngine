@@ -1,2 +1,3 @@
 *.patch -text
 engine/gpu/bbnet/vendor/bbhost/** -text
+*.sh text eol=lf

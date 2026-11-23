@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "bbnet_test_symbols.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -25,6 +26,7 @@
 using RawSocket = SOCKET;
 constexpr RawSocket kNoSocket = INVALID_SOCKET;
 void CloseSocket(RawSocket s) { closesocket(s); }
+void ShutSocket(RawSocket s) { shutdown(s, SD_BOTH); }
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -36,6 +38,7 @@ void CloseSocket(RawSocket s) { closesocket(s); }
 using RawSocket = int;
 constexpr RawSocket kNoSocket = -1;
 void CloseSocket(RawSocket s) { ::close(s); }
+void ShutSocket(RawSocket s) { shutdown(s, SHUT_RDWR); }
 #endif
 
 extern "C" void bbnet_register(void);
@@ -84,6 +87,8 @@ public:
             stopping_ = true;
         }
         cv_.notify_all();
+        // Linux: closing the listener does not wake the accept() blocked on it; shutting it down does.
+        ShutSocket(listener_);
         CloseSocket(listener_);
         if (accept_.joinable()) accept_.join();
         std::vector<std::thread> handlers;
@@ -404,7 +409,12 @@ std::string Normalised(std::string line, int port) {
 
 std::string Describe(const Request& r, int port) {
     std::string out = r.method + " " + r.target + "\n";
-    for (const auto& h : r.headers) out += "  " + Normalised(h, port) + "\n";
+    // Sorted: the order of the headers is the HTTP client's map order, which differs between
+    // standard libraries (libc++ on Windows, libstdc++ on Linux) and means nothing on the wire.
+    std::vector<std::string> headers;
+    for (const auto& h : r.headers) headers.push_back(Normalised(h, port));
+    std::sort(headers.begin(), headers.end());
+    for (const auto& h : headers) out += "  " + h + "\n";
     out += "  body: " + Normalised(r.body, port) + "\n";
     return out;
 }
@@ -496,7 +506,7 @@ int RunRefused(FakeServer& server, StunCounter& stun, bool before_start, const s
     }
     std::fflush(stdout);
     const int saved = _dup(_fileno(stdout));
-    if (saved < 0 || _dup2(_fileno(log), _fileno(stdout)) != 0) {
+    if (saved < 0 || _dup2(_fileno(log), _fileno(stdout)) < 0) {
         std::printf("FAIL: the engine's output could not be captured\n");
         return 1;
     }

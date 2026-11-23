@@ -243,7 +243,7 @@ cp -f gpu-cache.accepted.id out/gpu-cache.accepted.id
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/host.c src/wait_stats.c src/blocked.c src/sys/*.c)
-sys_tests=(tests/sys_test_host.c src/sys/*.c)
+sys_tests=(tests/sys_test_host.c src/sys/*.c)
 no_dialog=(-include tests/no_dialog.h)
 link=(-no-pie)
 if [[ -n $windows ]]; then
@@ -331,6 +331,9 @@ if [[ ${1:-} == --test ]]; then
     test_link=()
     if [[ -n $windows ]]; then test_link=(-lws2_32 -lwinpthread -Wl,--disable-dynamicbase,--disable-high-entropy-va); fi
     no_dialog_gate build.sh out/gpu/build.ninja || exit 1
+    # Scratch of earlier runs goes first: tests name their folders by process id, and a fresh
+    # container gives the same ids again.
+    rm -rf out/test-tmp
     planted=out/test-tmp/no-dialog-$$
     mkdir -p "$planted" || { echo "test gate: cannot make $planted" >&2; exit 1; }
     printf '%s %s\n' '"$CC"' 'tests/test_planted.c -o out/planted-test' > "$planted/build.sh"
@@ -338,16 +341,18 @@ if [[ ${1:-} == --test ]]; then
     if no_dialog_gate "$planted/build.sh" /dev/null 2> /dev/null; then echo 'no-dialog gate: a planted compile line passed' >&2; exit 1; fi
     if no_dialog_gate /dev/null "$planted/build.ninja" 2> /dev/null; then echo 'no-dialog gate: a planted CMake object passed' >&2; exit 1; fi
     rm -rf "$planted"
+    # The C runtime's words: "Assertion failed" (Windows), "Assertion `...' failed" (glibc).
+    assert_message='Assertion (failed|.* failed)'
     for language in c c++; do
         compiler=$CC
         if [[ $language == c++ ]]; then compiler=${CXX:-clang++}; fi
         "$compiler" "${no_dialog[@]}" -x $language -O1 -Wall -Wextra -Werror -Wno-deprecated tests/test_no_dialog_assert.c -o out/no-dialog-assert-$language-test || exit 1
         no_dialog_rc=0
         timeout 60 out/no-dialog-assert-$language-test > /dev/null 2> out/no-dialog-assert-$language.log || no_dialog_rc=$?
-        if (( no_dialog_rc == 0 || no_dialog_rc == 124 )) || ! grep -q 'Assertion failed' out/no-dialog-assert-$language.log; then
+        if (( no_dialog_rc == 0 || no_dialog_rc == 124 )) || ! grep -qE "$assert_message" out/no-dialog-assert-$language.log; then
             echo "no-dialog-assert-$language-test: FAILED (exit $no_dialog_rc, a failed assert must print to stderr and exit)" >&2; cat out/no-dialog-assert-$language.log >&2; exit 1
         fi
-        echo "no-dialog-assert-$language-test: ok (exit $no_dialog_rc, $(grep -m1 'Assertion failed' out/no-dialog-assert-$language.log))"
+        echo "no-dialog-assert-$language-test: ok (exit $no_dialog_rc, $(grep -m1 -E "$assert_message" out/no-dialog-assert-$language.log))"
     done
     gate_run=ALL
     if [[ ${BB_GATE:-} == fast ]]; then
@@ -393,8 +398,13 @@ if [[ ${1:-} == --test ]]; then
     out/sys-rtc-test
     fi
     if want toml-patch; then
-    "${CXX:-clang++}" "${no_dialog[@]}" -std=c++20 -O1 -Wall -Wextra -Wno-deprecated-declarations -I. tests/test_toml_patch.cpp start/toml_patch.cpp start/xml.cpp start/common.cpp -lexpat -lz $([[ -n $windows ]] && echo -lbcrypt) -o out/toml-patch-test
+    # start/common.cpp is the native start's (Windows only), as for online-profile-test.
+    if [[ -n $windows ]]; then
+    "${CXX:-clang++}" "${no_dialog[@]}" -std=c++20 -O1 -Wall -Wextra -Wno-deprecated-declarations -I. tests/test_toml_patch.cpp start/toml_patch.cpp start/xml.cpp start/common.cpp -lexpat -lz -lbcrypt -o out/toml-patch-test
     out/toml-patch-test
+    else
+        echo 'toml-patch-test: SKIPPED: the native start (start/common.cpp) is Windows only'
+    fi
     fi
     if want game-heaps; then
     "${CXX:-clang++}" "${no_dialog[@]}" -std=c++20 -O1 -Wall -Wextra -Werror -I. tests/test_game_heaps.cpp -o out/game-heaps-test && timeout 300 out/game-heaps-test && "${CXX:-clang++}" "${no_dialog[@]}" -std=c++20 -O1 -Wall -Wextra -Werror -DGAME_HEAPS_TRIALS -I. tests/test_game_heaps.cpp -o out/game-heaps-trials && timeout 300 out/game-heaps-trials || exit 1
@@ -632,7 +642,10 @@ if [[ ${1:-} == --test ]]; then
     fi
     early_skipped=()
     if want launcher; then
-    bash ../launcher/tests/run-settings-checks.sh "$PWD/out/settings-writes-test" | tee out/settings-checks.log
+    # The launcher beside the engine (../launcher), or under windows/ as in the public repository.
+    launcher_tests=../launcher/tests
+    [[ -d $launcher_tests ]] || launcher_tests=../launcher/windows/tests
+    bash "$launcher_tests/run-settings-checks.sh" "$PWD/out/settings-writes-test" | tee out/settings-checks.log
     if grep -q "SKIPPED:" out/settings-checks.log; then early_skipped+=(launcher-settings-checks); fi
     launcher_python=python3
     "$launcher_python" -c "" 2>/dev/null || launcher_python=python

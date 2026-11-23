@@ -172,7 +172,7 @@ IOFile& IOFile::operator=(IOFile&& other) noexcept {
     return *this;
 }
 
-int IOFile::Open(const fs::path& path, FileAccessMode mode, FileType type, FileShareFlag flag) {
+int IOFile::Open(const fs::path& path, FileAccessMode mode, FileType type, [[maybe_unused]] FileShareFlag flag) {
     Close();
 
     file_path = path;

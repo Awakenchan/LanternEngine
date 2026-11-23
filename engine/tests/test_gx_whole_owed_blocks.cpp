@@ -151,7 +151,7 @@ void TestRandom() {
         const u32 base = block * O::kBlockWords;
         std::vector<O::PreWrite> pre;
         std::vector<W::Value> values;
-        for (u32 i = 0, n = rng() % 4; i < n; ++i) pre.push_back({base + rng() % O::kBlockWords, u32(rng())});
+        for (u32 i = 0, n = rng() % 4; i < n; ++i) pre.push_back({u32(base + rng() % O::kBlockWords), u32(rng())});
         for (u32 i = 0, n = rng() % 12; i < n; ++i) {
             const u32 masks[] = {~0u, 0xffu, 0xff00u, 0x80000000u};
             values.push_back(V(base + rng() % O::kBlockWords, u32(rng()), masks[rng() % 4]));
@@ -247,7 +247,7 @@ void Bench(u32 pre_count, u32 value_count, u32 dirty_blocks, const char* label) 
     const u32 context = 0xA000;
     std::vector<O::PreWrite> pre;
     std::vector<W::Value> values;
-    for (u32 i = 0; i < pre_count; ++i) pre.push_back({context + (rng() % 0x400), u32(rng())});
+    for (u32 i = 0; i < pre_count; ++i) pre.push_back({u32(context + (rng() % 0x400)), u32(rng())});
     for (u32 i = 0; i < value_count; ++i) values.push_back(V(context + (rng() % 0x400), u32(rng()), i % 5 ? ~0u : 0xffu));
     std::vector<u32> blocks;
     for (u32 i = 0; i < dirty_blocks; ++i) {
