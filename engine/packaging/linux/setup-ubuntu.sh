@@ -10,6 +10,10 @@ set -euo pipefail
 [[ $(id -u) == 0 ]] || { echo 'Run as root (sudo).' >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 jobs=${BB_JOBS:-$(nproc)}
+# BB_DEPS_LOG=1: the builds' output is kept (the Dockerfile: CI logs). Otherwise it goes away, and
+# so do the compiler errors Ninja prints with it: rerun the failing step by hand to see them.
+quiet=/dev/null
+[[ ${BB_DEPS_LOG:-} != 1 ]] || quiet=/dev/stdout
 
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
@@ -20,7 +24,7 @@ apt-get install -y -qq --no-install-recommends \
     libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
     libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgles-dev \
     libasound2-dev libpulse-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
-    libdrm-dev libgbm-dev libusb-1.0-0-dev >/dev/null
+    libdrm-dev libgbm-dev libusb-1.0-0-dev >"$quiet"
 for tool in clang clang++ lld ld.lld llvm-ar llvm-ranlib llvm-nm llvm-profdata llvm-symbolizer; do
     ln -sf "/usr/bin/$tool-20" "/usr/local/bin/$tool"
 done
@@ -46,9 +50,9 @@ cmake_dep() { # name tag url [cmake args...]
     built "$name" && return
     echo "deps: $name $tag"
     fetch "$name" "$tag" "$url" --recursive
-    cmake -S "$name" -B "$name/b" "${deps[@]}" "$@" >/dev/null
-    cmake --build "$name/b" -j "$jobs" >/dev/null
-    cmake --install "$name/b" >/dev/null
+    cmake -S "$name" -B "$name/b" "${deps[@]}" "$@" >"$quiet"
+    cmake --build "$name/b" -j "$jobs" >"$quiet"
+    cmake --install "$name/b" >"$quiet"
     rm -rf "$name"
     stamp "$name"
 }
@@ -63,19 +67,17 @@ cmake_dep miniz 3.1.0 https://github.com/richgel999/miniz.git \
     -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_FUZZERS=OFF
 # Zydis with its Zycore installed beside it (zydis-config.cmake looks for Zycore's own config,
 # which the bundled copy does not install; Zydis itself builds with the bundled copy).
-# Build output goes to /dev/null: a failing step stops the script (set -e) without its errors,
-# so rerun that step by hand to see them.
 if ! built zydis-zycore; then
     echo 'deps: zydis v4.1.1 + zycore'
     fetch zydis v4.1.1 https://github.com/zyantific/zydis.git --recursive
     cmake -S zydis/dependencies/zycore -B zydis/zb "${deps[@]}" -DZYCORE_BUILD_TESTS=OFF \
-        -DZYCORE_BUILD_EXAMPLES=OFF >/dev/null
-    cmake --build zydis/zb -j "$jobs" >/dev/null
-    cmake --install zydis/zb >/dev/null
+        -DZYCORE_BUILD_EXAMPLES=OFF >"$quiet"
+    cmake --build zydis/zb -j "$jobs" >"$quiet"
+    cmake --install zydis/zb >"$quiet"
     cmake -S zydis -B zydis/b "${deps[@]}" -DZYDIS_BUILD_TOOLS=OFF \
-        -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_DOXYGEN=OFF >/dev/null
-    cmake --build zydis/b -j "$jobs" >/dev/null
-    cmake --install zydis/b >/dev/null
+        -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_DOXYGEN=OFF >"$quiet"
+    cmake --build zydis/b -j "$jobs" >"$quiet"
+    cmake --install zydis/b >"$quiet"
     rm -rf zydis
     stamp zydis-zycore
 fi
@@ -84,9 +86,9 @@ if ! built miniupnpc; then
     echo 'deps: miniupnpc 2.2.8'
     fetch miniupnp miniupnpc_2_2_8 https://github.com/miniupnp/miniupnp.git
     cmake -S miniupnp/miniupnpc -B miniupnp/b "${deps[@]}" -DUPNPC_BUILD_STATIC=ON \
-        -DUPNPC_BUILD_SHARED=OFF -DUPNPC_BUILD_TESTS=OFF -DUPNPC_BUILD_SAMPLE=OFF >/dev/null
-    cmake --build miniupnp/b -j "$jobs" >/dev/null
-    cmake --install miniupnp/b >/dev/null
+        -DUPNPC_BUILD_SHARED=OFF -DUPNPC_BUILD_TESTS=OFF -DUPNPC_BUILD_SAMPLE=OFF >"$quiet"
+    cmake --build miniupnp/b -j "$jobs" >"$quiet"
+    cmake --install miniupnp/b >"$quiet"
     rm -rf miniupnp
     stamp miniupnpc
 fi
@@ -99,9 +101,9 @@ if ! built sdl3; then
     echo 'deps: SDL3 release-3.4.18'
     fetch sdl release-3.4.18 https://github.com/libsdl-org/SDL.git
     cmake -S sdl -B sdl/b -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/deps \
-        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF >/dev/null
-    cmake --build sdl/b -j "$jobs" >/dev/null
-    cmake --install sdl/b >/dev/null
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF >"$quiet"
+    cmake --build sdl/b -j "$jobs" >"$quiet"
+    cmake --install sdl/b >"$quiet"
     rm -rf sdl
     stamp sdl3
 fi
@@ -115,7 +117,7 @@ if ! built ffmpeg; then
         --disable-avdevice --disable-avfilter --disable-postproc \
         --enable-decoder=h264,hevc,aac,aac_latm --enable-parser=h264,hevc,aac \
         --enable-demuxer=mov,mpegts,h264,hevc,aac --enable-protocol=file --enable-swscale \
-        --enable-swresample >/dev/null && make -j"$jobs" >/dev/null && make install >/dev/null)
+        --enable-swresample >"$quiet" && make -j"$jobs" >"$quiet" && make install >"$quiet")
     rm -rf ffmpeg
     stamp ffmpeg
 fi

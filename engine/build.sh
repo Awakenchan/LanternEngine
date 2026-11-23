@@ -243,7 +243,7 @@ cp -f gpu-cache.accepted.id out/gpu-cache.accepted.id
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/host.c src/wait_stats.c src/blocked.c src/sys/*.c)
-sys_tests=(tests/sys_test_host.c src/sys/*.c)
+sys_tests=(tests/sys_test_host.c src/sys/*.c)
 no_dialog=(-include tests/no_dialog.h)
 link=(-no-pie)
 if [[ -n $windows ]]; then

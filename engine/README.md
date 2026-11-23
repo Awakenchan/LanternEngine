@@ -42,6 +42,9 @@ when it works on one PC.
 - **Linux**: `build.sh` here (clang, CMake, Ninja, Vulkan and SDL3 headers, plus the Rust stable
   toolchain with `cargo`; Ubuntu 24.04: `packaging/linux/setup-ubuntu.sh` builds the libraries once).
   `packaging/linux/build.sh` makes the release archive with the Linux launcher.
+- **Linux with Docker or Podman** (any distribution): `packaging/linux/docker-build.sh` builds the
+  Ubuntu 24.04 environment (`packaging/linux/Dockerfile`, which runs `setup-ubuntu.sh`) and
+  `build.sh` in it (options go through, e.g. `--test`); `--shell` opens a shell there.
 - **Run from a checkout (Linux)**: `BB_GAME_DIR=/path/to/CUSA03173 ./run.sh`.
 
 ## Tests and checks
