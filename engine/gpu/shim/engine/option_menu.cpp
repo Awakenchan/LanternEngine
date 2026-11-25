@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "option_menu.h"
 #include "../../bbgpu.h"
+#include "hook_entries.h"
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include "option_keys.h"
@@ -40,6 +42,7 @@ constexpr std::uint8_t kSectionLoopBytes[] = {0x48, 0x83, 0xfa, 0x06};
 constexpr std::uint8_t kSectionLoopWithOurs = 7;
 constexpr std::size_t kSystemCall = 0x1bb4978, kSystemFinish = 0x1bea630, kSystemPad = 0x1bb4c61;
 constexpr std::size_t kTitleCall = 0x1b4adb3, kTitleFinish = 0x1bea820, kTitlePad = 0x1b49ac1;
+constexpr std::size_t kPressStart = 0x1b384f0, kPressStartCall = 0x1bda58d;
 constexpr std::uint8_t kPadding[] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0};
 
 constexpr std::uint32_t kEnhancementsRow = 110013, kGraphicsRow = 110007, kEffectsRow = 110010, kColourRow = 110014;
@@ -247,6 +250,8 @@ constexpr auto kQuitWait = std::chrono::seconds(60);
 constexpr std::size_t kStockQuit = 0x1c0d050, kStockQuitSize = 0x7f;
 std::uint64_t g_image = 0;
 bool g_desktop_from_game = false;
+bool g_press_start_hook = false;
+std::atomic_bool g_press_start_seen{false};
 std::mutex g_quit_mutex;
 QuitClock::time_point g_quit_deadline{}, g_quit_next{};
 unsigned g_quit_title = 0;
@@ -294,9 +299,7 @@ void* GUEST SystemList(void* out, void* builder, void* functor) {
     Call(g_image + kSystemFinish, out, builder, functor);
     return out;
 }
-void* GUEST TitleList(void* out, void* builder, void* sprite) {
-    if (g_installed) OptionRows::AddExitCommand(builder, kTitleQuitRow, &TitleQuitOpener);
-    Call(g_image + kTitleFinish, out, builder, sprite);
+void TitleReached() {
     const auto ticket = bbgpu_save_backups_title();
     std::lock_guard lock(g_quit_mutex);
     const auto now = QuitClock::now();
@@ -304,7 +307,20 @@ void* GUEST TitleList(void* out, void* builder, void* sprite) {
         g_quit_title = ticket;
         g_quit_next = now;
         g_quit_deadline = now + kQuitWait;
+        host_log("pc-options: title screen reached before menu input; waiting for save completion");
     }
+}
+
+std::int64_t GUEST OnPressStart(std::uint64_t, std::uint64_t* saved) noexcept {
+    if (saved[Saved::kEntryReturn] == g_image + kPressStartCall + 5)
+        g_press_start_seen.store(true, std::memory_order_relaxed);
+    return 0;
+}
+
+void* GUEST TitleList(void* out, void* builder, void* sprite) {
+    if (g_installed) OptionRows::AddExitCommand(builder, kTitleQuitRow, &TitleQuitOpener);
+    Call(g_image + kTitleFinish, out, builder, sprite);
+    if (!g_press_start_hook) TitleReached();
     return out;
 }
 
@@ -328,11 +344,16 @@ void PollDesktopExit() {
     }
 }
 
-bool CallSite(const std::uint8_t* image, std::size_t size, std::size_t call, std::size_t target, std::size_t pad) {
-    if (call + 5 > size || pad + sizeof kPadding > size || image[call] != 0xe8) return false;
+bool Calls(const std::uint8_t* image, std::size_t size, std::size_t call, std::size_t target) {
+    if (call + 5 > size || image[call] != 0xe8) return false;
     std::int32_t rel = 0;
     std::memcpy(&rel, image + call + 1, 4);
-    return std::int64_t(call + 5) + rel == std::int64_t(target) && !std::memcmp(image + pad, kPadding, sizeof kPadding);
+    return std::int64_t(call + 5) + rel == std::int64_t(target);
+}
+
+bool CallSite(const std::uint8_t* image, std::size_t size, std::size_t call, std::size_t target, std::size_t pad) {
+    return Calls(image, size, call, target) && pad + sizeof kPadding <= size &&
+           !std::memcmp(image + pad, kPadding, sizeof kPadding);
 }
 constexpr std::size_t kRouteJump = 13;
 struct Route {
@@ -474,20 +495,20 @@ bool BindSettings() {
 
 bool Install(std::uint8_t* image, std::size_t size) {
     g_image = reinterpret_cast<std::uint64_t>(image);
-    // Title observation does not require the optional System menu or prepared assets.
-    bool title_hook = false;
+    // The Press Start screen comes before the interactive title menu is built.
+    Hook press_start;
+    if (Calls(image, size, kPressStartCall, kPressStart) &&
+        Prepare(press_start, image, size, kPressStart, SiteKind::Entry, HookEntries::kOptionsPressStart, OnPressStart))
+        g_press_start_hook = Commit(std::span(&press_start, 1)) == WriteResult::Applied;
+    g_desktop_from_game = g_press_start_hook && StockQuitCompatible(image, size);
+
     if (CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad)) {
         Route route;
         std::vector<CodePatch> title_patches;
         RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList), route, title_patches);
-        const auto result = WriteCode(title_patches);
-        title_hook = result == WriteResult::Applied;
-        if (!title_hook)
-            host_log("Saves: title menu hook unavailable: %s", Describe(result));
-    } else {
-        host_log("Saves: title menu hook unavailable: its code is not 1.09's");
+        if (const auto result = WriteCode(title_patches); result != WriteResult::Applied)
+            host_log("pc-options: interactive title menu hook unavailable: %s", Describe(result));
     }
-    g_desktop_from_game = title_hook && StockQuitCompatible(image, size);
     auto& settings = BbSettings::Get();
     if (!settings.pc_menus) {
         host_log("pc-options off: turned off in the launcher (Play, Lantern menus in the game)");
@@ -557,6 +578,8 @@ void ListUpdate(std::uint8_t* list, bool focused) {
 }
 
 void Tick() {
+    // Service the notification after returning to the game's frame loop.
+    if (g_press_start_seen.exchange(false, std::memory_order_relaxed)) TitleReached();
     if (!g_installed) return;
     PollDesktopExit();
     bool changed = false, picture = false;

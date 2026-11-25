@@ -27,8 +27,9 @@ provides the fallback when that key is absent.
 ## Quit to Desktop
 
 The PC System menu's **Quit to Desktop** uses Bloodborne's normal return-to-title
-confirmation handler on a compatible 1.09 game. The engine waits for the title menu
-and for the live save to be idle before closing. If automatic backups are enabled,
+confirmation handler on a compatible 1.09 game. The engine observes the initial
+Press Start screen, so it can wait for the live save before closing without requiring
+input on the title screen. If automatic backups are enabled,
 it also waits for the title backup. A timeout leaves the game running and records the
 reason in the log. The game decides which position and state it records in its save.
 
