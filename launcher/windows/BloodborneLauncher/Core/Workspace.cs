@@ -325,11 +325,13 @@ namespace BloodborneLauncher.Core
         public void SecureSaves()
         {
             var root = GameEnvironment.SavesRoot(Settings);
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                if (SaveGuard.Secure(root) > 0)
-                    Log(L.F($"Saves: safety copy made in {SaveGuard.VaultDir}."), LogLevel.Info);
-            });
+            System.Threading.Tasks.Task.Run(() => SecureSaves(root));
+        }
+
+        private void SecureSaves(string root)
+        {
+            if (SaveGuard.Secure(root) > 0)
+                Log(L.F($"Saves: safety copy made in {SaveGuard.VaultDir}."), LogLevel.Info);
         }
 
         public string? StartGame()
@@ -338,14 +340,13 @@ namespace BloodborneLauncher.Core
             var savesRoot = GameEnvironment.SavesRoot(Settings);
             OutputLines.Clear();
             OutputCleared?.Invoke();
-            SecureSaves();
-            if (Settings.Bool("save_backups"))
+            var backUp = Settings.Bool("save_backups");
+            var source = SaveBackups.SaveData(Settings);
+            var folder = SaveBackups.Folder(Settings);
+            // Run the two copies in sequence so they do not contend for the same live-save lock.
+            System.Threading.Tasks.Task.Run(() =>
             {
-                // Copied on a worker thread: the game takes ~20 s to reach its first save, and a
-                // large save folder held the launcher (Play looked stuck) while it was copied here.
-                var source = SaveBackups.SaveData(Settings);
-                var folder = SaveBackups.Folder(Settings);
-                System.Threading.Tasks.Task.Run(() =>
+                if (backUp)
                 {
                     try
                     {
@@ -359,8 +360,9 @@ namespace BloodborneLauncher.Core
                     {
                         Log(L.T("Could not back up the saves: ") + e.Message, LogLevel.Warn);
                     }
-                });
-            }
+                }
+                SecureSaves(savesRoot);
+            });
             var safeMode = Settings.Bool("safe_mode_next");
             Session = new SessionStats();
             _hdrBefore = WindowsHdr.Displays();

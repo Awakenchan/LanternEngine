@@ -47,7 +47,7 @@ public:
     int fd_;
     int error_ = 0;
 public:
-    explicit BackupLock(const fs::path& folder, const char* name = ".backup.lock") : fd_(open((folder / name).c_str(), O_CREAT | O_RDWR | O_NOFOLLOW, 0600)) {
+    explicit BackupLock(const fs::path& folder, const char* name = ".backup.lock") : fd_(open((folder / name).c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600)) {
         if (fd_ < 0) error_ = errno;
         else if (flock(fd_, LOCK_EX | LOCK_NB)) { error_ = errno; close(fd_); fd_ = -1; }
     }
@@ -59,6 +59,23 @@ public:
     BackupLock& operator=(const BackupLock&) = delete;
 };
 
+// Called with the profile session lock held, before the game can open any saves.
+inline void RecoverSaveRestore(const fs::path& profile) {
+    const auto savedata = profile / "savedata";
+    const auto previous = profile / "savedata.restore-previous";
+    const auto current = fs::symlink_status(savedata);
+    if (fs::exists(current)) {
+        if (!fs::is_directory(current)) throw std::runtime_error("the live save path is not a directory");
+        return;
+    }
+    const auto interrupted = fs::symlink_status(previous);
+    if (!fs::exists(interrupted)) return;
+    if (!fs::is_directory(interrupted)) throw std::runtime_error("the previous save path is not a directory");
+    BackupLock live(profile, ".save-write.lock");
+    if (!live) throw std::runtime_error("the previous save could not be recovered: the profile is busy");
+    fs::rename(previous, savedata);
+}
+
 inline bool IsPlayBackup(const std::string& name) {
     if (name.size() != 24 || name.substr(19) != "_play") return false;
     std::tm time{};
@@ -67,12 +84,15 @@ inline bool IsPlayBackup(const std::string& name) {
     return !in.fail();
 }
 
-inline void PrunePlayBackups(const fs::path& folder) {
+inline void PrunePlayBackups(const fs::path& folder, const fs::path& published = {}) {
     std::vector<fs::path> automatic;
     for (const auto& entry : fs::directory_iterator(folder))
         if (!entry.is_symlink() && entry.is_directory() && IsPlayBackup(entry.path().filename().string()))
             automatic.push_back(entry.path());
-    std::sort(automatic.begin(), automatic.end(), std::greater<>());
+    std::sort(automatic.begin(), automatic.end(), [&](const auto& a, const auto& b) {
+        if (a == published || b == published) return a == published && b != published;
+        return a > b;
+    });
     for (std::size_t i = 6; i < automatic.size(); ++i) {
         std::error_code ignored;
         fs::remove_all(automatic[i], ignored);
@@ -131,11 +151,16 @@ public:
     const std::string& Error() const { return error_; }
 
     // Elapsed monotonic seconds, injected by tests; a busy attempt never advances the deadline.
-    SnapshotResult Tick(double elapsed) {
-        if (elapsed < due_) return SnapshotResult::NotDue;
+    SnapshotResult Tick(double elapsed, bool title = false) {
+        const bool scheduled = elapsed >= due_;
+        if (!scheduled && !title) return SnapshotResult::NotDue;
         fs::path staging;
+        std::unique_ptr<BackupLock> live;
         std::unique_ptr<BackupLock> guard;
         try {
+            if (!fs::exists(source_.parent_path())) return SnapshotResult::Empty;
+            live = std::make_unique<BackupLock>(source_.parent_path(), ".save-write.lock");
+            if (!*live) { error_ = "the live save is busy"; return SnapshotResult::Busy; }
             fs::create_directories(folder_);
             guard = std::make_unique<BackupLock>(folder_);
             if (!*guard) { error_ = "a save transaction or another backup is in progress"; return SnapshotResult::Busy; }
@@ -156,7 +181,7 @@ public:
                 if (!existing.empty()) previous_ = existing.front() / "savedata";
             }
             if (!previous_.empty() && fs::exists(previous_) && Matches(previous_, files) && Files(source_) == files) {
-                due_ = elapsed + 600;
+                if (scheduled) due_ = elapsed + 600;
                 return SnapshotResult::Unchanged;
             }
             const auto now = std::time(nullptr);
@@ -193,9 +218,9 @@ public:
             fs::rename(staging, target);
             staging.clear();
             previous_ = target / "savedata";
-            due_ = elapsed + 600;
+            if (scheduled) due_ = elapsed + 600;
             // Cleanup failure must not turn a successfully published backup into a failed attempt.
-            try { PrunePlayBackups(folder_); } catch (const std::exception&) { }
+            try { PrunePlayBackups(folder_, target); } catch (const std::exception&) { }
             return SnapshotResult::Created;
         } catch (const std::exception& e) {
             error_ = e.what();

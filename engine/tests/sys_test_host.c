@@ -14,7 +14,7 @@ WEAK uint64_t host_realtime_ns(void) { return UINT64_C(1793318400) * 1000000000 
 WEAK uint64_t host_monotonic_ns(void) { return 0; }
 WEAK void host_sleep_until_ns(uint64_t deadline) { (void)deadline; }
 WEAK int bbgpu_window_in_background(void) { return 0; }
-WEAK void bbgpu_save_backups_write(int begin) { (void)begin; }
+WEAK int bbgpu_save_backups_write(int begin) { (void)begin; return 0; }
 WEAK int bbgpu_overlay_captures_input(void) { return 0; }
 WEAK void bbgpu_anti_lag_before_input(void) {}
 WEAK void bbgpu_pacing_pad_read(void) {}

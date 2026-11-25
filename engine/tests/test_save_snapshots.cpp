@@ -2,14 +2,23 @@
 #include <cassert>
 #include <fstream>
 #include <iostream>
+#include <thread>
 extern "C" int bbgpu_save_backups_start(const char* user);
-extern "C" void bbgpu_save_backups_write(int begin);
+extern "C" int bbgpu_save_backups_write(int begin);
+extern "C" void bbgpu_save_backups_title(void);
 
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
     if (argc == 3 && std::string(argv[1]) == "--try-lock") {
         Lantern::BackupLock lock{fs::path(argv[2])};
         return lock ? 0 : 2;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--session") {
+        if (bbgpu_save_backups_start(argv[2])) return 2;
+        std::cout << "READY" << std::endl;
+        std::string stop;
+        std::getline(std::cin, stop);
+        return 0;
     }
     if (argc == 3 && std::string(argv[1]) == "--transactions") {
         const auto user = fs::absolute(argv[2]);
@@ -18,14 +27,14 @@ int main(int argc, char** argv) {
         const auto folder = Lantern::BackupFolder(user);
         fs::create_directories(folder);
         {
-            Lantern::BackupLock restoring(folder, ".session.lock");
+            Lantern::BackupLock restoring(user, ".session.lock");
             assert(restoring);
             assert(bbgpu_save_backups_start(argv[2]) != 0);
         }
         assert(bbgpu_save_backups_start(argv[2]) == 0);
         Lantern::SaveSnapshots snapshots(user, folder);
-        bbgpu_save_backups_write(1);
-        bbgpu_save_backups_write(1);
+        assert(bbgpu_save_backups_write(1) == 0);
+        assert(bbgpu_save_backups_write(1) == 0);
         assert(snapshots.Tick(600) == Lantern::SnapshotResult::Busy);
         bbgpu_save_backups_write(0);
         assert(snapshots.Tick(605) == Lantern::SnapshotResult::Busy);
@@ -34,6 +43,33 @@ int main(int argc, char** argv) {
         assert(snapshots.Tick(610) == Lantern::SnapshotResult::Created);
         std::cout << "PASS: native runtime defers partial and nested save transactions, then backs up completed progress\n";
         return 0;
+    }
+    if (argc == 3 && std::string(argv[1]) == "--title-worker") {
+        const auto user = fs::absolute(argv[2]);
+        fs::create_directories(user / "savedata");
+        const auto folder = Lantern::BackupFolder(user);
+        assert(bbgpu_save_backups_start(argv[2]) == 0);
+        assert(bbgpu_save_backups_write(1) == 0);
+        std::ofstream(user / "savedata/userdata0000") << "partial title progress";
+        bbgpu_save_backups_title();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        assert(!fs::exists(folder));
+        std::ofstream(user / "savedata/userdata0000") << "finished title progress";
+        assert(bbgpu_save_backups_write(0) == 0);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < until) {
+            if (fs::exists(folder)) for (const auto& entry : fs::directory_iterator(folder)) {
+                if (!Lantern::IsPlayBackup(entry.path().filename().string())) continue;
+                std::ifstream saved(entry.path() / "savedata/userdata0000");
+                std::string contents;
+                std::getline(saved, contents);
+                assert(contents == "finished title progress");
+                std::cout << "PASS: title request survives a busy save and copies completed progress\n";
+                return 0;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        assert(!"title backup worker did not publish a completed snapshot");
     }
     const auto root = fs::temp_directory_path() / ("lantern-snapshots-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(root / "user/savedata");
@@ -68,6 +104,21 @@ int main(int argc, char** argv) {
     fs::create_directories(root / "user/savedata/junk.importing");
     write(root / "user/savedata/junk.importing/ignored", "not a save");
     assert(session.Tick(1805) == Lantern::SnapshotResult::Unchanged);
+    write(root / "user/savedata/userdata0000", "progress at title");
+    Lantern::SaveSnapshots title(root / "user", root / "title-backups");
+    assert(title.Tick(120, true) == Lantern::SnapshotResult::Created);
+    assert(title.Tick(121, true) == Lantern::SnapshotResult::Unchanged);
+    assert(title.Tick(599) == Lantern::SnapshotResult::NotDue);
+    assert(title.Tick(600) == Lantern::SnapshotResult::Unchanged);
+    fs::rename(root / "user/savedata", root / "user/savedata.restore-previous");
+    fs::create_directory(root / "user/savedata.restoring");
+    write(root / "user/savedata.restoring/userdata0000", "partial staging");
+    Lantern::RecoverSaveRestore(root / "user");
+    std::ifstream recovered(root / "user/savedata/userdata0000");
+    std::string restored;
+    std::getline(recovered, restored);
+    recovered.close();
+    assert(restored == "progress at title" && !fs::exists(root / "user/savedata.restore-previous"));
     fs::remove_all(root);
-    std::cout << "PASS: engine deadline, retry, duplicate avoidance, profiles, staging and named retention\n";
+    std::cout << "PASS: engine deadlines, retry, deduplication, retention, title backups and interrupted restore recovery\n";
 }

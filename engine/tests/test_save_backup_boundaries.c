@@ -10,10 +10,11 @@ void host_sleep_ns(uint64_t ns) { (void)ns; }
 const char *sys_file_user_dir(void) { return test_user; }
 int sys_file_mount(const char *guest, const char *host) { (void)guest; (void)host; return mount_failure; }
 void sys_file_unmount(const char *guest) { (void)guest; }
-void bbgpu_save_backups_write(int begin) {
+int bbgpu_save_backups_write(int begin) {
     if (begin) { ++active_writes; ++begins; }
     else { --active_writes; ++ends; }
     assert(active_writes >= 0);
+    return 0;
 }
 #ifdef _WIN32
 int runtime_win_mkdir(const char *path, int mode) { (void)mode; return _mkdir(path); }
@@ -23,6 +24,8 @@ int runtime_win_remove_tree(const char *path) { (void)path; return 0; }
 int main(int argc, char **argv) {
     assert(argc == 2);
     snprintf(test_user, sizeof(test_user), "%s", argv[1]);
+    sys_save_data_configure("CUSA03173");
+    assert(begins == 1 && ends == 1 && active_writes == 0);
     assert(save_initialize(NULL) == 0);
     DirName dir = {"SPRJ0005"};
     MountRequest request = {.user = 1, .dir = &dir, .mode = MOUNT_CREATE_OR_OPEN};
@@ -40,6 +43,15 @@ int main(int argc, char **argv) {
     request.mode = MOUNT_READ_ONLY;
     assert(save_mount(&request, &result) == 0);
     assert(active_writes == 0); // a long-lived read-only mount must not block backups
+    const int metadata_begins = begins;
+    const char title[] = "updated title";
+    assert(save_set_param(&result.point, PARAM_TITLE, title, sizeof(title) - 1) == 0);
+    SaveParam saved = {0};
+    (void)load_param(mounts[mount_slot(&result.point)].meta, &saved);
+    assert(strcmp(saved.title, title) == 0 && begins == metadata_begins + 1 && active_writes == 0);
+    const SaveIcon icon = {.buffer = title, .data_size = sizeof(title)};
+    assert(save_icon(&result.point, &icon) == 0);
+    assert(begins == metadata_begins + 2 && active_writes == 0);
     assert(save_umount(&result.point) == 0);
     assert(save_setup_memory(1, 16, NULL) == 0);
     char data[4] = {1, 2, 3, 4};
@@ -48,6 +60,6 @@ int main(int argc, char **argv) {
     DeleteRequest deleting = {.user = 1, .dir = &dir};
     assert(save_delete(&deleting) == 0);
     assert(active_writes == 0 && begins == ends && begins >= 4);
-    puts("PASS: runtime writable/read-only mount, failed mount, unmount, save memory and delete boundaries");
+    puts("PASS: runtime mount, metadata, save memory and delete boundaries");
     return 0;
 }

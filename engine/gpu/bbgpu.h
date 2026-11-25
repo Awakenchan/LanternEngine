@@ -38,7 +38,8 @@ int bbgpu_overlay_captures_input(void);
 int bbgpu_window_in_background(void);
 /* Save snapshots follow the actual engine process, including launcher-free starts. */
 int bbgpu_save_backups_start(const char *user);
-void bbgpu_save_backups_write(int begin);
+int bbgpu_save_backups_write(int begin);
+void bbgpu_save_backups_title(void);
 void bbgpu_anti_lag_before_input(void);
 void bbgpu_pacing_pad_read(void);
 /* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */

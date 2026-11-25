@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "option_menu.h"
+#include "../../bbgpu.h"
 #include "option_keys.h"
 #include "option_rows.h"
 #include "engine_state.h"
@@ -248,8 +249,9 @@ void* GUEST SystemList(void* out, void* builder, void* functor) {
     return out;
 }
 void* GUEST TitleList(void* out, void* builder, void* sprite) {
-    OptionRows::AddExitCommand(builder, kTitleQuitRow, &QuitOpener);
+    if (g_installed) OptionRows::AddExitCommand(builder, kTitleQuitRow, &QuitOpener);
     Call(g_image + kTitleFinish, out, builder, sprite);
+    bbgpu_save_backups_title();
     return out;
 }
 
@@ -398,6 +400,17 @@ bool BindSettings() {
 }
 
 bool Install(std::uint8_t* image, std::size_t size) {
+    g_image = reinterpret_cast<std::uint64_t>(image);
+    // Title observation does not require the optional System menu or prepared assets.
+    if (CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad)) {
+        Route route;
+        std::vector<CodePatch> title_patches;
+        RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList), route, title_patches);
+        if (const auto result = WriteCode(title_patches); result != WriteResult::Applied)
+            host_log("Saves: title menu hook unavailable: %s", Describe(result));
+    } else {
+        host_log("Saves: title menu hook unavailable: its code is not 1.09's");
+    }
     auto& settings = BbSettings::Get();
     if (!settings.pc_menus) {
         host_log("pc-options off: turned off in the launcher (Play, Lantern menus in the game)");
@@ -428,7 +441,6 @@ bool Install(std::uint8_t* image, std::size_t size) {
         return false;
     }
 
-    g_image = reinterpret_cast<std::uint64_t>(image);
     OptionRows::Bind(g_image);
     g_offered[kEnhance] = true;
     g_offered[kGraphics] = g_offered[kEffects] = g_offered[kColour] = Graphics::Enabled();
@@ -439,20 +451,17 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const auto name = reinterpret_cast<std::uint64_t>(g_section);
     const std::uint64_t no_name = 0;
     const std::uint8_t sections = kSectionLoopWithOurs;
-    std::array<Route, 2> routes;
+    Route route;
     std::vector<CodePatch> patches{
         {image, kSectionSlot, AsCode(std::span(&no_name, 1)), AsCode(std::span(&name, 1))},
         {image, kSectionLoopEnd + 3, std::span(kSectionLoopBytes).subspan(3, 1), std::span(&sections, 1)}};
-    RouteCall(image, kSystemCall, kSystemPad, reinterpret_cast<const void*>(&SystemList), routes[0], patches);
-    const bool title = CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad);
-    if (title) RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList), routes[1], patches);
+    RouteCall(image, kSystemCall, kSystemPad, reinterpret_cast<const void*>(&SystemList), route, patches);
     if (const WriteResult result = WriteCode(patches); result != WriteResult::Applied) {
         for (const auto& path : g_mounted) sys_file_unmount(path.c_str());
         g_mounted.clear();
         host_log("pc-options off: the System list's code %s", Describe(result));
         return false;
     }
-    if (!title) host_log("pc-options: the title's Quit Game left out (its code is not 1.09's)");
     g_installed = true;
     std::string offered;
     for (int s = 0; s < kSectionCount; ++s)

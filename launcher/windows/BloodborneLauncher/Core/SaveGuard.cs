@@ -17,14 +17,13 @@ namespace BloodborneLauncher.Core
     ///   vault) has some, the launcher asks before the game starts a new one: it lost track of
     ///   them (settings reset, another launcher's settings folder, a new package folder).
     /// The vault keeps one folder per saves folder: place.txt (its path and profiles), then
-    /// &lt;profile&gt;\&lt;time&gt;\savedata with a fingerprint, as SaveBackups does.
+    /// &lt;profile&gt;\&lt;time&gt;\savedata.
     /// </summary>
     public static class SaveGuard
     {
         public const int Keep = 5;
         private const string Stamp = "yyyy-MM-dd_HH-mm-ss";
         private const string PlaceFile = "place.txt";
-        private const string FingerprintFile = "fingerprint.txt";
         private static readonly object Lock = new();
 
         public static string VaultDir =>
@@ -122,7 +121,9 @@ namespace BloodborneLauncher.Core
         /// <summary>Copies each profile's savedata in `root` into the vault when it changed since its
         /// newest copy (the newest Keep are kept). On a worker thread; never throws. Returns how
         /// many profiles were copied.</summary>
-        public static int Secure(string root)
+        public static int Secure(string root) => Secure(root, VaultDir);
+
+        internal static int Secure(string root, string vaultDir)
         {
             lock (Lock)
             {
@@ -130,32 +131,37 @@ namespace BloodborneLauncher.Core
                 {
                     var (profiles, _) = ProfilesWithSaves(root);
                     if (profiles.Count == 0) return 0;
-                    var place = Path.Combine(VaultDir, PlaceId(root));
+                    var place = Path.Combine(vaultDir, PlaceId(root));
                     Directory.CreateDirectory(place);
                     File.WriteAllText(Path.Combine(place, PlaceFile), Path.GetFullPath(root) + "\n" + string.Join("|", profiles) + "\n");
                     var copied = 0;
                     foreach (var profile in profiles)
                     {
                         var source = SaveData(root, profile);
-                        var folder = Path.Combine(place, PlayerProfiles.SafeName(profile));
-                        Directory.CreateDirectory(folder);
-                        using var vaultGuard = new FileStream(Path.Combine(folder, ".vault.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-                        var print = SaveBackups.Fingerprint(source);
-                        var copies = Copies(folder);
-                        if (copies.FirstOrDefault() is { } newest && Read(Path.Combine(newest, FingerprintFile)) == print) continue;
-                        var target = Path.Combine(folder, DateTime.Now.ToString(Stamp, CultureInfo.InvariantCulture));
-                        if (Directory.Exists(target)) continue;
-                        // Copied beside it first: a half-written copy never counts as the newest.
-                        var staging = target + ".copying";
-                        if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
-                        SaveBackups.Copy(source, Path.Combine(staging, "savedata"));
-                        File.WriteAllText(Path.Combine(staging, FingerprintFile), print);
-                        Directory.Move(staging, target);
-                        copied++;
-                        foreach (var old in Copies(folder).Skip(Keep))
+                        var folder = ProfileCopies(root, profile, vaultDir);
+                        try
                         {
-                            try { Directory.Delete(old, recursive: true); } catch { /* in use: next time */ }
+                            using var live = SaveBackups.LockLive(source);
+                            Directory.CreateDirectory(folder);
+                            using var vaultGuard = SaveBackups.LockFile(folder, ".vault.lock");
+                            if (Copies(folder).FirstOrDefault() is { } newest &&
+                                SaveBackups.SameContent(source, Path.Combine(newest, "savedata"))) continue;
+                            var target = Path.Combine(folder, DateTime.Now.ToString(Stamp, CultureInfo.InvariantCulture));
+                            if (Path.Exists(target)) continue;
+                            var staging = target + ".copying";
+                            SaveBackups.RemoveStaging(staging);
+                            try
+                            {
+                                SaveBackups.CopyVerified(source, Path.Combine(staging, "savedata"));
+                                SaveBackups.Publish(staging, target);
+                                copied++;
+                            }
+                            finally { SaveBackups.TryRemove(staging); }
+                            foreach (var old in Copies(folder).Where(copy => copy != target).Skip(Keep - 1))
+                                SaveBackups.TryRemove(old);
                         }
+                        catch (IOException) { /* Busy or unreadable; preserve the last verified copy. */ }
+                        catch (UnauthorizedAccessException) { }
                     }
                     return copied;
                 }
@@ -167,13 +173,17 @@ namespace BloodborneLauncher.Core
         }
 
         public static string ProfileCopies(string root, string profile) =>
-            Path.Combine(VaultDir, PlaceId(root), PlayerProfiles.SafeName(profile));
+            ProfileCopies(root, profile, VaultDir);
+
+        internal static string ProfileCopies(string root, string profile, string vaultDir) =>
+            Path.Combine(vaultDir, PlaceId(root), PlayerProfiles.SafeName(profile));
 
         /// <summary>A profile's copies in the vault, newest first.</summary>
         private static List<string> Copies(string folder)
         {
             if (!Directory.Exists(folder)) return new();
             return Directory.GetDirectories(folder)
+                .Where(d => (File.GetAttributes(d) & FileAttributes.ReparsePoint) == 0)
                 .Where(d => DateTime.TryParseExact(Path.GetFileName(d), Stamp, CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
                 .OrderByDescending(d => Path.GetFileName(d), StringComparer.Ordinal).ToList();
         }
@@ -193,7 +203,10 @@ namespace BloodborneLauncher.Core
             var found = new List<Found>();
             try
             {
-                if (HasHunters(SaveData(root, profile))) return found;
+                var current = SaveData(root, profile);
+                // Engine startup recovers an interrupted directory swap before opening any saves.
+                if (HasHunters(current) || !Path.Exists(current) && HasHunters(current + SaveBackups.Previous))
+                    return found;
                 var roots = new List<string>(moreRoots ?? Enumerable.Empty<string>());
                 roots.AddRange(SettingsRoots());
                 var vaultPlaces = new List<(string Root, string Dir)>();
@@ -318,17 +331,16 @@ namespace BloodborneLauncher.Core
         }
 
         /// <summary>Copies a vault copy's savedata in as the current profile's (which has none).</summary>
-        public static void Restore(LauncherSettings s, Found found)
+        public static void Restore(LauncherSettings s, Found found) => Restore(s, found, VaultDir);
+
+        internal static void Restore(LauncherSettings s, Found found, string vaultDir)
         {
             if (found.Copy == null) return;
-            var target = SaveBackups.SaveData(s);
-            if (HasHunters(target)) throw new IOException(L.T("This profile has saves now; nothing was replaced."));
-            if (HasFiles(target)) SaveBackups.Create(s, beforeRestore: true);
-            var staging = target + ".restoring";
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
-            SaveBackups.Copy(found.Copy, staging);
-            if (Directory.Exists(target)) Directory.Delete(target, recursive: true);
-            Directory.Move(staging, target);
+            var vault = ProfileCopies(found.Root, found.Profiles[0], vaultDir);
+            var from = Path.GetFullPath(found.Copy);
+            if (!SaveBackups.PathEquals(Path.GetDirectoryName(Path.GetDirectoryName(from)), vault))
+                throw new IOException(L.T("This safety copy does not belong to the recovery folder."));
+            SaveBackups.RestoreFrom(SaveBackups.SaveData(s), SaveBackups.Folder(s), from, vault, HasHunters);
         }
     }
 }

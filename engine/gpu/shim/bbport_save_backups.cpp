@@ -27,78 +27,99 @@ bool Enabled(const std::filesystem::path& config) {
     }
     return enabled;
 }
-std::filesystem::path active_folder;
+std::filesystem::path active_profile;
 std::unique_ptr<Lantern::BackupLock> writing;
 std::unique_ptr<Lantern::BackupLock> session;
-std::atomic_uint writers{0}; // mutations serialized by the runtime save-data mutex
+unsigned writers = 0; // mutations serialized by the runtime save-data mutex
+std::atomic_uint title_requests{0};
+std::condition_variable_any wake;
+std::mutex wake_mutex;
 std::jthread worker; // stop and join before destroying any state it uses
 }
 
 // The runtime calls these at writable mount/unmount and memory/delete boundaries.
 // Holding the same file lock makes manual launcher snapshots defer too.
-extern "C" void bbgpu_save_backups_write(int begin) {
-    if (active_folder.empty()) return;
-    if (!begin) { if (writers && --writers == 0) writing.reset(); return; }
-    if (writers++) return;
+extern "C" int bbgpu_save_backups_write(int begin) {
+    if (active_profile.empty()) return 0;
+    if (!begin) { if (writers && --writers == 0) writing.reset(); return 0; }
+    if (writers) { ++writers; return 0; }
     try {
-        std::filesystem::create_directories(active_folder);
         do {
-            writing = std::make_unique<Lantern::BackupLock>(active_folder);
+            writing = std::make_unique<Lantern::BackupLock>(active_profile, ".save-write.lock");
             if (!*writing && !writing->Contended())
-                throw std::runtime_error("the backup lock is inaccessible");
+                throw std::runtime_error("the live save lock is inaccessible");
             if (!*writing) std::this_thread::sleep_for(std::chrono::milliseconds(5));
         } while (!*writing);
+        ++writers;
+        return 0;
     } catch (const std::exception& e) {
         std::printf("Saves: cannot coordinate snapshots: %s\n", e.what());
         writing.reset();
+        return -1;
     }
+}
+
+extern "C" void bbgpu_save_backups_title(void) {
+    {
+        std::lock_guard lock(wake_mutex);
+        ++title_requests;
+    }
+    wake.notify_all();
 }
 
 extern "C" int bbgpu_save_backups_start(const char* user) {
     if (worker.joinable()) return 0;
     if (!user || !*user) return -1;
     try {
-    const auto source = std::filesystem::absolute(Utf8Path(user));
-    const auto folder = std::getenv("BB_SAVE_BACKUP_DIR")
-        ? Utf8Path(std::getenv("BB_SAVE_BACKUP_DIR")) : Lantern::BackupFolder(source);
-    const auto config = std::getenv("BB_CONFIG") ? Utf8Path(std::getenv("BB_CONFIG"))
-        : std::filesystem::path("lantern.ini");
-    std::filesystem::create_directories(folder);
-    active_folder = folder;
-    session = std::make_unique<Lantern::BackupLock>(folder, ".session.lock");
-    if (!*session) throw std::runtime_error("this save profile is in use by another game or a restore, or its backup folder is inaccessible");
-    const auto shown = folder.u8string();
-    std::printf("Saves: automatic backups every 10 minutes; folder: %s\n", reinterpret_cast<const char*>(shown.c_str()));
-    worker = std::jthread([source, folder, config](std::stop_token stop) {
-        Lantern::SaveSnapshots snapshots(source, folder);
-        const auto started = std::chrono::steady_clock::now();
-        std::condition_variable_any wait;
-        std::mutex mutex;
-        bool warned = false;
-        while (!stop.stop_requested()) {
-            if (Enabled(config)) {
-                const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-                const auto result = writers.load() && seconds >= 600 ? Lantern::SnapshotResult::Busy : snapshots.Tick(seconds);
-                if (result == Lantern::SnapshotResult::Created) {
-                    std::printf("Saves: automatic backup completed (newest 6 play backups kept).\n");
-                    std::fflush(stdout);
-                    warned = false;
-                } else if (result == Lantern::SnapshotResult::Busy && !warned) {
-                    std::printf("Saves: backup deferred: %s; retrying every 5 seconds.\n",
-                        writers.load() ? "the game is saving" : snapshots.Error().c_str());
-                    std::fflush(stdout);
-                    warned = true;
+        const auto input = Utf8Path(user);
+        std::filesystem::create_directories(input);
+        const auto source = std::filesystem::canonical(input);
+        const auto folder = std::getenv("BB_SAVE_BACKUP_DIR")
+            ? Utf8Path(std::getenv("BB_SAVE_BACKUP_DIR")) : Lantern::BackupFolder(source);
+        const auto config = std::getenv("BB_CONFIG") ? Utf8Path(std::getenv("BB_CONFIG"))
+            : std::filesystem::path("lantern.ini");
+        session = std::make_unique<Lantern::BackupLock>(source, ".session.lock");
+        if (!*session) throw std::runtime_error("the live save profile is in use or inaccessible");
+        Lantern::RecoverSaveRestore(source);
+        active_profile = source;
+        const auto shown = folder.u8string();
+        std::printf("Saves: automatic backups every 10 minutes and at the title menu; folder: %s\n", reinterpret_cast<const char*>(shown.c_str()));
+        worker = std::jthread([source, folder, config](std::stop_token stop) {
+            Lantern::SaveSnapshots snapshots(source, folder);
+            const auto started = std::chrono::steady_clock::now();
+            unsigned completed_title = 0;
+            bool warned = false;
+            while (!stop.stop_requested()) {
+                const auto request = title_requests.load();
+                if (Enabled(config)) {
+                    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                    const bool title = request != completed_title;
+                    const auto result = snapshots.Tick(seconds, title);
+                    if (result != Lantern::SnapshotResult::Busy) {
+                        completed_title = request;
+                        warned = false;
+                    }
+                    if (result == Lantern::SnapshotResult::Created) {
+                        std::printf("Saves: %s backup completed (newest 6 play backups kept).\n",
+                            title ? "title menu" : "automatic");
+                        std::fflush(stdout);
+                    } else if (result == Lantern::SnapshotResult::Busy && !warned) {
+                        std::printf("Saves: backup deferred: %s; retrying every 5 seconds.\n", snapshots.Error().c_str());
+                        std::fflush(stdout);
+                        warned = true;
+                    }
+                } else {
+                    completed_title = request;
                 }
+                std::unique_lock lock(wake_mutex);
+                wake.wait_for(lock, stop, std::chrono::seconds(5), [request] { return title_requests.load() != request; });
             }
-            std::unique_lock lock(mutex);
-            wait.wait_for(lock, stop, std::chrono::seconds(5), [] { return false; });
-        }
-    });
-    return 0;
+        });
+        return 0;
     } catch (const std::exception& e) {
         std::printf("Saves: automatic backups could not start: %s\n", e.what());
         session.reset();
-        active_folder.clear();
+        active_profile.clear();
         return -1;
     }
 }

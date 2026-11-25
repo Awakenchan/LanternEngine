@@ -5,5 +5,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../BloodborneLauncher/Core/SaveBackups.cs" Link="SaveBackups.cs" />
+    <Compile Include="../../BloodborneLauncher/Core/SaveGuard.cs" Link="SaveGuard.cs" />
   </ItemGroup>
 </Project>
