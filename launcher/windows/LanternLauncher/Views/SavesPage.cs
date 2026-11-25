@@ -15,6 +15,7 @@ namespace BloodborneLauncher.Views
         private readonly TextBlock _backupHint, _userHint;
         private readonly AppButton _resetUser;
         private int _profileReads, _backupReads, _hunterReads;
+        private bool _creatingNamed;
 
         public SavesPage() : base(L.T("Saves"), L.T("Who is playing, their backups, and where saves are kept."))
         {
@@ -38,6 +39,9 @@ namespace BloodborneLauncher.Views
             Add(Card(SymbolRegular.ArrowSync24, L.T("Back up my saves automatically"),
                 L.F($"Before every start and every {SaveBackups.PlayEvery.TotalMinutes:0} minutes while playing, when this profile's saves changed. The newest {SaveBackups.Keep} and {SaveBackups.PlayKeep} from play are kept"),
                 backupToggle, out _backupHint));
+            Add(Card(SymbolRegular.Save24, L.T("Named saves"),
+                L.T("Keep a copy of this profile's saved progress with your own name. Named saves are never deleted automatically"),
+                SmallButton(L.T("Create named save…"), SymbolRegular.Save24, (_, _) => CreateNamedSave()), out _));
             Body.Children.Add(_backups);
 
             Group(L.T("Other"));
@@ -59,6 +63,7 @@ namespace BloodborneLauncher.Views
             Ws.PortChanged += Refresh;
             Ws.SettingsReloaded += Refresh;
             Ws.GameStateChanged += Refresh;
+            Ws.BackupsChanged += RefreshBackups;
         }
 
         public override void OnShown() => Refresh();
@@ -270,17 +275,19 @@ namespace BloodborneLauncher.Views
             try { list = await Task.Run(() => SaveBackups.ListWithSafetyCopies(folder, copies)); }
             catch { list = new(); }
             if (read != _backupReads) return;
-            SetHint(_backupHint, !S.Bool("save_backups") ? L.T("Off: no backups are made")
-                : list.Count == 0 ? L.T("None yet: the first is made when you next press Play")
+            SetHint(_backupHint, !S.Bool("save_backups") ? L.T("Automatic backups are off. Named saves are kept")
+                : list.Count == 0 ? L.T("None yet: made before Play and every 10 minutes during a game")
                 : L.F($"{list.Count} for {PlayerProfiles.Current(S)}"));
 
             _backups.Children.Clear();
             foreach (var backup in list)
             {
                 var chosen = backup;
-                var row = Card(SymbolRegular.History24, FriendlyTime(backup.When), null,
-                    SmallButton(L.T("Restore"), SymbolRegular.ArrowUndo24, (_, _) => RestoreBackup(chosen)), out var hint);
-                SetHint(hint, Kind(backup) + L.F($"  ·  {backup.Bytes / 1048576.0:0.0} MB"));
+                var actions = Row(SmallButton(L.T("Restore"), SymbolRegular.ArrowUndo24, (_, _) => RestoreBackup(chosen)));
+                actions.Children.Add(SmallButton(L.T("Delete"), SymbolRegular.Delete24, (_, _) => DeleteBackup(chosen)));
+                var row = Card(SymbolRegular.History24, backup.Label ?? FriendlyTime(backup.When), null,
+                    actions, out var hint);
+                SetHint(hint, (backup.Label != null ? FriendlyTime(backup.When) + "  ·  " + L.T("Kept permanently") : Kind(backup)) + L.F($"  ·  {backup.Bytes / 1048576.0:0.0} MB"));
                 _backups.Children.Add(row);
             }
         }
@@ -299,6 +306,30 @@ namespace BloodborneLauncher.Views
             backup.Label != null ? L.F($"Named {backup.Label}")
             : backup.SafetyCopy ? L.T("Safety copy")
             : backup.MadeBeforeRestore ? L.T("Before a restore") : backup.MadeDuringPlay ? L.T("While playing") : L.T("Before playing");
+
+        private async void CreateNamedSave()
+        {
+            if (_creatingNamed) return;
+            var values = Prompt.Ask(L.T("Create named save"),
+                L.T("Copy the progress the game has saved to disk. This copy is never deleted automatically."),
+                new Prompt.Field(L.T("Name"), "", L.T("e.g. Before Gascoigne")));
+            if (values == null) return;
+            var source = SaveBackups.SaveData(S);
+            var folder = SaveBackups.Folder(S);
+            _creatingNamed = true;
+            try
+            {
+                await Task.Run(() => SaveBackups.CreateNamed(source, folder, values[0]));
+                Ws.Log(L.F($"Named save created: {values[0].Trim()}. Kept permanently."), LogLevel.Good);
+                Ws.NotifyBackupsChanged();
+            }
+            catch (Exception e)
+            {
+                Ws.Log(L.T("Could not create the named save: ") + e.Message, LogLevel.Warn);
+                Prompt.Tell(L.T("Create named save"), e.Message);
+            }
+            finally { _creatingNamed = false; }
+        }
 
         private void ImportSaves()
         {
@@ -376,6 +407,26 @@ namespace BloodborneLauncher.Views
                 Prompt.Tell(L.T("Import saves"), L.T("Could not import: ") + e.Message);
             }
             Refresh();
+        }
+
+        private async void DeleteBackup(SaveBackups.Backup backup)
+        {
+            var folder = SaveBackups.Folder(S);
+            var vault = SaveGuard.ProfileCopies(GameEnvironment.SavesRoot(S), PlayerProfiles.Current(S));
+            var title = backup.Label ?? FriendlyTime(backup.When);
+            if (!Prompt.Confirm(L.T("Delete save backup"),
+                L.F($"Permanently delete “{title}” ({backup.When:d MMM yyyy, HH:mm:ss})? ") +
+                L.T("Matching safety copies are also deleted. Your current game progress is kept. This backup cannot be restored after deletion."), L.T("Delete"))) return;
+            try
+            {
+                await Task.Run(() => SaveBackups.Delete(folder, backup, vault));
+                Ws.Log(L.F($"Save backup deleted: {title}."), LogLevel.Info);
+                Ws.NotifyBackupsChanged();
+            }
+            catch (Exception e)
+            {
+                Prompt.Tell(L.T("Delete save backup"), L.T("Could not delete the backup: ") + e.Message);
+            }
         }
 
         private void RestoreBackup(SaveBackups.Backup backup)

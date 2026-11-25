@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "option_menu.h"
+#include "../../bbgpu.h"
+#include "hook_entries.h"
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include "option_keys.h"
 #include "option_rows.h"
 #include "engine_state.h"
@@ -37,6 +42,7 @@ constexpr std::uint8_t kSectionLoopBytes[] = {0x48, 0x83, 0xfa, 0x06};
 constexpr std::uint8_t kSectionLoopWithOurs = 7;
 constexpr std::size_t kSystemCall = 0x1bb4978, kSystemFinish = 0x1bea630, kSystemPad = 0x1bb4c61;
 constexpr std::size_t kTitleCall = 0x1b4adb3, kTitleFinish = 0x1bea820, kTitlePad = 0x1b49ac1;
+constexpr std::size_t kPressStart = 0x1b384f0, kPressStartCall = 0x1bda58d;
 constexpr std::uint8_t kPadding[] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0};
 
 constexpr std::uint32_t kEnhancementsRow = 110013, kGraphicsRow = 110007, kEffectsRow = 110010, kColourRow = 110014;
@@ -231,33 +237,123 @@ bool HandlersEven() {
     return true;
 }
 
-void GUEST QuitYes(std::int64_t, std::int64_t) {
-    host_log("pc-options: Quit to Desktop");
+bool QueueDesktopExit() {
     SDL_Event quit{};
     quit.type = SDL_EVENT_QUIT;
-    SDL_PushEvent(&quit);
+    return SDL_PushEvent(&quit);
 }
-void* GUEST QuitOpener(void* out, void* factory) { return OptionRows::AskYesNo(out, factory, kQuitQuestion, &QuitYes); }
 
+using QuitClock = std::chrono::steady_clock;
+constexpr auto kQuitWait = std::chrono::seconds(60);
+// The stock System row builds its question at 0x1c0c9f0. The Yes command's
+// vtable (0x5344a10), invoke slot +0x10, points at this context-free handler.
+constexpr std::size_t kStockQuit = 0x1c0d050, kStockQuitSize = 0x7f;
 std::uint64_t g_image = 0;
+bool g_desktop_from_game = false;
+bool g_press_start_hook = false;
+std::atomic_bool g_press_start_seen{false};
+std::mutex g_quit_mutex;
+QuitClock::time_point g_quit_deadline{}, g_quit_next{};
+unsigned g_quit_title = 0;
+
+bool StockQuitCompatible(const std::uint8_t* image, std::size_t size) {
+    if (size < kStockQuit + kStockQuitSize) return false;
+    std::uint64_t hash = 14695981039346656037ull;
+    for (auto byte : std::span(image + kStockQuit, kStockQuitSize))
+        hash = (hash ^ byte) * 1099511628211ull;
+    return hash == 0x3b02df0d851ff3ceull;
+}
+
+void GUEST QuitFromGameYes(std::int64_t, std::int64_t) {
+    {
+        std::lock_guard lock(g_quit_mutex);
+        if (g_quit_deadline != QuitClock::time_point{}) return;
+        g_quit_deadline = QuitClock::now() + kQuitWait;
+        g_quit_title = 0;
+    }
+    host_log("pc-options: Quit to Desktop requested; running the game's normal save and return to title");
+    Call(g_image + kStockQuit, 0, 0);
+}
+
+void GUEST QuitFromTitleYes(std::int64_t, std::int64_t) {
+    std::lock_guard lock(g_quit_mutex);
+    if (g_quit_deadline != QuitClock::time_point{}) return;
+    const auto now = QuitClock::now();
+    g_quit_title = bbgpu_save_backups_title();
+    g_quit_next = now;
+    g_quit_deadline = now + kQuitWait;
+}
+
+void* GUEST QuitOpener(void* out, void* factory) {
+    return OptionRows::AskYesNo(out, factory, kQuitQuestion, &QuitFromGameYes);
+}
+
+void* GUEST TitleQuitOpener(void* out, void* factory) {
+    return OptionRows::AskYesNo(out, factory, kQuitQuestion, &QuitFromTitleYes);
+}
+
 void* GUEST SystemList(void* out, void* builder, void* functor) {
     for (int s = 0; s < kSectionCount; ++s)
         if (g_offered[s]) OptionRows::AddCommand(builder, g_sections[s].row, kOpeners[s]);
-    OptionRows::AddExitCommand(builder, kQuitRow, &QuitOpener);
+    if (g_desktop_from_game) OptionRows::AddExitCommand(builder, kQuitRow, &QuitOpener);
     Call(g_image + kSystemFinish, out, builder, functor);
     return out;
 }
+void TitleReached() {
+    const auto ticket = bbgpu_save_backups_title();
+    std::lock_guard lock(g_quit_mutex);
+    const auto now = QuitClock::now();
+    if (g_quit_deadline > now && !g_quit_title) {
+        g_quit_title = ticket;
+        g_quit_next = now;
+        g_quit_deadline = now + kQuitWait;
+        host_log("pc-options: title screen reached before menu input; waiting for save completion");
+    }
+}
+
+std::int64_t GUEST OnPressStart(std::uint64_t, std::uint64_t* saved) noexcept {
+    if (saved[Saved::kEntryReturn] == g_image + kPressStartCall + 5)
+        g_press_start_seen.store(true, std::memory_order_relaxed);
+    return 0;
+}
+
 void* GUEST TitleList(void* out, void* builder, void* sprite) {
-    OptionRows::AddExitCommand(builder, kTitleQuitRow, &QuitOpener);
+    if (g_installed) OptionRows::AddExitCommand(builder, kTitleQuitRow, &TitleQuitOpener);
     Call(g_image + kTitleFinish, out, builder, sprite);
+    if (!g_press_start_hook) TitleReached();
     return out;
 }
 
-bool CallSite(const std::uint8_t* image, std::size_t size, std::size_t call, std::size_t target, std::size_t pad) {
-    if (call + 5 > size || pad + sizeof kPadding > size || image[call] != 0xe8) return false;
+void PollDesktopExit() {
+    std::lock_guard lock(g_quit_mutex);
+    if (g_quit_deadline == QuitClock::time_point{}) return;
+    const auto now = QuitClock::now();
+    if (now >= g_quit_deadline) {
+        g_quit_deadline = {};
+        host_log("pc-options: Quit to Desktop canceled while waiting for the title screen or save completion");
+        return;
+    }
+    if (!g_quit_title || now < g_quit_next) return;
+    g_quit_next = now + std::chrono::milliseconds(100);
+    if (!bbgpu_save_backups_hold_for_exit(g_quit_title)) return;
+    if (QueueDesktopExit()) {
+        g_quit_deadline = {};
+        host_log("pc-options: Quit to Desktop after the title screen and completed save");
+    } else {
+        bbgpu_save_backups_cancel_exit();
+    }
+}
+
+bool Calls(const std::uint8_t* image, std::size_t size, std::size_t call, std::size_t target) {
+    if (call + 5 > size || image[call] != 0xe8) return false;
     std::int32_t rel = 0;
     std::memcpy(&rel, image + call + 1, 4);
-    return std::int64_t(call + 5) + rel == std::int64_t(target) && !std::memcmp(image + pad, kPadding, sizeof kPadding);
+    return std::int64_t(call + 5) + rel == std::int64_t(target);
+}
+
+bool CallSite(const std::uint8_t* image, std::size_t size, std::size_t call, std::size_t target, std::size_t pad) {
+    return Calls(image, size, call, target) && pad + sizeof kPadding <= size &&
+           !std::memcmp(image + pad, kPadding, sizeof kPadding);
 }
 constexpr std::size_t kRouteJump = 13;
 struct Route {
@@ -398,6 +494,21 @@ bool BindSettings() {
 }
 
 bool Install(std::uint8_t* image, std::size_t size) {
+    g_image = reinterpret_cast<std::uint64_t>(image);
+    // The Press Start screen comes before the interactive title menu is built.
+    Hook press_start;
+    if (Calls(image, size, kPressStartCall, kPressStart) &&
+        Prepare(press_start, image, size, kPressStart, SiteKind::Entry, HookEntries::kOptionsPressStart, OnPressStart))
+        g_press_start_hook = Commit(std::span(&press_start, 1)) == WriteResult::Applied;
+    g_desktop_from_game = g_press_start_hook && StockQuitCompatible(image, size);
+
+    if (CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad)) {
+        Route route;
+        std::vector<CodePatch> title_patches;
+        RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList), route, title_patches);
+        if (const auto result = WriteCode(title_patches); result != WriteResult::Applied)
+            host_log("pc-options: interactive title menu hook unavailable: %s", Describe(result));
+    }
     auto& settings = BbSettings::Get();
     if (!settings.pc_menus) {
         host_log("pc-options off: turned off in the launcher (Play, Lantern menus in the game)");
@@ -428,7 +539,6 @@ bool Install(std::uint8_t* image, std::size_t size) {
         return false;
     }
 
-    g_image = reinterpret_cast<std::uint64_t>(image);
     OptionRows::Bind(g_image);
     g_offered[kEnhance] = true;
     g_offered[kGraphics] = g_offered[kEffects] = g_offered[kColour] = Graphics::Enabled();
@@ -439,21 +549,19 @@ bool Install(std::uint8_t* image, std::size_t size) {
     const auto name = reinterpret_cast<std::uint64_t>(g_section);
     const std::uint64_t no_name = 0;
     const std::uint8_t sections = kSectionLoopWithOurs;
-    std::array<Route, 2> routes;
+    Route route;
     std::vector<CodePatch> patches{
         {image, kSectionSlot, AsCode(std::span(&no_name, 1)), AsCode(std::span(&name, 1))},
         {image, kSectionLoopEnd + 3, std::span(kSectionLoopBytes).subspan(3, 1), std::span(&sections, 1)}};
-    RouteCall(image, kSystemCall, kSystemPad, reinterpret_cast<const void*>(&SystemList), routes[0], patches);
-    const bool title = CallSite(image, size, kTitleCall, kTitleFinish, kTitlePad);
-    if (title) RouteCall(image, kTitleCall, kTitlePad, reinterpret_cast<const void*>(&TitleList), routes[1], patches);
+    RouteCall(image, kSystemCall, kSystemPad, reinterpret_cast<const void*>(&SystemList), route, patches);
     if (const WriteResult result = WriteCode(patches); result != WriteResult::Applied) {
         for (const auto& path : g_mounted) sys_file_unmount(path.c_str());
         g_mounted.clear();
         host_log("pc-options off: the System list's code %s", Describe(result));
         return false;
     }
-    if (!title) host_log("pc-options: the title's Quit Game left out (its code is not 1.09's)");
     g_installed = true;
+    if (!g_desktop_from_game) host_log("pc-options: in-game Quit to Desktop unavailable for this game image");
     std::string offered;
     for (int s = 0; s < kSectionCount; ++s)
         if (g_offered[s]) offered += std::string(offered.empty() ? "" : ", ") + g_sections[s].name;
@@ -470,7 +578,10 @@ void ListUpdate(std::uint8_t* list, bool focused) {
 }
 
 void Tick() {
+    // Service the notification after returning to the game's frame loop.
+    if (g_press_start_seen.exchange(false, std::memory_order_relaxed)) TitleReached();
     if (!g_installed) return;
+    PollDesktopExit();
     bool changed = false, picture = false;
     for (Section& section : g_sections) {
         if (!section.shown) continue;

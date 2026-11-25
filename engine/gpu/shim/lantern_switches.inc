@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+X(save_backups, "BB_SAVE_BACKUPS", Bool, "1", 0, 1, StartOnly, NoStep, LANTERN_SW_LEGACY)
+X(save_backup_dir, "BB_SAVE_BACKUP_DIR", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LEGACY | LANTERN_SW_SECRET)
 X(frame_stats, "BB_FRAME_STATS", Bool, "0", 0, 1, StartOnly, NoStep, 0)
 X(fault_sites, "BB_FAULT_SITES", Bool, "0", 0, 1, StartOnly, NoStep, 0)
 X(steps_off, "LANTERN_STEPS_OFF", Text, "", 0, 0, StartOnly, NoStep, LANTERN_SW_LAUNCHER | LANTERN_SW_SHOW)

@@ -4,6 +4,7 @@
 #endif
 #include "sys.h"
 #include "runtime.h"
+#include "../../gpu/bbgpu.h"
 #include "save_replace.h"
 #include "save_root.h"
 #include "gpu/shim/lantern_diag_c.h"
@@ -174,6 +175,7 @@ static struct {
 } degraded;
 static struct {
     int used, writable;
+    int backup_write;
     uint32_t mode;
     uint64_t mounted_ns;
     char folder[PATH_SIZE], meta[PATH_SIZE];
@@ -566,8 +568,13 @@ void sys_save_data_configure(const char *title) {
     char root[PATH_SIZE], users[PATH_SIZE + 16];
     if (user_root(root, sizeof(root))) return;
     snprintf(users, sizeof(users), "%s/savedata", root);
-    remove_stale_temporaries(users);
-    turn_sound_on_in_saves(users);
+    host_lock(&lock);
+    if (!bbgpu_save_backups_write(1)) {
+        remove_stale_temporaries(users);
+        turn_sound_on_in_saves(users);
+        bbgpu_save_backups_write(0);
+    }
+    host_unlock(&lock);
 }
 
 uint32_t sys_save_data_writable_mounts(void) {
@@ -796,8 +803,14 @@ static SYS_ABI int32_t save_mount(const MountRequest *request, MountResult *resu
         host_unlock(&lock);
         return SAVE_ERROR_MOUNT_FULL;
     }
+    const int backup_write = !(request->mode & MOUNT_READ_ONLY) || !exists;
+    if (backup_write && bbgpu_save_backups_write(1)) {
+        host_unlock(&lock);
+        return SAVE_ERROR_INTERNAL;
+    }
     if (!exists && (make_folders(folder) || make_folders(meta))) {
         int error = errno;
+        if (backup_write) bbgpu_save_backups_write(0);
         host_unlock(&lock);
         printf("Runtime: save data '%s' cannot be created in %s: %s\n", dir->data, base, strerror(error));
         return SAVE_ERROR_INTERNAL;
@@ -808,11 +821,13 @@ static SYS_ABI int32_t save_mount(const MountRequest *request, MountResult *resu
     snprintf(result->point.data, sizeof(result->point.data), "/savedata%d", slot & 15);
     result->status = exists ? 0 : 1;
     if (sys_file_mount(result->point.data, folder)) {
+        if (backup_write) bbgpu_save_backups_write(0);
         host_unlock(&lock);
         printf("Runtime: save data '%s' cannot be mounted: the file mount table is full\n", dir->data);
         return SAVE_ERROR_INTERNAL;
     }
     claim_slot(slot, folder, meta, request->mode, !exists);
+    mounts[slot].backup_write = backup_write;
     host_unlock(&lock);
     if (details_lost) printf("Runtime: save data '%s' was created without its details file\n", dir->data);
     printf("Runtime: save data '%s' mounted at %s (%s%s)\n", dir->data, result->point.data,
@@ -831,6 +846,7 @@ static SYS_ABI int32_t save_umount(const MountPoint *point) {
         sys_file_unmount(point->data);
         writable = mounts[slot].writable;
         held = release_slot(slot, &change);
+        if (mounts[slot].backup_write) bbgpu_save_backups_write(0);
     }
     host_unlock(&lock);
     if (slot >= 0 && options.stats)
@@ -874,7 +890,13 @@ static SYS_ABI int32_t save_set_param(const MountPoint *point, uint32_t type, co
         SaveParam param = {0};
         if (type != PARAM_ALL) (void)load_param(mounts[slot].meta, &param);
         result = apply_param(&param, type, buffer, size) ? 0 : SAVE_ERROR_PARAMETER;
-        stored = result || !store_param(mounts[slot].meta, &param);
+        if (!result) {
+            if (bbgpu_save_backups_write(1)) stored = 0;
+            else {
+                stored = !store_param(mounts[slot].meta, &param);
+                bbgpu_save_backups_write(0);
+            }
+        }
     }
     host_unlock(&lock);
     if (!stored && first_report(&reported.param_write))
@@ -891,7 +913,11 @@ static SYS_ABI int32_t save_icon(const MountPoint *point, const SaveIcon *icon) 
     int stored = 1;
     if (slot >= 0) {
         result = 0;
-        stored = !store_meta_file(mounts[slot].meta, "icon0.png", icon->buffer, (size_t)icon->data_size);
+        if (bbgpu_save_backups_write(1)) stored = 0;
+        else {
+            stored = !store_meta_file(mounts[slot].meta, "icon0.png", icon->buffer, (size_t)icon->data_size);
+            bbgpu_save_backups_write(0);
+        }
     }
     host_unlock(&lock);
     if (!stored && first_report(&reported.icon_write))
@@ -923,10 +949,17 @@ static SYS_ABI int32_t save_delete(const DeleteRequest *request) {
     char base[600], folder[640], meta[680];
     if (save_paths(request->user, request->title ? request->title->data : NULL, request->dir->data, base, folder, meta))
         return SAVE_ERROR_INTERNAL;
+    host_lock(&lock);
     struct stat info;
-    if (stat(folder, &info)) return SAVE_ERROR_NOT_FOUND;
+    if (stat(folder, &info)) { host_unlock(&lock); return SAVE_ERROR_NOT_FOUND; }
+    if (bbgpu_save_backups_write(1)) {
+        host_unlock(&lock);
+        return SAVE_ERROR_INTERNAL;
+    }
     remove_folder(folder);
     remove_folder(meta);
+    bbgpu_save_backups_write(0);
+    host_unlock(&lock);
     printf("Runtime: save data '%s' deleted\n", request->dir->data);
     return 0;
 }
@@ -1005,11 +1038,17 @@ static SYS_ABI int32_t save_setup_memory(int32_t user, uint64_t size, const Save
     char base[600], folder[640];
     if (title_folder(user, NULL, base, sizeof(base))) return SAVE_ERROR_INTERNAL;
     snprintf(folder, sizeof(folder), "%s.memory", base);
-    if (make_folders(folder)) {
-        printf("Runtime: save data memory cannot be created in %s: %s\n", folder, strerror(errno));
+    host_lock(&lock);
+    if (bbgpu_save_backups_write(1)) {
+        host_unlock(&lock);
         return SAVE_ERROR_INTERNAL;
     }
-    host_lock(&lock);
+    if (make_folders(folder)) {
+        printf("Runtime: save data memory cannot be created in %s: %s\n", folder, strerror(errno));
+        bbgpu_save_backups_write(0);
+        host_unlock(&lock);
+        return SAVE_ERROR_INTERNAL;
+    }
     snprintf(memory_file, sizeof(memory_file), "%s/memory.dat", folder);
     FILE *file = fopen(memory_file, "r+b");
     if (!file) file = fopen(memory_file, "w+b");
@@ -1024,6 +1063,7 @@ static SYS_ABI int32_t save_setup_memory(int32_t user, uint64_t size, const Save
     }
     int error = errno;
     int details_lost = !result && param && store_param(folder, param);
+    bbgpu_save_backups_write(0);
     host_unlock(&lock);
     if (details_lost) printf("Runtime: save data memory details were not written; the memory itself is ready\n");
     if (!result) printf("Runtime: save data memory ready (%llu bytes)\n", (unsigned long long)size);
@@ -1035,6 +1075,10 @@ static int32_t memory_transfer(void *buffer, uint64_t size, int64_t offset, int 
     if (!initialized) return SAVE_ERROR_NOT_INITIALIZED;
     if (!buffer || offset < 0) return SAVE_ERROR_PARAMETER;
     host_lock(&lock);
+    if (writing && bbgpu_save_backups_write(1)) {
+        host_unlock(&lock);
+        return SAVE_ERROR_INTERNAL;
+    }
     int32_t result = SAVE_ERROR_INTERNAL;
     if (!memory_size) {
         result = SAVE_ERROR_MEMORY_NOT_READY;
@@ -1051,6 +1095,7 @@ static int32_t memory_transfer(void *buffer, uint64_t size, int64_t offset, int 
             census_add(&census.memory_bytes, size);
         }
     }
+    if (writing) bbgpu_save_backups_write(0);
     host_unlock(&lock);
     return result;
 }

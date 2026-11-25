@@ -87,6 +87,11 @@ def main():
         fact(abs(pad - (call + 5)) < 1 << 31, f'{call:x}: the padding is in rel32 reach')
     t = text(e, 0x1b4a3d0)
     fact(sum(1 for l in t if l == 'call 0x1b4c9a0') >= 4, '1b4a3d0 (the title list) adds its rows with 1b4c9a0')
+    press_start = e.disasm(0x1b3855f, 7)[0]
+    fact(e.cstr(rip(press_start)) == 'PressStart' and e.function(press_start.address)[0] == 0x1b384f0,
+         '1b384f0 builds the Press Start widget separately from the interactive title list')
+    fact(e.callers(0x1b384f0) == [0x1bda58d] and e.function(0x1bda58d)[0] == 0x1bda530,
+         '1bda58d: the Press Start constructor is called from its own factory')
 
     t = text(e, 0x1ae8cc0)
     fact(has(t, 'mov qword ptr [r14], r15', 'mov qword ptr [r14 + 0x30], rbx', 'mov qword ptr [r14 + 0x28], 7',
