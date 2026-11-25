@@ -24,6 +24,14 @@ The launcher persists its automatic-backup switch as `save_backups=1` or `0` in
 `lantern.ini`, so direct engine launches use the same preference. `BB_SAVE_BACKUPS`
 provides the fallback when that key is absent.
 
+## Quit to Desktop
+
+The PC System menu's **Quit to Desktop** uses Bloodborne's normal return-to-title
+confirmation handler on a compatible 1.09 game. The engine waits for the title menu
+and for the live save to be idle before closing. If automatic backups are enabled,
+it also waits for the title backup. A timeout leaves the game running and records the
+reason in the log. The game decides which position and state it records in its save.
+
 ## Named copies and deletion
 
 Both launchers offer **Saves → Create named save…**. Names allow 1–80 letters, numbers,
@@ -66,6 +74,7 @@ out/gpu/save-snapshots-test.exe
 fixture=$(mktemp -d "$PWD/out/save-backup-check-XXXXXX")
 out/gpu/save-snapshots-test.exe --transactions "$fixture/user"
 out/gpu/save-snapshots-test.exe --title-worker "$fixture/title"
+BB_SAVE_BACKUPS=0 out/gpu/save-snapshots-test.exe --quit-without-backups "$fixture/quit"
 python3 tests/test_save_sessions.py out/gpu/save-snapshots-test.exe
 mkdir "$fixture/runtime"
 out/gpu/save-backup-boundaries-test.exe "$fixture/runtime"

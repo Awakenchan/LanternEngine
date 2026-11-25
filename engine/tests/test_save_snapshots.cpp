@@ -5,7 +5,9 @@
 #include <thread>
 extern "C" int bbgpu_save_backups_start(const char* user);
 extern "C" int bbgpu_save_backups_write(int begin);
-extern "C" void bbgpu_save_backups_title(void);
+extern "C" unsigned bbgpu_save_backups_title(void);
+extern "C" int bbgpu_save_backups_hold_for_exit(unsigned title);
+extern "C" void bbgpu_save_backups_cancel_exit(void);
 
 int main(int argc, char** argv) {
     namespace fs = std::filesystem;
@@ -51,9 +53,10 @@ int main(int argc, char** argv) {
         assert(bbgpu_save_backups_start(argv[2]) == 0);
         assert(bbgpu_save_backups_write(1) == 0);
         std::ofstream(user / "savedata/userdata0000") << "partial title progress";
-        bbgpu_save_backups_title();
+        const auto title = bbgpu_save_backups_title();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         assert(!fs::exists(folder));
+        assert(!bbgpu_save_backups_hold_for_exit(title));
         std::ofstream(user / "savedata/userdata0000") << "finished title progress";
         assert(bbgpu_save_backups_write(0) == 0);
         const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -64,12 +67,38 @@ int main(int argc, char** argv) {
                 std::string contents;
                 std::getline(saved, contents);
                 assert(contents == "finished title progress");
-                std::cout << "PASS: title request survives a busy save and copies completed progress\n";
+                while (!bbgpu_save_backups_hold_for_exit(title) && std::chrono::steady_clock::now() < until)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                assert(bbgpu_save_backups_hold_for_exit(title));
+                Lantern::BackupLock other(user, ".save-write.lock");
+                assert(!other && other.Contended());
+                bbgpu_save_backups_cancel_exit();
+                Lantern::BackupLock released(user, ".save-write.lock");
+                assert(released);
+                std::cout << "PASS: title request waits for a write, publishes completed progress and holds the quit guard\n";
                 return 0;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
         assert(!"title backup worker did not publish a completed snapshot");
+    }
+    if (argc == 3 && std::string(argv[1]) == "--quit-without-backups") {
+        const auto user = fs::absolute(argv[2]);
+        fs::create_directories(user / "savedata");
+        std::ofstream(user / "savedata/userdata0000") << "latest save";
+        assert(bbgpu_save_backups_start(argv[2]) == 0);
+        assert(bbgpu_save_backups_write(1) == 0);
+        const auto ticket = bbgpu_save_backups_title();
+        assert(!bbgpu_save_backups_hold_for_exit(ticket));
+        assert(bbgpu_save_backups_write(0) == 0);
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!bbgpu_save_backups_hold_for_exit(ticket) && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        assert(bbgpu_save_backups_hold_for_exit(ticket));
+        assert(!fs::exists(Lantern::BackupFolder(user)));
+        bbgpu_save_backups_cancel_exit();
+        std::cout << "PASS: quit waits for the live write even with automatic backups disabled\n";
+        return 0;
     }
     const auto root = fs::temp_directory_path() / ("lantern-snapshots-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(root / "user/savedata");

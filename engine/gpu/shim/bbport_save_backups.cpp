@@ -30,8 +30,10 @@ bool Enabled(const std::filesystem::path& config) {
 std::filesystem::path active_profile;
 std::unique_ptr<Lantern::BackupLock> writing;
 std::unique_ptr<Lantern::BackupLock> session;
+std::unique_ptr<Lantern::BackupLock> exit_guard; // used by the menu quit flow
 unsigned writers = 0; // mutations serialized by the runtime save-data mutex
 std::atomic_uint title_requests{0};
+std::atomic_uint title_completed{0};
 std::condition_variable_any wake;
 std::mutex wake_mutex;
 std::jthread worker; // stop and join before destroying any state it uses
@@ -59,13 +61,30 @@ extern "C" int bbgpu_save_backups_write(int begin) {
     }
 }
 
-extern "C" void bbgpu_save_backups_title(void) {
+extern "C" unsigned bbgpu_save_backups_title(void) {
+    unsigned request;
     {
         std::lock_guard lock(wake_mutex);
-        ++title_requests;
+        request = ++title_requests;
     }
     wake.notify_all();
+    return request;
 }
+
+extern "C" int bbgpu_save_backups_hold_for_exit(unsigned title) {
+    if (!title || title_completed.load() < title || active_profile.empty()) return 0;
+    if (exit_guard) return 1;
+    try {
+        auto lock = std::make_unique<Lantern::BackupLock>(active_profile, ".save-write.lock");
+        if (!*lock) return 0;
+        exit_guard = std::move(lock);
+        return 1;
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+extern "C" void bbgpu_save_backups_cancel_exit(void) { exit_guard.reset(); }
 
 extern "C" int bbgpu_save_backups_start(const char* user) {
     if (worker.joinable()) return 0;
@@ -87,16 +106,15 @@ extern "C" int bbgpu_save_backups_start(const char* user) {
         worker = std::jthread([source, folder, config](std::stop_token stop) {
             Lantern::SaveSnapshots snapshots(source, folder);
             const auto started = std::chrono::steady_clock::now();
-            unsigned completed_title = 0;
             bool warned = false;
             while (!stop.stop_requested()) {
                 const auto request = title_requests.load();
                 if (Enabled(config)) {
                     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-                    const bool title = request != completed_title;
+                    const bool title = request != title_completed.load();
                     const auto result = snapshots.Tick(seconds, title);
                     if (result != Lantern::SnapshotResult::Busy) {
-                        completed_title = request;
+                        title_completed.store(request);
                         warned = false;
                     }
                     if (result == Lantern::SnapshotResult::Created) {
@@ -109,7 +127,7 @@ extern "C" int bbgpu_save_backups_start(const char* user) {
                         warned = true;
                     }
                 } else {
-                    completed_title = request;
+                    title_completed.store(request);
                 }
                 std::unique_lock lock(wake_mutex);
                 wake.wait_for(lock, stop, std::chrono::seconds(5), [request] { return title_requests.load() != request; });
